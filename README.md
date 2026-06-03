@@ -109,7 +109,7 @@ Lingshu Agent 是一个全栈智能体平台，后端基于 FastAPI + PostgreSQL
 | 中文分词 | jieba | BM25 检索的中文分词 |
 | BM25 检索 | rank-bm25 | 关键词稀疏检索，与 Dense 互补 |
 | 文档解析 | PyPDF / stdlib (zipfile+xml) | PDF + DOCX，纯 Python 无额外依赖 |
-| 网络搜索 | DuckDuckGo HTML | 可选，`WEB_SEARCH_ENABLED` 开关 |
+| 网络搜索 | DuckDuckGo HTML / Tavily / SerpAPI | 可选，`WEB_SEARCH_ENABLED` + `WEB_SEARCH_PROVIDER` 开关 |
 | 测试 | PyTest | 单元测试 + 集成测试 + RAG 评测 |
 | 容器化 | Dockerfile.api + docker-compose.yml | 一键部署 |
 
@@ -213,7 +213,9 @@ RAG_REFUSE_WHEN_NO_EVIDENCE=true  # 证据不足时拒答
 
 # 网络搜索
 WEB_SEARCH_ENABLED=true
-WEB_SEARCH_PROVIDER=duckduckgo_html
+WEB_SEARCH_PROVIDER=duckduckgo_html  # 可选：duckduckgo_html / tavily / serpapi
+TAVILY_API_KEY=                     # WEB_SEARCH_PROVIDER=tavily 时必填
+SERPAPI_API_KEY=                    # WEB_SEARCH_PROVIDER=serpapi 时必填
 
 # 其他
 INVITE_API_ENABLED=false          # 邀请 API 开关

@@ -144,7 +144,7 @@ from core.services.user_models import (
     update_user_model_config,
     user_model_payload,
 )
-from core.services.web_search import search_web
+from core.services.web_search import search_web, web_search_status
 
 
 PUBLIC_CHAT_ERRORS = (
@@ -301,13 +301,7 @@ def health():
                 "reason": None if bool(embedding_model and embedding_api_key and not embedding_mock) else _runtime_unavailable_reason(embedding_probe, vector_status),
                 "probe": embedding_probe,
             },
-            "web_search": {
-                "provider": settings.web_search_provider,
-                "enabled": settings.web_search_enabled,
-                "configured": settings.web_search_enabled and settings.web_search_provider == "duckduckgo_html",
-                "requires_api_key": False,
-                "top_k": settings.web_search_top_k,
-            },
+            "web_search": web_search_status(),
             "secret_storage": {
                 "configured": secret_storage_ready(),
             },
@@ -381,7 +375,7 @@ def test_web_search(q: str = Query(min_length=1, max_length=300), membership: Wo
     try:
         return {"ok": True, **search_web(q)}
     except ValueError as exc:
-        return {"ok": False, "query": q, "provider": settings.web_search_provider, "items": [], "error_code": str(exc)}
+        return {"ok": False, "query": q, "provider": web_search_status().get("provider", settings.web_search_provider), "items": [], "error_code": str(exc)}
 
 
 @app.post("/api/auth/register")

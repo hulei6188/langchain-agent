@@ -526,7 +526,8 @@ def _tool_fields(payload: dict, *, partial: bool = False, existing: Tool | None 
 
 def _execute_builtin_search(tool: Tool, context: dict) -> dict:
     query = _search_query(context)
-    top_k = int((tool.search_options or {}).get("top_k") or 3)
+    search_options = tool.search_options or {}
+    top_k = int(search_options.get("top_k") or search_options.get("max_results") or 3)
     search_result = web_search_service.search_web(query, top_k=top_k, timeout_seconds=tool.timeout_seconds)
     items = search_result["items"]
     preview = json.dumps(items, ensure_ascii=False)

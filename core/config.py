@@ -60,6 +60,8 @@ class Settings(BaseSettings):
     web_search_timeout_seconds: int = Field(default=8, alias="WEB_SEARCH_TIMEOUT_SECONDS")
     web_search_max_response_bytes: int = Field(default=512 * 1024, alias="WEB_SEARCH_MAX_RESPONSE_BYTES")
     web_search_user_agent: str = Field(default="LingshuAgent/0.1 (+https://local.lingshu.agent)", alias="WEB_SEARCH_USER_AGENT")
+    tavily_api_key: str | None = Field(default=None, alias="TAVILY_API_KEY")
+    serpapi_api_key: str | None = Field(default=None, alias="SERPAPI_API_KEY")
 
     upload_max_bytes: int = Field(default=8 * 1024 * 1024, alias="UPLOAD_MAX_BYTES")
 

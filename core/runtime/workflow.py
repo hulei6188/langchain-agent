@@ -654,12 +654,13 @@ class WorkflowRunner:
         return {"native": "深度思考", "prompt": "提示词增强", "none": "不支持"}.get(reasoning_type, "不支持")
 
     def _search_status(self, query: str, requested: bool | None) -> dict:
+        provider = web_search_service.web_search_status().get("provider", "duckduckgo_html")
         if not requested:
             return {
                 "enabled": False,
                 "requested": False,
                 "query": query,
-                "provider": "duckduckgo_html",
+                "provider": provider,
                 "matched_results": 0,
                 "sources_emitted": False,
                 "items": [],
@@ -686,7 +687,7 @@ class WorkflowRunner:
                 "enabled": False,
                 "requested": True,
                 "query": query,
-                "provider": "duckduckgo_html",
+                "provider": provider,
                 "matched_results": 0,
                 "sources_emitted": False,
                 "items": [],
