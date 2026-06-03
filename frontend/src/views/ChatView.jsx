@@ -30,7 +30,6 @@ import {
 const CHAT_COPY = {
   noAgentTitle: '暂无可对话的智能体',
   noAgentDesc: '主对话页只开放已审核并上架的智能体。请先发布，普通用户发布后需要管理员审核。',
-  welcomeTitle: '今天想让哪个智能体帮你？',
   welcomeDesc: '选择智能体后可以直接聊天，也可以进入配置页调整能力。',
   promptIntro: '介绍一下你的能力',
   promptPlan: '帮我整理一个方案',
@@ -49,6 +48,16 @@ const CHAT_COPY = {
   on: '开启',
   off: '关闭',
 };
+
+const WELCOME_TITLES = [
+  '我们先从哪里开始呢？',
+  '你在忙什么？',
+  '你今天在想些什么？',
+];
+
+function randomWelcomeTitle() {
+  return WELCOME_TITLES[Math.floor(Math.random() * WELCOME_TITLES.length)];
+}
 
 // Simple utility function to determine check status
 function hasTransferFiles(dt) {
@@ -194,6 +203,8 @@ function ChatHomeV2({
   updateChatVariable,
 }) {
   const currentModel = activeAgent?.user_model_config || activeAgent?.model_config || null;
+  const conversationStarted = Boolean(activeSessionId) || messages.some((message) => message.role === 'user');
+  const [welcomeTitle, setWelcomeTitle] = useState(() => randomWelcomeTitle());
   const ragAvailable = ragRuntime.available;
   const effectiveRagEnabled = ragAvailable && ragEnabled;
   const ragStatus = ragStatusText(ragRuntime, effectiveRagEnabled);
@@ -206,9 +217,14 @@ function ChatHomeV2({
   const attachmentAccept = attachmentAcceptForModel(currentModel);
   const attachmentDisabled = uploadingAttachment || !attachmentAccept;
   const attachmentHint = chatAttachments.length ? `${chatAttachments.length} file ready` : attachmentHintForModel(currentModel);
-  const conversationStarted = Boolean(activeSessionId) || messages.some((message) => message.role === 'user');
   const runtimeWarning = modelWarning || { text: '' }; // Fallback
   const hasChatAgent = chatAgents.length > 0;
+
+  useEffect(() => {
+    if (!conversationStarted) {
+      setWelcomeTitle(randomWelcomeTitle());
+    }
+  }, [activeAgent?.id, conversationStarted]);
 
   return (
     <div className={`chat-home ${conversationStarted ? 'has-conversation' : 'is-empty'}`}>
@@ -222,7 +238,7 @@ function ChatHomeV2({
         ) : !conversationStarted ? (
           <section className="welcome-panel">
             <AgentAvatar value={activeAgent?.avatar || agentForm.avatar || 'AI'} className="welcome-avatar" />
-            <h1>{CHAT_COPY.welcomeTitle}</h1>
+            <h1>{welcomeTitle}</h1>
             <p>{activeAgent?.description || agentForm.description || CHAT_COPY.welcomeDesc}</p>
             <div className="quick-prompts">
               {(agentForm.suggested_questions?.length ? agentForm.suggested_questions : [CHAT_COPY.promptIntro, CHAT_COPY.promptPlan, CHAT_COPY.promptKb]).map((question, index) => (
