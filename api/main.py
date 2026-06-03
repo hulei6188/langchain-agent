@@ -249,7 +249,7 @@ def health():
         database_status["error"] = str(exc)[:240]
         issues.append("Database is configured but not reachable.")
     if not secret_storage_ready():
-        issues.append("API_KEY_ENCRYPTION_KEY or a non-default JWT_SECRET is required before storing user model keys or tool secrets.")
+        issues.append("API_KEY_ENCRYPTION_KEY is required before storing user model keys or tool secrets.")
     if startup_error:
         issues.append("Database initialization failed during startup.")
     redis_status = redis_store.status()
@@ -711,12 +711,30 @@ def create_user_model(request: UserModelConfigRequest, current_user: User = Depe
 
 @app.post("/api/user-models/test")
 def test_user_model_draft(request: UserModelCapabilityTestRequest, current_user: User = Depends(get_current_user)):
+    payload = request.model_dump()
     try:
-        payload = request.model_dump()
         detect_image = bool(payload.pop("detect_image", False))
         return test_user_model_payload(payload, detect_image=detect_image)
     except ValueError as exc:
+        logger.warning(
+            "User model draft test rejected: %s; user_id=%s; fields=%s",
+            str(exc),
+            current_user.id,
+            _user_model_draft_log_context(payload),
+        )
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _user_model_draft_log_context(payload: dict) -> dict:
+    return {
+        "display_name_present": bool(str(payload.get("display_name") or "").strip()),
+        "provider": payload.get("provider"),
+        "base_url_present": bool(str(payload.get("base_url") or "").strip()),
+        "api_key_present": bool(str(payload.get("api_key") or "").strip()),
+        "chat_model_present": bool(str(payload.get("chat_model") or "").strip()),
+        "reasoning_type": payload.get("reasoning_type"),
+        "detect_image": bool(payload.get("detect_image")),
+    }
 
 
 @app.patch("/api/user-models/{config_id}")

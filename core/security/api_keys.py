@@ -14,7 +14,7 @@ DEFAULT_SECRET = "change-me-in-production"
 
 def secret_storage_ready() -> bool:
     settings = get_settings()
-    return bool(settings.api_key_encryption_key) or bool(settings.jwt_secret and settings.jwt_secret != DEFAULT_SECRET)
+    return bool(settings.api_key_encryption_key) or bool(settings.mock_llm)
 
 
 def require_secret_storage_ready() -> None:

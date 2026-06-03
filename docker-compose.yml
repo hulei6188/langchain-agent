@@ -42,6 +42,7 @@
       OPENAI_MODEL: ${OPENAI_MODEL:-qwen-plus}
       OPENAI_EMBEDDING_MODEL: ${OPENAI_EMBEDDING_MODEL:-text-embedding-v4}
       JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
+      API_KEY_ENCRYPTION_KEY: ${API_KEY_ENCRYPTION_KEY:-}
     ports:
       - "8000:8000"
     depends_on:

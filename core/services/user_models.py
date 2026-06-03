@@ -291,12 +291,15 @@ def _config_fields(payload: dict, *, partial: bool = False) -> dict:
     elif "reasoning_type" in data:
         data["reasoning_label"] = _reasoning_label(data["reasoning_type"])
     required = ["display_name", "base_url", "chat_model"]
-    if not partial and any(not data.get(key) for key in required):
-        raise ValueError("Invalid model config")
-    if any(key in data and not data[key] for key in required):
-        raise ValueError("Invalid model config")
+    if not partial:
+        missing = [key for key in required if not data.get(key)]
+        if missing:
+            raise ValueError(f"Invalid model config: {', '.join(missing)} required")
+    empty = [key for key in required if key in data and not data[key]]
+    if empty:
+        raise ValueError(f"Invalid model config: {', '.join(empty)} cannot be empty")
     if "provider" in data and data["provider"] != "openai-compatible":
-        raise ValueError("Invalid model config")
+        raise ValueError("Invalid model config: provider must be openai-compatible")
     return data
 
 
@@ -320,7 +323,7 @@ def _config_data_for_probe(config: UserModelConfig, fields: dict) -> dict:
 def _reasoning_type(value) -> str:
     normalized = str(value or "none").strip()
     if normalized not in {"native", "prompt", "none"}:
-        raise ValueError("Invalid model config")
+        raise ValueError("Invalid model config: reasoning_type must be native, prompt, or none")
     return normalized
 
 

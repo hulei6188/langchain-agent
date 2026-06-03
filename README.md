@@ -181,7 +181,7 @@ langchain/
 ```env
 # 安全密钥
 JWT_SECRET=replace-with-a-long-random-secret
-API_KEY_ENCRYPTION_KEY=          # 可选，用于加密存储用户 API Key
+API_KEY_ENCRYPTION_KEY=replace-with-another-long-random-secret  # 必填，用于加密存储用户 API Key 和工具密钥
 
 # 数据库
 DATABASE_URL=postgresql+psycopg2://lingshu:lingshu@192.168.150.101:5433/lingshu_agent
