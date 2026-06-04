@@ -19,12 +19,13 @@ export function KnowledgeUploadBox({ docForm, setDocForm, uploadDocument, upload
         <UploadCloud size={18} />
         <span>
           <strong>{uploadingKnowledgeFile ? '文件上传中...' : '上传文件到知识库'}</strong>
-          <small>支持 TXT / MD / CSV / PDF / DOCX，单文件不超过 8MB</small>
+          <small>支持 TXT / MD / CSV / PDF / DOCX，可多选，单个文件不超过 8MB</small>
         </span>
         <input
           type="file"
           accept={KNOWLEDGE_FILE_ACCEPT}
           disabled={uploadingKnowledgeFile}
+          multiple
           onChange={(event) => handleKnowledgeFileInput(event, uploadKnowledgeFile)}
         />
       </label>

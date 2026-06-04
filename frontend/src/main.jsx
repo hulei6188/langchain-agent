@@ -177,7 +177,7 @@ function App() {
   const [agentForm, setAgentForm] = useState(defaultAgentForm());
   const [docForm, setDocForm] = useState({ filename: 'guide.txt', text: '这里是一段知识库资料。', kb_id: '' });
   const [uploadingKnowledgeFile, setUploadingKnowledgeFile] = useState(false);
-  const [uploadingFileName, setUploadingFileName] = useState('');
+  const [uploadingKnowledgeItems, setUploadingKnowledgeItems] = useState([]);
   const [view, setView] = useState('home');
   const [activeNav, setActiveNav] = useState('chat');
   const [homePrompt, setHomePrompt] = useState('');
@@ -852,55 +852,175 @@ function App() {
     await bootstrap();
   }
 
-  async function uploadKnowledgeFile(file) {
-    if (!file || !token) return;
-    const kbId = Number(docForm.kb_id || knowledgeBases[0]?.id);
+  async function uploadKnowledgeFile(fileOrFiles, targetKbId = null) {
+    const files = Array.isArray(fileOrFiles) ? fileOrFiles.filter(Boolean) : [fileOrFiles].filter(Boolean);
+    if (!files.length || !token) return;
+    const kbId = Number(targetKbId || docForm.kb_id || knowledgeBases[0]?.id);
     if (!kbId) {
       setError('请先创建或选择知识库。');
       return;
     }
+    const uploadBatchId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const uploadItems = files.map((file, index) => ({
+      id: `${uploadBatchId}-${index}`,
+      kbId,
+      filename: file.name,
+      status: 'queued',
+      statusText: '等待上传',
+    }));
+    const updateUploadItem = (index, patch) => {
+      const itemId = uploadItems[index]?.id;
+      if (!itemId) return;
+      setUploadingKnowledgeItems((items) => items.map((item) => (item.id === itemId ? { ...item, ...patch } : item)));
+    };
     setUploadingKnowledgeFile(true);
-    setUploadingFileName(file.name);
+    setUploadingKnowledgeItems((items) => [...items, ...uploadItems]);
     setError('');
     try {
-      validateKnowledgeFile(file);
-      const contentType = file.type || guessContentType(file.name);
-      const contentBase64 = await fileToBase64(file);
-      await api(`/api/knowledge-bases/${kbId}/documents`, {
-        token,
-        method: 'POST',
-        body: {
-          filename: file.name,
-          title: file.name,
-          content_type: contentType,
-          content_base64: contentBase64,
-          source_type: 'file',
-        },
-      });
-      setDocForm((form) => ({ ...form, filename: file.name, text: '', kb_id: String(kbId) }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      const documents = [];
+      const preparationErrors = [];
+      for (const [index, file] of files.entries()) {
+        try {
+          updateUploadItem(index, { status: 'reading', statusText: '读取文件' });
+          validateKnowledgeFile(file);
+          const contentType = file.type || guessContentType(file.name);
+          const contentBase64 = await fileToBase64(file);
+          documents.push({
+            uploadIndex: index,
+            filename: file.name,
+            title: file.name,
+            content_type: contentType,
+            content_base64: contentBase64,
+            source_type: 'file',
+          });
+          updateUploadItem(index, { status: 'queued', statusText: '等待上传' });
+        } catch (prepareErr) {
+          preparationErrors.push({ filename: file.name, message: errorMessage(prepareErr) });
+          updateUploadItem(index, { status: 'failed', statusText: errorMessage(prepareErr) });
+        }
+      }
+      if (!documents.length) {
+        const firstError = preparationErrors[0];
+        setError(firstError ? `${firstError.filename} ${firstError.message}` : '没有可上传的文档。');
+        return;
+      }
+      const requestDocuments = documents.map(({ uploadIndex, ...document }) => document);
+      if (documents.length > 1) {
+        let result;
+        try {
+          setUploadingKnowledgeItems((items) => items.map((item) => (
+            documents.some((document) => uploadItems[document.uploadIndex]?.id === item.id)
+              ? { ...item, status: 'uploading', statusText: '上传并索引中' }
+              : item
+          )));
+          result = await api(`/api/knowledge-bases/${kbId}/documents/batch`, {
+            token,
+            method: 'POST',
+            body: { documents: requestDocuments },
+          });
+        } catch (err) {
+          if (err?.status !== 404 && err?.status !== 405) throw err;
+          result = { succeeded: 0, failed: 0, errors: [] };
+          for (const [requestIndex, document] of requestDocuments.entries()) {
+            const uploadIndex = documents[requestIndex].uploadIndex;
+            updateUploadItem(uploadIndex, { status: 'uploading', statusText: '上传并索引中' });
+            try {
+              await api(`/api/knowledge-bases/${kbId}/documents`, {
+                token,
+                method: 'POST',
+                body: document,
+              });
+              result.succeeded += 1;
+              updateUploadItem(uploadIndex, { status: 'indexed', statusText: '已上传并索引' });
+            } catch (singleErr) {
+              result.failed += 1;
+              updateUploadItem(uploadIndex, { status: 'failed', statusText: errorMessage(singleErr) });
+              result.errors.push({
+                filename: document.filename,
+                message: errorMessage(singleErr),
+              });
+            }
+          }
+        }
+        if (result.documents || result.errors) {
+          const failedRequestIndexes = new Map((result.errors || []).map((item) => [Number(item.index), item]));
+          requestDocuments.forEach((document, requestIndex) => {
+            const uploadIndex = documents[requestIndex].uploadIndex;
+            const failed = failedRequestIndexes.get(requestIndex);
+            updateUploadItem(uploadIndex, failed
+              ? { status: 'failed', statusText: failed.message || '上传失败' }
+              : { status: 'indexed', statusText: '已上传并索引' });
+          });
+        }
+        if (result.failed) {
+          const firstError = result.errors?.[0];
+          setError(`${result.succeeded || 0} 个文档上传成功，${result.failed} 个失败${firstError ? `：${firstError.filename || '文档'} ${firstError.message || ''}` : '。'}`);
+        }
+      } else {
+        const uploadIndex = documents[0].uploadIndex;
+        updateUploadItem(uploadIndex, { status: 'uploading', statusText: '上传并索引中' });
+        await api(`/api/knowledge-bases/${kbId}/documents`, {
+          token,
+          method: 'POST',
+          body: requestDocuments[0],
+        });
+        updateUploadItem(uploadIndex, { status: 'indexed', statusText: '已上传并索引' });
+      }
+      const lastFile = files[files.length - 1];
+      setDocForm((form) => ({ ...form, filename: lastFile.name, text: '', kb_id: String(kbId) }));
       await loadDocuments(kbId);
       await bootstrap();
     } catch (err) {
-      setError(errorMessage(err));
+      const message = errorMessage(err);
+      setError(message);
+      setUploadingKnowledgeItems((items) => items.map((item) => (
+        uploadItems.some((uploadItem) => uploadItem.id === item.id) && item.status !== 'indexed'
+          ? { ...item, status: 'failed', statusText: message }
+          : item
+      )));
     } finally {
       setUploadingKnowledgeFile(false);
-      setUploadingFileName('');
+      setTimeout(() => {
+        setUploadingKnowledgeItems((items) => items.filter((item) => !uploadItems.some((uploadItem) => uploadItem.id === item.id)));
+      }, 1800);
     }
   }
 
-  async function deleteDocument(documentId) {
-    if (!activeKbId || !documentId) return;
+  async function deleteDocument(documentId, targetKbId = null) {
+    const kbId = Number(targetKbId || activeKbId);
+    if (!kbId || !documentId) return false;
     const document = documents.find((item) => item.id === documentId);
     const confirmed = await requestDeleteConfirm({
       title: '删除知识文档',
       message: `\u5220\u9664\u6587\u6863\u300c${document?.title || document?.filename || `document-${documentId}`}\u300d\uff1f`,
-      detail: '该文档的分块和索引会一起删除。',
+      detail: '该文档在 PostgreSQL 中的记录、分块，以及 Milvus 中的向量索引会一起删除。',
       confirmLabel: '删除文档',
     });
-    if (!confirmed) return;
-    await api(`/api/knowledge-bases/${activeKbId}/documents/${documentId}`, { token, method: 'DELETE' });
-    await loadDocuments(activeKbId);
+    if (!confirmed) return false;
+    await api(`/api/knowledge-bases/${kbId}/documents/${documentId}`, { token, method: 'DELETE' });
+    await loadDocuments(kbId);
     await bootstrap();
+    notify('知识文档已删除。');
+    return true;
+  }
+
+  async function clearKnowledgeBaseDocuments(kb) {
+    if (!kb?.id) return false;
+    const confirmed = await requestDeleteConfirm({
+      title: '清除文档库',
+      message: `清空知识库「${kb.name || '未命名知识库'}」中的所有文档？`,
+      detail: '知识库本身会保留，但 PostgreSQL 中的所有文档、分块，以及 Milvus 中该知识库的向量索引会一起删除。',
+      confirmLabel: '清除文档库',
+    });
+    if (!confirmed) return false;
+    const result = await api(`/api/knowledge-bases/${kb.id}/documents`, { token, method: 'DELETE' });
+    if (String(activeKbId) === String(kb.id)) {
+      setDocuments([]);
+    }
+    await bootstrap();
+    notify(`已清除 ${result.documents_deleted ?? 0} 个文档。`);
+    return true;
   }
 
   async function deleteKnowledgeBase(kb) {
@@ -1294,6 +1414,7 @@ function App() {
     chatAgents,
     chatAttachments,
     chatVariables,
+    clearKnowledgeBaseDocuments,
     copyMarketAgent,
     copyBuiltinPromptTemplate,
     createAgent,
@@ -1371,7 +1492,7 @@ function App() {
     uploadChatAttachment,
     uploadingAttachment,
     uploadingKnowledgeFile,
-    uploadingFileName,
+    uploadingKnowledgeItems,
     uploadDocument,
     uploadKnowledgeFile,
     loadDocuments,
@@ -1460,6 +1581,7 @@ function HomeView(props) {
     chatAgents,
     chatAttachments,
     chatVariables,
+    clearKnowledgeBaseDocuments,
     copyBuiltinPromptTemplate,
     copyMarketAgent,
     createAgent,
@@ -1518,7 +1640,7 @@ function HomeView(props) {
     uploadChatAttachment,
     uploadingAttachment,
     uploadingKnowledgeFile,
-    uploadingFileName,
+    uploadingKnowledgeItems,
     uploadDocument,
     uploadKnowledgeFile,
     loadDocuments,
@@ -1818,6 +1940,7 @@ function HomeView(props) {
         {activeNav === 'knowledge' && (
           <KnowledgeHome
             canManage={canManage}
+            clearKnowledgeBaseDocuments={clearKnowledgeBaseDocuments}
             createKnowledgeBase={createKnowledgeBase}
             updateKnowledgeBase={updateKnowledgeBase}
             deleteDocument={deleteDocument}
@@ -1829,7 +1952,7 @@ function HomeView(props) {
             setProfileError={setProfileError}
             token={token}
             uploadingKnowledgeFile={uploadingKnowledgeFile}
-            uploadingFileName={uploadingFileName}
+            uploadingKnowledgeItems={uploadingKnowledgeItems}
             uploadDocument={uploadDocument}
             uploadKnowledgeFile={uploadKnowledgeFile}
             loadDocuments={loadDocuments}
@@ -2228,6 +2351,7 @@ function SecretInputDialog({ label = '密钥', message, onCancel, onSubmit, plac
 
 function KnowledgeHome({
   canManage,
+  clearKnowledgeBaseDocuments,
   createKnowledgeBase,
   updateKnowledgeBase,
   deleteDocument,
@@ -2238,7 +2362,7 @@ function KnowledgeHome({
   setDocForm,
   setProfileError,
   uploadingKnowledgeFile,
-  uploadingFileName,
+  uploadingKnowledgeItems,
   uploadDocument,
   uploadKnowledgeFile,
   token,
@@ -2312,13 +2436,14 @@ function KnowledgeHome({
       ) : (
         <KnowledgeWorkspace
           kb={selectedKb}
+          clearKnowledgeBaseDocuments={clearKnowledgeBaseDocuments}
           documents={documents}
           deleteDocument={deleteDocument}
           updateKnowledgeBase={updateKnowledgeBase}
           uploadDocument={uploadDocument}
           uploadKnowledgeFile={uploadKnowledgeFile}
           uploadingKnowledgeFile={uploadingKnowledgeFile}
-          uploadingFileName={uploadingFileName}
+          uploadingKnowledgeItems={uploadingKnowledgeItems}
           docForm={docForm}
           setDocForm={setDocForm}
           handleBack={handleBack}
@@ -2504,13 +2629,14 @@ function KnowledgeDashboard({
 
 function KnowledgeWorkspace({
   kb,
+  clearKnowledgeBaseDocuments,
   documents,
   deleteDocument,
   updateKnowledgeBase,
   uploadDocument,
   uploadKnowledgeFile,
   uploadingKnowledgeFile,
-  uploadingFileName,
+  uploadingKnowledgeItems = [],
   docForm,
   setDocForm,
   handleBack,
@@ -2593,6 +2719,9 @@ function KnowledgeWorkspace({
       (doc.title || doc.filename || '').toLowerCase().includes(docSearchQuery.toLowerCase())
     );
   }, [documents, docSearchQuery]);
+  const visibleUploadingItems = useMemo(() => {
+    return uploadingKnowledgeItems.filter((item) => !item.kbId || item.kbId === kb?.id);
+  }, [uploadingKnowledgeItems, kb?.id]);
 
   // Autoselect first document if none selected
   useEffect(() => {
@@ -2609,6 +2738,8 @@ function KnowledgeWorkspace({
   const [pasteFilename, setPasteFilename] = useState('粘贴文档.txt');
   const [pasteText, setPasteText] = useState('');
   const [pasteSubmitting, setPasteSubmitting] = useState(false);
+  const [deletingDocId, setDeletingDocId] = useState(null);
+  const [clearingDocuments, setClearingDocuments] = useState(false);
 
   async function handlePasteSubmit(e) {
     e.preventDefault();
@@ -2638,6 +2769,34 @@ function KnowledgeWorkspace({
       console.error(err);
     } finally {
       setPasteSubmitting(false);
+    }
+  }
+
+  async function handleDeleteActiveDoc() {
+    if (!activeDoc?.id || deletingDocId) return;
+    setDeletingDocId(activeDoc.id);
+    try {
+      const deleted = await deleteDocument(activeDoc.id, kb?.id);
+      if (deleted) {
+        setActiveDoc(null);
+        setChunks([]);
+      }
+    } finally {
+      setDeletingDocId(null);
+    }
+  }
+
+  async function handleClearDocuments() {
+    if (!kb?.id || clearingDocuments) return;
+    setClearingDocuments(true);
+    try {
+      const cleared = await clearKnowledgeBaseDocuments(kb);
+      if (cleared) {
+        setActiveDoc(null);
+        setChunks([]);
+      }
+    } finally {
+      setClearingDocuments(false);
     }
   }
 
@@ -2686,36 +2845,48 @@ function KnowledgeWorkspace({
           </div>
         </div>
         <div className="workspace-header-actions">
+          <div className="add-content-wrapper">
+            <button
+              className="primary"
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                setAddDropdownOpen(!addDropdownOpen);
+              }}
+            >
+              <Plus size={16} />添加内容
+            </button>
+            {addDropdownOpen && (
+              <div className="add-dropdown-menu" onClick={(e) => e.stopPropagation()}>
+                <button type="button" onClick={() => { setAddDropdownOpen(false); triggerLocalFileInput(); }}>
+                  💻 本地文档
+                </button>
+                <button type="button" onClick={() => { setAddDropdownOpen(false); setCustomInputOpen(true); }}>
+                  📝 自定义输入
+                </button>
+              </div>
+            )}
+          </div>
           <button
-            className="primary"
+            className="btn-clear-documents"
             type="button"
-            onClick={(e) => {
-              e.stopPropagation();
-              setAddDropdownOpen(!addDropdownOpen);
-            }}
+            onClick={handleClearDocuments}
+            disabled={clearingDocuments || !documents.length}
+            title="清空该知识库中的所有文档"
           >
-            <Plus size={16} />添加内容
+            <Trash2 size={15} />{clearingDocuments ? '清除中...' : '清除文档库'}
           </button>
-          {addDropdownOpen && (
-            <div className="add-dropdown-menu" onClick={(e) => e.stopPropagation()}>
-              <button type="button" onClick={() => { setAddDropdownOpen(false); triggerLocalFileInput(); }}>
-                💻 本地文档
-              </button>
-              <button type="button" onClick={() => { setAddDropdownOpen(false); setCustomInputOpen(true); }}>
-                📝 自定义输入
-              </button>
-            </div>
-          )}
           <input
             type="file"
             ref={fileInputRef}
             style={{ display: 'none' }}
             accept={KNOWLEDGE_FILE_ACCEPT}
+            multiple
             onChange={(event) => {
               if (setDocForm) {
                 setDocForm((form) => ({ ...form, kb_id: String(kb.id) }));
               }
-              handleKnowledgeFileInput(event, uploadKnowledgeFile);
+              handleKnowledgeFileInput(event, (file) => uploadKnowledgeFile(file, kb.id));
             }}
           />
         </div>
@@ -2735,20 +2906,51 @@ function KnowledgeWorkspace({
           </div>
 
           <div className="workspace-doc-list">
-            {uploadingKnowledgeFile && (
-              <div className="workspace-doc-row uploading active" style={{ opacity: 0.85, cursor: 'default', borderLeft: '3px solid #4d43e6', background: 'rgba(77, 67, 230, 0.03)', display: 'flex', alignItems: 'center', padding: '10px 12px', borderBottom: '1px solid #e5e7eb', gap: '8px' }}>
-                <span className="coze-spinner"></span>
-                <div className="doc-row-details" style={{ minWidth: 0, flex: 1 }}>
-                  <strong style={{ color: '#4d43e6', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'block', fontSize: '13px' }}>{uploadingFileName || '正在上传文档...'}</strong>
-                  <small style={{ color: '#667085', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'block', fontSize: '11px', marginTop: '2px' }}>
-                    正在解析切片向量化...
-                  </small>
+            {visibleUploadingItems.map((item) => {
+              const failed = item.status === 'failed';
+              const done = item.status === 'indexed';
+              const active = !failed && !done;
+              const label = failed ? '失败' : done ? '完成' : '上传中';
+              const statusClass = failed ? 'failed' : done ? 'indexed' : 'indexing';
+              const color = failed ? '#b42318' : done ? '#027a48' : '#4d43e6';
+              const background = failed ? 'rgba(180, 35, 24, 0.04)' : done ? 'rgba(2, 122, 72, 0.04)' : 'rgba(77, 67, 230, 0.03)';
+              return (
+                <div
+                  key={item.id}
+                  className={`workspace-doc-row uploading active upload-${item.status}`}
+                  style={{
+                    opacity: 0.9,
+                    cursor: 'default',
+                    borderLeft: `3px solid ${color}`,
+                    background,
+                    display: 'flex',
+                    alignItems: 'center',
+                    padding: '10px 12px',
+                    borderBottom: '1px solid #e5e7eb',
+                    gap: '8px',
+                  }}
+                >
+                  {active ? (
+                    <span className="coze-spinner"></span>
+                  ) : done ? (
+                    <Check size={14} color={color} />
+                  ) : (
+                    <FileX2 size={14} color={color} />
+                  )}
+                  <div className="doc-row-details" style={{ minWidth: 0, flex: 1 }}>
+                    <strong style={{ color, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'block', fontSize: '13px' }}>
+                      {item.filename || '正在上传文档...'}
+                    </strong>
+                    <small style={{ color: '#667085', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'block', fontSize: '11px', marginTop: '2px' }}>
+                      {item.statusText || '正在解析切片向量化...'}
+                    </small>
+                  </div>
+                  <span className={`document-status ${statusClass}`} style={{ whiteSpace: 'nowrap', flexShrink: 0 }}>
+                    {label}
+                  </span>
                 </div>
-                <span className="document-status indexing" style={{ background: 'rgba(77, 67, 230, 0.08)', color: '#4d43e6', fontSize: '11px', padding: '2px 6px', borderRadius: '4px', whiteSpace: 'nowrap', flexShrink: 0, fontWeight: 600 }}>
-                  上传中
-                </span>
-              </div>
-            )}
+              );
+            })}
             {filteredDocs.map((doc) => {
               const isActive = activeDoc?.id === doc.id;
               const status = doc.status || 'uploaded';
@@ -2776,9 +2978,10 @@ function KnowledgeWorkspace({
                     title="删除文档"
                     onClick={(e) => {
                       e.stopPropagation();
-                      deleteDocument(doc.id).then(() => {
-                        if (activeDoc?.id === doc.id) {
+                      deleteDocument(doc.id, kb?.id).then((deleted) => {
+                        if (deleted && activeDoc?.id === doc.id) {
                           setActiveDoc(null);
+                          setChunks([]);
                         }
                       });
                     }}
@@ -2801,13 +3004,23 @@ function KnowledgeWorkspace({
               <div className="doc-detail-header-card">
                 <div className="doc-meta-title-row">
                   <h4>{activeDoc.title || activeDoc.filename}</h4>
-                  <button
-                    className="btn-resegment-trigger"
-                    type="button"
-                    onClick={() => setResegmentOpen(true)}
-                  >
-                    重新切片/调参
-                  </button>
+                  <div className="doc-detail-actions">
+                    <button
+                      className="btn-resegment-trigger"
+                      type="button"
+                      onClick={() => setResegmentOpen(true)}
+                    >
+                      <Settings2 size={14} />重新切片/调参
+                    </button>
+                    <button
+                      className="btn-delete-active-doc"
+                      type="button"
+                      onClick={handleDeleteActiveDoc}
+                      disabled={deletingDocId === activeDoc.id}
+                    >
+                      <FileX2 size={14} />{deletingDocId === activeDoc.id ? '删除中...' : '删除文档'}
+                    </button>
+                  </div>
                 </div>
                 <div className="doc-meta-grid">
                   <div className="meta-item">

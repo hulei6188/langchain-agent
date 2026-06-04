@@ -24,6 +24,7 @@ from api.schemas import (
     InviteAcceptRequest,
     InviteCreateRequest,
     KnowledgeBaseCreateRequest,
+    KnowledgeDocumentBatchCreateRequest,
     KnowledgeDocumentCreateRequest,
     LoginRequest,
     MemoryProfileUpdateRequest,
@@ -95,6 +96,7 @@ from core.services.bootstrap import (
 from core.services.knowledge import (
     KnowledgeDocumentError,
     add_document,
+    clear_knowledge_base_documents,
     create_knowledge_base,
     delete_document,
     delete_knowledge_base,
@@ -368,6 +370,29 @@ def _runtime_unavailable_reason(probe: dict, vector_status: dict) -> str:
 def _sanitize_public_error(message: str) -> str:
     cleaned = re.sub(r"(?i)(sk-[A-Za-z0-9_-]+|api[_-]?key\s*[:=]\s*\S+|secret\s*[:=]\s*\S+)", "[secret]", str(message))
     return cleaned.replace("\n", " ").replace("\r", " ").strip()[:500]
+
+
+def add_knowledge_document_from_request(
+    db: Session,
+    *,
+    workspace_id: int,
+    kb: KnowledgeBase,
+    request: KnowledgeDocumentCreateRequest,
+) -> tuple[KnowledgeDocument, dict]:
+    document = add_document(
+        db,
+        workspace_id=workspace_id,
+        kb=kb,
+        filename=request.filename,
+        title=request.title,
+        text=request.text,
+        content=request.content,
+        content_type=request.content_type,
+        content_base64=request.content_base64,
+        source_type=request.source_type,
+    )
+    payload = document_payload(document, db.query(KnowledgeChunk).filter(KnowledgeChunk.document_id == document.id).count())
+    return document, payload
 
 
 @app.get("/api/search/test")
@@ -1003,19 +1028,16 @@ def create_kb(request: KnowledgeBaseCreateRequest, membership: WorkspaceMember =
 def upload_document(kb_id: int, request: KnowledgeDocumentCreateRequest, membership: WorkspaceMember = Depends(get_current_membership), db: Session = Depends(get_db)):
     kb = require_workspace_kb(db, membership.workspace_id, kb_id)
     require_kb_write_access(kb, membership)
+    logger.info(
+        "Knowledge document upload request: schema=%s kb_id=%s workspace_id=%s filename=%s source_type=%s",
+        request.__class__.__name__,
+        kb.id,
+        membership.workspace_id,
+        request.filename or request.title or "",
+        request.source_type,
+    )
     try:
-        document = add_document(
-            db,
-            workspace_id=membership.workspace_id,
-            kb=kb,
-            filename=request.filename,
-            title=request.title,
-            text=request.text,
-            content=request.content,
-            content_type=request.content_type,
-            content_base64=request.content_base64,
-            source_type=request.source_type,
-        )
+        document, payload = add_knowledge_document_from_request(db, workspace_id=membership.workspace_id, kb=kb, request=request)
     except KnowledgeDocumentError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     except RuntimeError as exc:
@@ -1026,10 +1048,69 @@ def upload_document(kb_id: int, request: KnowledgeDocumentCreateRequest, members
         db.rollback()
         logger.exception("Knowledge document upload failed")
         raise HTTPException(status_code=500, detail={"message": "Knowledge document upload failed.", "error_code": "knowledge_upload_failed"}) from exc
-    payload = document_payload(document, db.query(KnowledgeChunk).filter(KnowledgeChunk.document_id == document.id).count())
     if document.status == "failed":
         raise HTTPException(status_code=422, detail={"message": document.error_message or "Document text extraction failed", "document": payload})
     return {"document": payload}
+
+
+@app.post("/api/knowledge-bases/{kb_id}/documents/batch")
+def upload_documents_batch(kb_id: int, request: KnowledgeDocumentBatchCreateRequest, membership: WorkspaceMember = Depends(get_current_membership), db: Session = Depends(get_db)):
+    kb = require_workspace_kb(db, membership.workspace_id, kb_id)
+    require_kb_write_access(kb, membership)
+    logger.info(
+        "Knowledge document upload request: schema=%s kb_id=%s workspace_id=%s count=%s filenames=%s",
+        request.__class__.__name__,
+        kb.id,
+        membership.workspace_id,
+        len(request.documents),
+        [item.filename or item.title or f"document-{index + 1}" for index, item in enumerate(request.documents)],
+    )
+    documents = []
+    errors = []
+
+    for index, item in enumerate(request.documents):
+        filename = item.filename or item.title or f"document-{index + 1}"
+        try:
+            document, payload = add_knowledge_document_from_request(db, workspace_id=membership.workspace_id, kb=kb, request=item)
+            if document.status == "failed":
+                errors.append({
+                    "index": index,
+                    "filename": filename,
+                    "message": document.error_message or "Document text extraction failed",
+                    "document": payload,
+                })
+            else:
+                documents.append(payload)
+        except KnowledgeDocumentError as exc:
+            db.rollback()
+            errors.append({"index": index, "filename": filename, "message": str(exc), "status_code": exc.status_code})
+        except RuntimeError as exc:
+            db.rollback()
+            logger.exception("Knowledge document batch indexing failed")
+            errors.append({
+                "index": index,
+                "filename": filename,
+                "message": _sanitize_public_error(str(exc)),
+                "error_code": "knowledge_index_failed",
+            })
+        except Exception as exc:
+            db.rollback()
+            logger.exception("Knowledge document batch upload failed")
+            errors.append({
+                "index": index,
+                "filename": filename,
+                "message": "Knowledge document upload failed.",
+                "error_code": "knowledge_upload_failed",
+            })
+
+    payload = {
+        "documents": documents,
+        "errors": errors,
+        "total": len(request.documents),
+        "succeeded": len(documents),
+        "failed": len(errors),
+    }
+    return payload
 
 
 @app.get("/api/knowledge-bases/{kb_id}/documents")
@@ -1047,6 +1128,31 @@ def list_documents(kb_id: int, membership: WorkspaceMember = Depends(get_current
     }
 
 
+@app.delete("/api/knowledge-bases/{kb_id}/documents")
+def clear_documents(kb_id: int, membership: WorkspaceMember = Depends(get_current_membership), db: Session = Depends(get_db)):
+    kb = require_workspace_kb(db, membership.workspace_id, kb_id)
+    require_kb_write_access(kb, membership)
+    try:
+        summary = clear_knowledge_base_documents(db, workspace_id=membership.workspace_id, kb=kb)
+    except Exception as exc:
+        db.rollback()
+        logger.exception(
+            "Knowledge base documents clear failed: kb_id=%s workspace_id=%s",
+            kb.id,
+            membership.workspace_id,
+        )
+        raise HTTPException(status_code=500, detail={"message": "Knowledge base documents clear failed.", "error_code": "knowledge_documents_clear_failed"}) from exc
+    logger.info(
+        "Knowledge base documents cleared: kb_id=%s workspace_id=%s documents_deleted=%s chunks_deleted=%s vectors_delete_requested=%s",
+        kb.id,
+        membership.workspace_id,
+        summary.get("documents_deleted", 0),
+        summary.get("chunks_deleted", 0),
+        summary.get("vectors_delete_requested", False),
+    )
+    return {"cleared": True, **summary}
+
+
 @app.delete("/api/knowledge-bases/{kb_id}/documents/{document_id}")
 def remove_document(kb_id: int, document_id: int, membership: WorkspaceMember = Depends(get_current_membership), db: Session = Depends(get_db)):
     kb = require_workspace_kb(db, membership.workspace_id, kb_id)
@@ -1054,8 +1160,26 @@ def remove_document(kb_id: int, document_id: int, membership: WorkspaceMember = 
     document = db.query(KnowledgeDocument).filter(KnowledgeDocument.knowledge_base_id == kb.id, KnowledgeDocument.id == document_id).first()
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
-    delete_document(db, workspace_id=membership.workspace_id, document=document)
-    return {"deleted": True}
+    try:
+        summary = delete_document(db, workspace_id=membership.workspace_id, document=document)
+    except Exception as exc:
+        db.rollback()
+        logger.exception(
+            "Knowledge document delete failed: kb_id=%s document_id=%s workspace_id=%s",
+            kb.id,
+            document_id,
+            membership.workspace_id,
+        )
+        raise HTTPException(status_code=500, detail={"message": "Knowledge document delete failed.", "error_code": "knowledge_document_delete_failed"}) from exc
+    logger.info(
+        "Knowledge document deleted: kb_id=%s document_id=%s workspace_id=%s chunks_deleted=%s vectors_delete_requested=%s",
+        kb.id,
+        document_id,
+        membership.workspace_id,
+        summary.get("chunks_deleted", 0),
+        summary.get("vectors_delete_requested", False),
+    )
+    return {"deleted": True, **summary}
 
 
 @app.post("/api/knowledge-bases/{kb_id}/index")

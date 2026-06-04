@@ -680,10 +680,10 @@ function validateKnowledgeFile(file) {
 }
 
 async function handleKnowledgeFileInput(event, uploadKnowledgeFile) {
-  const file = event.target.files?.[0];
+  const files = filesFromList(event.target.files);
   event.target.value = '';
-  if (!file) return;
-  await uploadKnowledgeFile(file);
+  if (!files.length) return;
+  await uploadKnowledgeFile(files.length === 1 ? files[0] : files);
 }
 
 async function handleAttachmentInput(event, uploadChatAttachment) {

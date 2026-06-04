@@ -280,21 +280,48 @@ def index_document(
     return len(chunks)
 
 
-def delete_document(db: Session, *, workspace_id: int, document: KnowledgeDocument) -> None:
-    chunks = db.query(KnowledgeChunk).filter(KnowledgeChunk.document_id == document.id).all()
-    vector_store_module.vector_store.delete(filters={"workspace_id": workspace_id, "knowledge_base_id": document.knowledge_base_id, "document_id": document.id})
-    for chunk in chunks:
-        db.delete(chunk)
+def delete_document(db: Session, *, workspace_id: int, document: KnowledgeDocument) -> dict:
+    document_id = document.id
+    knowledge_base_id = document.knowledge_base_id
+    vector_filters = {
+        "workspace_id": workspace_id,
+        "knowledge_base_id": knowledge_base_id,
+        "document_id": document_id,
+    }
+    chunks_deleted = db.query(KnowledgeChunk).filter(KnowledgeChunk.document_id == document_id).count()
+    vector_store_module.vector_store.delete(filters=vector_filters)
+    db.query(KnowledgeChunk).filter(KnowledgeChunk.document_id == document_id).delete(synchronize_session=False)
     db.delete(document)
     db.commit()
+    return {
+        "document_id": document_id,
+        "knowledge_base_id": knowledge_base_id,
+        "chunks_deleted": chunks_deleted,
+        "vectors_delete_requested": True,
+    }
+
+
+def clear_knowledge_base_documents(db: Session, *, workspace_id: int, kb: KnowledgeBase) -> dict:
+    vector_filters = {
+        "workspace_id": workspace_id,
+        "knowledge_base_id": kb.id,
+    }
+    documents_deleted = db.query(KnowledgeDocument).filter(KnowledgeDocument.knowledge_base_id == kb.id).count()
+    chunks_deleted = db.query(KnowledgeChunk).filter(KnowledgeChunk.knowledge_base_id == kb.id).count()
+    vector_store_module.vector_store.delete(filters=vector_filters)
+    db.query(KnowledgeChunk).filter(KnowledgeChunk.knowledge_base_id == kb.id).delete(synchronize_session=False)
+    db.query(KnowledgeDocument).filter(KnowledgeDocument.knowledge_base_id == kb.id).delete(synchronize_session=False)
+    db.commit()
+    return {
+        "knowledge_base_id": kb.id,
+        "documents_deleted": documents_deleted,
+        "chunks_deleted": chunks_deleted,
+        "vectors_delete_requested": True,
+    }
 
 
 def delete_knowledge_base(db: Session, *, workspace_id: int, kb: KnowledgeBase) -> None:
-    documents = db.query(KnowledgeDocument).filter(KnowledgeDocument.knowledge_base_id == kb.id).all()
-    for document in documents:
-        vector_store_module.vector_store.delete(filters={"workspace_id": workspace_id, "knowledge_base_id": kb.id, "document_id": document.id})
-        db.query(KnowledgeChunk).filter(KnowledgeChunk.document_id == document.id).delete(synchronize_session=False)
-    db.query(KnowledgeDocument).filter(KnowledgeDocument.knowledge_base_id == kb.id).delete(synchronize_session=False)
+    clear_knowledge_base_documents(db, workspace_id=workspace_id, kb=kb)
     db.delete(kb)
     db.commit()
 

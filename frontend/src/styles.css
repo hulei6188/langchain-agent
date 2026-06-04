@@ -4293,12 +4293,21 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
 
 .workspace-header-actions {
   position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.add-content-wrapper {
+  position: relative;
+  display: flex;
 }
 
 .add-dropdown-menu {
   position: absolute;
   right: 0;
-  top: 38px;
+  top: calc(100% + 6px);
   background: #ffffff;
   border: 1px solid #cbd5e1;
   border-radius: 10px;
@@ -4322,6 +4331,34 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
 
 .add-dropdown-menu button:hover {
   background: #f1f5f9;
+}
+
+.btn-clear-documents {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 36px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  border: 1px solid #fecaca;
+  background: #ffffff;
+  color: #b42318;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  white-space: nowrap;
+}
+
+.btn-clear-documents:hover:not(:disabled) {
+  background: #fef2f2;
+  border-color: #fca5a5;
+  color: #991b1b;
+}
+
+.btn-clear-documents:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 
 /* Split Main View */
@@ -4507,15 +4544,25 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 12px;
   margin-bottom: 12px;
 }
 
 .doc-meta-title-row h4 {
+  flex: 1;
+  min-width: 0;
   font-size: 16px;
   font-weight: 600;
   color: #0f172a;
   margin: 0;
   word-break: break-all;
+}
+
+.doc-detail-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
 }
 
 .btn-resegment-trigger {
@@ -4528,6 +4575,9 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
   border-radius: 8px;
   cursor: pointer;
   transition: all 0.15s ease;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .btn-resegment-trigger:hover {
@@ -4535,6 +4585,32 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
   border-color: #4f46e5;
   color: #ffffff;
   box-shadow: 0 4px 12px rgba(79, 70, 229, 0.2);
+}
+
+.btn-delete-active-doc {
+  background: #ffffff;
+  border: 1px solid #fecaca;
+  color: #b42318;
+  font-weight: 600;
+  font-size: 12px;
+  padding: 6px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.btn-delete-active-doc:hover:not(:disabled) {
+  background: #fef2f2;
+  border-color: #fca5a5;
+  color: #991b1b;
+}
+
+.btn-delete-active-doc:disabled {
+  cursor: wait;
+  opacity: 0.65;
 }
 
 .doc-meta-grid {

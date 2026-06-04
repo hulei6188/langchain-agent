@@ -109,6 +109,10 @@ class KnowledgeDocumentCreateRequest(BaseModel):
     source_type: str = Field(default="text", pattern="^(text|file)$")
 
 
+class KnowledgeDocumentBatchCreateRequest(BaseModel):
+    documents: list[KnowledgeDocumentCreateRequest] = Field(min_length=1, max_length=50)
+
+
 class SessionUpdateRequest(BaseModel):
     title: str = Field(min_length=1, max_length=200)
 
