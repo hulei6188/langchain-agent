@@ -2203,6 +2203,63 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
 .panel h3 svg { color: #5b4bff; }
 .panel > * + * { margin-top: 10px; }
 
+.agent-basics-grid {
+  display: grid;
+  gap: 12px;
+}
+.agent-basics-avatar-row {
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr) 34px;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+.agent-basics-avatar-copy {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+.agent-basics-avatar-copy strong {
+  overflow: hidden;
+  color: #111827;
+  font-size: 13px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.agent-basics-avatar-copy span {
+  color: #667085;
+  font-size: 12px;
+  line-height: 1.45;
+}
+.agent-basics-field {
+  position: relative;
+}
+.agent-basics-field span {
+  color: #344054;
+  font-weight: 700;
+}
+.agent-basics-field textarea {
+  min-height: 88px;
+}
+.agent-basics-field em {
+  position: absolute;
+  right: 12px;
+  bottom: 9px;
+  color: #667085;
+  font-size: 12px;
+  font-style: normal;
+  pointer-events: none;
+}
+.agent-basics-field input,
+.agent-basics-field textarea {
+  padding-right: 62px;
+}
+.agent-avatar-upload.disabled {
+  cursor: not-allowed;
+  opacity: .48;
+}
+
 .prompt-editor {
   min-height: clamp(360px, 50vh, 640px);
   border: 0;

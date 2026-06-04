@@ -13,6 +13,7 @@ import {
   Sparkles,
   ServerCog,
   FileText,
+  ImagePlus,
   X,
   SquarePen,
   Layers,
@@ -50,6 +51,8 @@ import {
   handleAttachmentPaste,
   handleAttachmentDrop,
   SAMPLE_MESSAGES,
+  createAvatarDataUrl,
+  validateAvatarFile,
 } from '../utils.js';
 
 // Simple tool type utilities
@@ -234,6 +237,20 @@ export function BuilderView(props) {
   const attachmentDisabled = uploadingAttachment || !attachmentAccept;
   const attachmentHint = chatAttachments.length ? `${chatAttachments.length} file ready` : attachmentHintForModel(selectedModel);
 
+  async function uploadAgentAvatar(event) {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+    try {
+      validateAvatarFile(file);
+      const avatar = await createAvatarDataUrl(file);
+      setAgentForm((form) => ({ ...form, avatar }));
+      setProfileError('');
+    } catch (err) {
+      setProfileError(errorMessage(err));
+    }
+  }
+
   function openPromptTemplateDialog() {
     const content = String(agentForm.system_prompt || '').trim();
     if (!content) {
@@ -312,8 +329,8 @@ export function BuilderView(props) {
       <header className="builder-topbar">
         <div className="bot-title">
           <button className="ghost-icon" type="button" title="返回主页" onClick={() => setView('home')}><ChevronLeft size={18} /></button>
-          <AgentAvatar value={activeSummary?.avatar || agentForm.avatar || 'AI'} className="bot-avatar" />
-          <strong>{activeSummary?.name || agentForm.name || '智能体一号'}</strong>
+          <AgentAvatar value={agentForm.avatar || activeSummary?.avatar || 'AI'} className="bot-avatar" />
+          <strong>{agentForm.name || activeSummary?.name || '智能体一号'}</strong>
           <button className="ghost-icon small" type="button" title="编辑基础信息" disabled={!canEditActive} onClick={() => openAgentIdentityDialog('edit')}>
             <SquarePen size={15} />
           </button>
@@ -339,6 +356,43 @@ export function BuilderView(props) {
             <h2>人设与回复逻辑</h2>
             <span>Prompt</span>
           </header>
+          <Panel title="基础信息" icon={<SquarePen size={16} />}>
+            <div className="agent-basics-grid">
+              <div className="agent-basics-avatar-row">
+                <AgentAvatar value={agentForm.avatar || 'AI'} className="agent-avatar-preview" />
+                <div className="agent-basics-avatar-copy">
+                  <strong>智能体图标</strong>
+                  <span>用于聊天页、列表和市场展示。</span>
+                </div>
+                <label className={`agent-avatar-upload ${!canEditActive ? 'disabled' : ''}`} title="上传图标">
+                  <ImagePlus size={16} />
+                  <input type="file" accept="image/png,image/jpeg,image/webp,image/gif" onChange={uploadAgentAvatar} disabled={!canEditActive} />
+                </label>
+              </div>
+              <label className="field-stack agent-basics-field">
+                <span>智能体名称</span>
+                <input
+                  value={agentForm.name}
+                  maxLength={50}
+                  disabled={!canEditActive}
+                  onChange={(event) => setAgentForm((form) => ({ ...form, name: event.target.value }))}
+                  placeholder="请输入智能体名称"
+                />
+                <em>{String(agentForm.name || '').length}/50</em>
+              </label>
+              <label className="field-stack agent-basics-field">
+                <span>智能体功能介绍</span>
+                <textarea
+                  value={agentForm.description}
+                  maxLength={500}
+                  disabled={!canEditActive}
+                  onChange={(event) => setAgentForm((form) => ({ ...form, description: event.target.value }))}
+                  placeholder="介绍智能体的功能，将会展示给智能体的用户"
+                />
+                <em>{String(agentForm.description || '').length}/500</em>
+              </label>
+            </div>
+          </Panel>
           <Panel title="人设与回复逻辑" icon={<Brain size={16} />}>
             <textarea ref={promptEditorRef} className="prompt-editor" value={agentForm.system_prompt} onChange={(e) => setAgentForm({ ...agentForm, system_prompt: e.target.value })} placeholder="写清楚智能体角色、目标、边界、工具调用规则和回答格式" />
           </Panel>
