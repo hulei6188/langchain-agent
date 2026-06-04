@@ -352,6 +352,25 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
 }
 .sidebar-user:hover { background: #f1f2f4; }
 
+.theme-toggle-button {
+  width: 100%;
+  min-height: 38px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  border: 1px solid #e1e5ee;
+  border-radius: 12px;
+  background: #fff;
+  color: #344054;
+  font-weight: 700;
+}
+.theme-toggle-button:hover {
+  background: #eef0f4;
+  color: #111827;
+}
+
 .account-menu {
   position: absolute;
   left: -6px;
@@ -2968,7 +2987,8 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
   grid-template-columns: 34px minmax(0, 1fr);
   gap: 12px;
   margin: 0 auto 20px;
-  max-width: 760px;
+  max-width: 820px;
+  font-size: 15.5px;
 }
 .message.user {
   grid-template-columns: minmax(0, 1fr) 34px;
@@ -2998,10 +3018,10 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
 .message.assistant .message-body {
   justify-self: start;
 }
-.message-body { min-width: 0; max-width: min(620px, 100%); }
+.message-body { min-width: 0; max-width: min(680px, 100%); }
 .message p {
   margin: 0;
-  line-height: 1.7;
+  line-height: 1.78;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
@@ -3032,7 +3052,8 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
 .markdown-content {
   display: grid;
   gap: 10px;
-  line-height: 1.7;
+  font-size: 15.5px;
+  line-height: 1.78;
   overflow-wrap: anywhere;
 }
 .markdown-content p,
@@ -3043,6 +3064,9 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
 .markdown-content h3,
 .markdown-content h4,
 .markdown-content h5 { margin: 0; }
+.markdown-content h3 { font-size: 17px; line-height: 1.5; }
+.markdown-content h4,
+.markdown-content h5 { font-size: 16px; line-height: 1.5; }
 .markdown-content ul,
 .markdown-content ol { padding-left: 20px; }
 .markdown-content table {
@@ -3071,7 +3095,7 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
   border-radius: 5px;
   background: #f2f4f7;
   font-family: "Cascadia Code", Consolas, monospace;
-  font-size: 13px;
+  font-size: .92em;
 }
 .code-block {
   overflow: hidden;
@@ -3107,7 +3131,7 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
   color: inherit;
 }
 .message.user .message-body {
-  padding: 10px 13px;
+  padding: 11px 14px;
   border-radius: 18px;
   background: #f4f4f5;
   color: #111827;
@@ -3150,7 +3174,7 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
   margin-top: 6px;
   padding-left: 13px;
   color: #475467;
-  font-size: 13px;
+  font-size: 14.5px;
 }
 .message-reasoning-content .markdown-content {
   gap: 8px;
@@ -3915,6 +3939,614 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
   color: #fff;
 }
 
+/* Dark theme */
+body.dark {
+  --workspace-action-hover-bg: #242938;
+  --workspace-action-hover-color: #9fb0ff;
+  --workspace-action-muted-color: #9aa3b6;
+  --workspace-muted-color: #9aa3b6;
+  --workspace-title-color: #f3f4f7;
+  background: #0f1117;
+  color: #e6e8ef;
+  color-scheme: dark;
+}
+body.dark input,
+body.dark textarea,
+body.dark select {
+  border-color: #343847;
+  background: #171a22;
+  color: #f3f4f7;
+}
+body.dark input::placeholder,
+body.dark textarea::placeholder {
+  color: #7f8798;
+}
+body.dark input:focus,
+body.dark textarea:focus,
+body.dark select:focus {
+  border-color: #7c8cff;
+  box-shadow: 0 0 0 3px rgba(124, 140, 255, .18);
+}
+body.dark .auth-shell,
+body.dark .chat-app,
+body.dark .chat-main,
+body.dark .chat-home,
+body.dark .conversation,
+body.dark .content-page,
+body.dark .workbench,
+body.dark .persona-panel,
+body.dark .builder-panel,
+body.dark .chat-stage,
+body.dark .messages {
+  background: #0f1117;
+  color: #e6e8ef;
+}
+body.dark .chat-sidebar {
+  border-right-color: #262b38;
+  background: #121620;
+}
+body.dark .chat-topbar,
+body.dark .column-header,
+body.dark .stage-header,
+body.dark .panel,
+body.dark .suggestion-strip,
+body.dark .chat-variable-bar,
+body.dark .session-editor,
+body.dark .builder-debug-panel,
+body.dark .runtime-status {
+  border-color: #262b38;
+  background: #11141c;
+  color: #d8dbe6;
+}
+body.dark .column-header,
+body.dark .stage-header {
+  background: rgba(17, 20, 28, .94);
+}
+body.dark .sidebar-brand strong,
+body.dark .welcome-panel h1,
+body.dark .page-heading h1,
+body.dark .agent-card h3,
+body.dark .member-card h3,
+body.dark .review-card h3,
+body.dark .panel h3,
+body.dark .column-header h2,
+body.dark .stage-header h2,
+body.dark .preview-hero strong,
+body.dark .markdown-content,
+body.dark .coze-header-left,
+body.dark .coze-bound-card-title,
+body.dark .coze-modal-row-title,
+body.dark .coze-modal-header h3 {
+  color: #f3f4f7;
+}
+body.dark .welcome-panel p,
+body.dark .page-heading p,
+body.dark .agent-card p,
+body.dark .member-card p,
+body.dark .review-card p,
+body.dark .plain-panel p,
+body.dark .runtime-status,
+body.dark .sidebar-heading,
+body.dark .sidebar-empty,
+body.dark .column-header span,
+body.dark .stage-header .eyebrow,
+body.dark .save-state,
+body.dark .message-pending,
+body.dark .coze-bound-card-meta,
+body.dark .coze-modal-row-desc {
+  color: #9aa3b6;
+}
+body.dark .new-chat,
+body.dark .sidebar-toggle,
+body.dark .sidebar-reopen-button,
+body.dark .theme-toggle-button,
+body.dark .auth-panel,
+body.dark .sidebar-user,
+body.dark .account-menu,
+body.dark .session-menu,
+body.dark .mode-toggle,
+body.dark .quick-prompts button,
+body.dark .agent-card,
+body.dark .review-card,
+body.dark .member-card,
+body.dark .plain-panel,
+body.dark .panel,
+body.dark .resource-section,
+body.dark .resource-search,
+body.dark .resource-list-panel,
+body.dark .resource-detail-panel,
+body.dark .prompt-preview-panel,
+body.dark .dialog-form,
+body.dark .profile-dialog,
+body.dark .user-model-dialog,
+body.dark .tool-config-dialog,
+body.dark .prompt-template-dialog,
+body.dark .knowledge-base-dialog,
+body.dark .secret-input-dialog,
+body.dark .confirm-dialog,
+body.dark .agent-identity-modal,
+body.dark .rich-composer,
+body.dark .coze-accordion-item,
+body.dark .coze-accordion-body,
+body.dark .coze-bound-card,
+body.dark .coze-modal-container,
+body.dark .coze-modal-row {
+  border-color: #303544;
+  background: #171a22;
+  color: #e6e8ef;
+}
+body.dark .new-chat:hover,
+body.dark .main-nav button.active,
+body.dark .main-nav button:hover,
+body.dark .session-row.active,
+body.dark .session-row:hover,
+body.dark .theme-toggle-button:hover,
+body.dark .sidebar-user:hover,
+body.dark .sidebar-toggle:hover,
+body.dark .sidebar-reopen-button:hover,
+body.dark .account-menu-group button:hover,
+body.dark .session-menu button:hover,
+body.dark .quick-prompts button:hover,
+body.dark .profile-dialog-close:hover,
+body.dark .ghost-icon:hover,
+body.dark .coze-accordion-header:hover,
+body.dark .coze-modal-row:hover {
+  background: #242938;
+  color: #f3f4f7;
+}
+body.dark .main-nav button,
+body.dark .brand-mark,
+body.dark .session-row,
+body.dark .session-main,
+body.dark .account-menu-group button,
+body.dark .account-menu-logout,
+body.dark .agent-select button,
+body.dark .builder-switcher button,
+body.dark .mode-chip,
+body.dark .agent-card button,
+body.dark .plain-panel button,
+body.dark .review-actions button,
+body.dark .rich-composer .attachment-button,
+body.dark .rich-composer .composer-icon-button {
+  color: #c5cad7;
+}
+body.dark .mode-toggle,
+body.dark .auth-toggle {
+  background: #1f2430;
+  border-color: #303544;
+}
+body.dark .mode-toggle button.active,
+body.dark .auth-toggle button.active {
+  background: #30364a;
+  color: #fff;
+}
+body.dark .agent-avatar,
+body.dark .brand-dot,
+body.dark .welcome-avatar,
+body.dark .agent-card > span,
+body.dark .rich-composer .composer-send-button {
+  background: #eef2ff;
+  color: #111827;
+}
+body.dark .message.user .message-body {
+  background: #242938;
+  color: #f3f4f7;
+}
+body.dark .message > span,
+body.dark .message-attachment-file,
+body.dark .attachment-preview,
+body.dark .markdown-content code,
+body.dark .markdown-content th,
+body.dark .message-source-list span,
+body.dark .message-source-list a,
+body.dark .source-more {
+  border-color: #303544;
+  background: #1f2430;
+  color: #d8dbe6;
+}
+body.dark .markdown-content table,
+body.dark .markdown-content th,
+body.dark .markdown-content td,
+body.dark .message-attachment-image img {
+  border-color: #343847;
+}
+body.dark .markdown-content blockquote,
+body.dark .message-reasoning {
+  border-left-color: #7c8cff;
+  color: #aab2c4;
+}
+body.dark .message-reasoning summary {
+  color: #d8dbe6;
+}
+body.dark .message-reasoning summary:hover,
+body.dark .message-sources summary:hover,
+body.dark .feedback-actions button:hover,
+body.dark .feedback-actions button.selected {
+  background: #242938;
+  color: #9fb0ff;
+}
+body.dark .rich-composer {
+  box-shadow: 0 18px 44px rgba(0, 0, 0, .34), 0 0 0 1px rgba(255, 255, 255, .02);
+}
+body.dark .composer-textarea {
+  background: transparent;
+  color: #f3f4f7;
+}
+body.dark .home-composer .thinking-toggle,
+body.dark .home-composer .search-toggle,
+body.dark .home-composer .rag-toggle,
+body.dark .composer .thinking-toggle,
+body.dark .composer .search-toggle,
+body.dark .composer .rag-toggle {
+  border-color: #364052;
+  background: #171a22;
+  color: #c5cad7;
+}
+body.dark .home-composer .thinking-toggle.on,
+body.dark .composer .thinking-toggle.on,
+body.dark .home-composer .thinking-toggle:hover,
+body.dark .home-composer .search-toggle:hover,
+body.dark .composer .thinking-toggle:hover,
+body.dark .composer .search-toggle:hover {
+  border-color: #5976c8;
+  background: #17233e;
+  color: #9fc0ff;
+}
+body.dark .home-composer .search-toggle.on,
+body.dark .composer .search-toggle.on {
+  border-color: #2e7d59;
+  background: #112d23;
+  color: #7ee0aa;
+}
+body.dark .home-composer .rag-toggle:hover,
+body.dark .home-composer .rag-toggle.on,
+body.dark .composer .rag-toggle:hover,
+body.dark .composer .rag-toggle.on {
+  border-color: #8a5a2c;
+  background: #33220f;
+  color: #ffc47b;
+}
+body.dark .home-composer .thinking-toggle:disabled,
+body.dark .home-composer .search-toggle:disabled,
+body.dark .home-composer .rag-toggle:disabled,
+body.dark .composer .thinking-toggle:disabled,
+body.dark .composer .search-toggle:disabled,
+body.dark .composer .rag-toggle:disabled {
+  border-color: #2c3140;
+  background: #151821;
+  color: #6f7789;
+}
+body.dark .composer-warning,
+body.dark .runtime-status.warning,
+body.dark .error,
+body.dark .user-model-test {
+  border-color: #79372d;
+  background: #2a1715;
+  color: #ffb3a8;
+}
+body.dark .status-pill {
+  background: #242938;
+  color: #c5cad7;
+}
+body.dark .status-pill.published,
+body.dark .capability-checks span.ok,
+body.dark .user-model-test.ok {
+  border-color: #2d7255;
+  background: #10281f;
+  color: #7ee0aa !important;
+}
+body.dark .status-pill.pending_review {
+  background: #33270f;
+  color: #f7c76f;
+}
+body.dark .status-pill.rejected {
+  background: #321817;
+  color: #ff9d91;
+}
+body.dark .modal-backdrop,
+body.dark .confirm-dialog-backdrop,
+body.dark .profile-dialog-backdrop,
+body.dark .coze-modal-backdrop,
+body.dark .resegment-modal-backdrop {
+  background: rgba(5, 7, 12, .72);
+}
+body.dark .coze-modal-header,
+body.dark .resegment-panel-heading,
+body.dark .resegment-panel-footer {
+  border-color: #303544;
+  background: #11141c;
+}
+body.dark .toast.success {
+  border-color: #2d7255;
+  background: #10281f;
+  color: #7ee0aa;
+}
+body.dark .coze-group-title {
+  border-color: rgba(64, 71, 91, .7);
+  color: #8f98aa;
+}
+
+body.dark .resource-page {
+  background: #0f1117;
+}
+body.dark .resource-tabs {
+  border-bottom-color: #303544;
+}
+body.dark .resource-tabs button {
+  color: #8f98aa;
+}
+body.dark .resource-tabs button:hover,
+body.dark .resource-tabs button.active {
+  border-bottom-color: #7c8cff;
+  color: #9fb0ff;
+}
+body.dark .resource-section-title {
+  border-bottom-color: #303544;
+  background: #121620;
+  color: #f3f4f7;
+}
+body.dark .resource-section-title span,
+body.dark .resource-row small,
+body.dark .resource-type,
+body.dark .resource-meta,
+body.dark .prompt-preview-head p,
+body.dark .tool-security-note,
+body.dark .tool-edit-secret-note span,
+body.dark .tool-row-main small,
+body.dark .tool-row-meta {
+  color: #9aa3b6;
+}
+body.dark .resource-row {
+  border-bottom-color: #303544;
+  color: #e6e8ef;
+}
+body.dark .resource-row:hover,
+body.dark .resource-row.active {
+  background: #1f2430;
+}
+body.dark .resource-icon {
+  background: #17233e;
+  color: #9fc0ff;
+}
+body.dark .resource-row-actions button,
+body.dark .prompt-preview-actions button,
+body.dark .resource-side-actions button,
+body.dark .builder-add-resource,
+body.dark .tool-row-actions button {
+  border-color: #3a4050;
+  background: #1f2430;
+  color: #d8dbe6;
+}
+body.dark .resource-row-actions button:hover,
+body.dark .prompt-preview-actions button:hover,
+body.dark .resource-side-actions button:hover,
+body.dark .builder-add-resource:hover,
+body.dark .tool-row-actions button:hover:not(:disabled) {
+  border-color: #536078;
+  background: #242938;
+  color: #f3f4f7;
+}
+body.dark .resource-side-actions,
+body.dark .resource-form-dialog,
+body.dark .prompt-template-form,
+body.dark .tool-form,
+body.dark .tool-edit-secret-note,
+body.dark .tool-test-box {
+  border-color: #303544;
+  background: #171a22;
+  color: #e6e8ef;
+}
+body.dark .prompt-preview-head span:first-child {
+  color: #9fb0ff;
+}
+body.dark .prompt-preview-head h3,
+body.dark .resource-row strong,
+body.dark .tool-row-main strong,
+body.dark .tool-edit-secret-note strong {
+  color: #f3f4f7;
+}
+body.dark .prompt-preview-panel pre,
+body.dark .tool-test-result pre {
+  border-color: #303544;
+  background: #0f1117;
+  color: #e6e8ef;
+}
+body.dark .tool-type-switch {
+  border-color: #303544;
+  background: #1f2430;
+}
+body.dark .tool-type-switch button {
+  color: #9aa3b6;
+}
+body.dark .tool-type-switch button.active {
+  background: #30364a;
+  color: #fff;
+}
+body.dark .tool-kind,
+body.dark .tool-row-meta span {
+  border-color: #343847;
+  background: #1f2430;
+  color: #c5cad7;
+}
+body.dark .tool-test-result {
+  border-color: #846327;
+  background: #33270f;
+  color: #f7c76f;
+}
+body.dark .tool-test-result.ok {
+  border-color: #2d7255;
+  background: #10281f;
+  color: #7ee0aa;
+}
+
+body.dark .model-admin-panel,
+body.dark .user-models-panel,
+body.dark .user-model-form,
+body.dark .model-form-section,
+body.dark .model-channel-card,
+body.dark .model-admin-row,
+body.dark .user-model-row {
+  border-color: #303544;
+  background: #171a22;
+  color: #e6e8ef;
+}
+body.dark .model-channel-card,
+body.dark .model-admin-row,
+body.dark .user-model-row {
+  background: #121620;
+}
+body.dark .model-section-title strong,
+body.dark .model-channel-heading strong,
+body.dark .model-admin-main strong,
+body.dark .model-admin-row strong,
+body.dark .user-model-row strong {
+  color: #f3f4f7;
+}
+body.dark .model-section-title span,
+body.dark .field-stack span,
+body.dark .model-channel-heading small,
+body.dark .model-admin-row small,
+body.dark .user-model-row small,
+body.dark .model-capability-summary small,
+body.dark .provider-preset-header small,
+body.dark .provider-preset-note,
+body.dark .private-model-guide small,
+body.dark .model-preset-banner small {
+  color: #9aa3b6;
+}
+body.dark .provider-preset-panel,
+body.dark .model-preset-banner.private,
+body.dark .private-model-guide {
+  border-color: #244532;
+  background: #102018;
+  color: #d8dbe6;
+}
+body.dark .provider-preset-header,
+body.dark .model-preset-banner.private svg,
+body.dark .private-model-guide svg {
+  color: #76d8a0;
+}
+body.dark .provider-preset-grid button,
+body.dark .private-model-guide button,
+body.dark .user-model-form .preset-action,
+body.dark .model-admin-form .preset-action,
+body.dark .model-admin-form .model-advanced-toggle,
+body.dark .model-state-toggle,
+body.dark .model-admin-capabilities button,
+body.dark .agent-card button,
+body.dark .plain-panel button,
+body.dark .review-actions button {
+  border-color: #3a4050;
+  background: #1f2430;
+  color: #d8dbe6;
+}
+body.dark .provider-preset-grid button small,
+body.dark .model-advanced-toggle span {
+  color: #9aa3b6;
+}
+body.dark .provider-preset-grid button:hover,
+body.dark .private-model-guide button:hover,
+body.dark .user-model-form .preset-action:hover,
+body.dark .model-admin-form .preset-action:hover,
+body.dark .model-admin-form .model-advanced-toggle:hover,
+body.dark .model-state-toggle:hover,
+body.dark .agent-card button:hover:not(:disabled),
+body.dark .plain-panel button:hover:not(:disabled),
+body.dark .review-actions button:hover:not(:disabled) {
+  border-color: #536078;
+  background: #242938;
+  color: #f3f4f7;
+}
+body.dark .provider-preset-grid button.active,
+body.dark .model-state-toggle.enabled {
+  border-color: #2d7255;
+  background: #10281f;
+  color: #7ee0aa;
+}
+body.dark .provider-preset-grid button.active small {
+  color: #bdf5cf;
+}
+body.dark .model-enabled-check,
+body.dark .model-checks label {
+  border-color: #343847;
+  background: #171a22;
+  color: #d8dbe6;
+}
+body.dark .model-capability-summary span,
+body.dark .model-row-tags span,
+body.dark .capability-checks span,
+body.dark .model-capabilities span,
+body.dark .model-capabilities small,
+body.dark .soft-pill {
+  border-color: #343847;
+  background: #1f2430;
+  color: #c5cad7;
+}
+body.dark .model-capability-summary span.enabled,
+body.dark .model-row-tags span.enabled,
+body.dark .model-capabilities span.enabled,
+body.dark .model-admin-capabilities button.enabled {
+  border-color: #2d7255;
+  background: #10281f;
+  color: #7ee0aa;
+}
+body.dark .model-capability-summary span.pending,
+body.dark .capability-checks span.pending {
+  border-color: #846327;
+  background: #33270f;
+  color: #f7c76f;
+}
+body.dark .capability-checks span.fail {
+  border-color: #79372d;
+  background: #321817;
+  color: #ff9d91;
+}
+body.dark .model-row-warning {
+  border-color: #846327;
+  background: #33270f;
+  color: #f7c76f !important;
+}
+body.dark .user-model-actions button,
+body.dark .model-admin-actions button {
+  border-color: #3a4050;
+  background: #1f2430;
+  color: #d8dbe6;
+}
+body.dark .user-model-actions button:hover:not(:disabled),
+body.dark .model-admin-actions button:hover:not(:disabled) {
+  border-color: #536078;
+  background: #242938;
+  color: #f3f4f7;
+}
+body.dark .agent-card button:disabled,
+body.dark .plain-panel button:disabled,
+body.dark .user-model-actions button:disabled,
+body.dark .model-admin-actions button:disabled {
+  border-color: #2c3140;
+  background: #151821;
+  color: #6f7789;
+}
+body.dark .model-delete-button,
+body.dark .user-model-actions .model-delete-button,
+body.dark .model-admin-actions .model-delete-button {
+  border-color: #79372d !important;
+  background: #2a1715 !important;
+  color: #ffb3a8 !important;
+}
+body.dark .model-delete-button:hover:not(:disabled),
+body.dark .user-model-actions .model-delete-button:hover:not(:disabled),
+body.dark .model-admin-actions .model-delete-button:hover:not(:disabled) {
+  border-color: #a6483b !important;
+  background: #321817 !important;
+  color: #ffd0ca !important;
+}
+body.dark .model-admin-form .primary-model-action,
+body.dark .user-model-form .primary-model-action,
+body.dark .panel-actions .primary-model-action {
+  background: #7c8cff;
+  color: #0f1117;
+}
+
 .fatal-error {
   min-height: 100vh;
   display: grid;
@@ -3992,7 +4624,12 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
   .variable-row { grid-template-columns: 1fr; }
   .two, .config-row, .session-tools { grid-template-columns: 1fr; }
   .messages { padding: 26px 16px; }
-  .message { grid-template-columns: 30px 1fr; }
+  .message {
+    grid-template-columns: 30px 1fr;
+    font-size: 15px;
+  }
+  .message-body { max-width: min(100%, 680px); }
+  .markdown-content { font-size: 15px; }
   .save-state { display: none; }
   .chat-topbar { align-items: stretch; height: auto; padding: 12px; flex-direction: column; }
   .agent-select { flex-wrap: wrap; }

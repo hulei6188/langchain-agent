@@ -29,6 +29,7 @@ import {
   LogOut,
   MessageSquare,
   MoreHorizontal,
+  Moon,
   Plus,
   Rocket,
   Search,
@@ -38,6 +39,7 @@ import {
   Shield,
   Sparkles,
   SquarePen,
+  Sun,
   ThumbsDown,
   ThumbsUp,
   Trash2,
@@ -130,6 +132,8 @@ import {
   hasTransferFiles,
 } from './utils.js';
 
+const THEME_STORAGE_KEY = 'lingshu_theme';
+
 function App() {
   const [token, setToken] = useState(initialAuthToken);
   const [me, setMe] = useState(null);
@@ -194,6 +198,8 @@ function App() {
   const [agentIdentityDialog, setAgentIdentityDialog] = useState(null);
   const [agentIdentitySaving, setAgentIdentitySaving] = useState(false);
   const [agentIdentityError, setAgentIdentityError] = useState('');
+  const [themeMode, setThemeMode] = useState(() => localStorage.getItem(THEME_STORAGE_KEY) === 'dark' ? 'dark' : 'light');
+  const isDarkTheme = themeMode === 'dark';
 
   const activeSummary = useMemo(() => agents.find((item) => item.id === activeAgentId), [agents, activeAgentId]);
   const chatAgents = useMemo(
@@ -213,6 +219,16 @@ function App() {
   const activeKbId = Number(docForm.kb_id || knowledgeBases[0]?.id || 0);
   const canManage = isAdminRole(workspace?.role);
   const canEditActive = !!activeAgent && (canManage || activeAgent.created_by === me?.id);
+
+  useEffect(() => {
+    document.body.classList.toggle('dark', isDarkTheme);
+    document.documentElement.dataset.theme = themeMode;
+    localStorage.setItem(THEME_STORAGE_KEY, themeMode);
+  }, [isDarkTheme, themeMode]);
+
+  function toggleThemeMode() {
+    setThemeMode((current) => current === 'dark' ? 'light' : 'dark');
+  }
 
   async function loadDocuments(kbId) {
     if (!kbId || !token) return;
@@ -1525,6 +1541,8 @@ function App() {
     updateUserModelConfig,
     view,
     workspace,
+    isDarkTheme,
+    toggleThemeMode,
     accountMenuOpen,
     profileDialogOpen,
     profileError,
@@ -1673,6 +1691,8 @@ function HomeView(props) {
     updateToolConfig,
     updateUserModelConfig,
     workspace,
+    isDarkTheme,
+    toggleThemeMode,
     accountMenuOpen,
     profileDialogOpen,
     profileError,
@@ -1873,6 +1893,17 @@ function HomeView(props) {
           </div>
         </div>
         <div className="sidebar-user-wrap">
+          <button
+            className="theme-toggle-button"
+            type="button"
+            title={isDarkTheme ? '切换到白色主题' : '切换到黑色主题'}
+            aria-label={isDarkTheme ? '切换到白色主题' : '切换到黑色主题'}
+            aria-pressed={isDarkTheme}
+            onClick={toggleThemeMode}
+          >
+            {isDarkTheme ? <Sun size={16} /> : <Moon size={16} />}
+            <span>{isDarkTheme ? '白色主题' : '黑色主题'}</span>
+          </button>
           {accountMenuOpen && (
             <div className="account-menu">
               <button
@@ -2068,6 +2099,7 @@ function HomeView(props) {
           <ToolsHome
             createToolConfig={createToolConfig}
             deleteToolConfig={deleteToolConfig}
+            isDarkTheme={isDarkTheme}
             openBuilder={openBuilder}
             requestDeleteConfirm={requestDeleteConfirm}
             setProfileError={setProfileError}
@@ -2855,7 +2887,7 @@ function KnowledgeWorkspace({
         <div className="workspace-kb-title-block" style={{ display: 'flex', alignItems: 'flex-start', gap: '8px' }}>
           <div>
             <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-              <h3 style={{ margin: 0, fontSize: '16px', fontWeight: 700, color: '#111827' }}>{kb?.name}</h3>
+              <h3 style={{ margin: 0, fontSize: '16px', fontWeight: 700, color: 'var(--workspace-title-color, #111827)' }}>{kb?.name}</h3>
               <button
                 type="button"
                 className="coze-icon-button"
@@ -2867,7 +2899,7 @@ function KnowledgeWorkspace({
                   cursor: 'pointer',
                   display: 'flex',
                   alignItems: 'center',
-                  color: '#667085',
+                  color: 'var(--workspace-action-muted-color, #667085)',
                   borderRadius: '4px',
                   transition: 'all 0.2s'
                 }}
@@ -2876,18 +2908,18 @@ function KnowledgeWorkspace({
                   setEditDialogOpen(true);
                 }}
                 onMouseEnter={(e) => {
-                  e.currentTarget.style.color = '#4d43e6';
-                  e.currentTarget.style.background = '#f4f4f5';
+                  e.currentTarget.style.color = 'var(--workspace-action-hover-color, #4d43e6)';
+                  e.currentTarget.style.background = 'var(--workspace-action-hover-bg, #f4f4f5)';
                 }}
                 onMouseLeave={(e) => {
-                  e.currentTarget.style.color = '#667085';
+                  e.currentTarget.style.color = 'var(--workspace-action-muted-color, #667085)';
                   e.currentTarget.style.background = 'none';
                 }}
               >
                 <SquarePen size={14} />
               </button>
             </div>
-            <p style={{ margin: '4px 0 0', fontSize: '12px', color: '#667085' }}>{kb?.description || '暂无描述'}</p>
+            <p style={{ margin: '4px 0 0', fontSize: '12px', color: 'var(--workspace-muted-color, #667085)' }}>{kb?.description || '暂无描述'}</p>
           </div>
         </div>
         <div className="workspace-header-actions">
@@ -3325,7 +3357,7 @@ function UserModelsHome({ adminModels, canManage, createModelConfig, deleteModel
   );
 }
 
-function ToolsHome({ createToolConfig, deleteToolConfig, openBuilder, requestDeleteConfirm, setProfileError, testToolConfig, tools, updateToolConfig }) {
+function ToolsHome({ createToolConfig, deleteToolConfig, isDarkTheme, openBuilder, requestDeleteConfirm, setProfileError, testToolConfig, tools, updateToolConfig }) {
   return (
     <div className="content-page">
       <header className="page-heading">
@@ -3338,6 +3370,7 @@ function ToolsHome({ createToolConfig, deleteToolConfig, openBuilder, requestDel
       <ToolsPanel
         createToolConfig={createToolConfig}
         deleteToolConfig={deleteToolConfig}
+        isDarkTheme={isDarkTheme}
         requestDeleteConfirm={requestDeleteConfirm}
         setProfileError={setProfileError}
         testToolConfig={testToolConfig}
@@ -3759,7 +3792,34 @@ function schemaToParams(schemaStr) {
   }
 }
 
-function ParamTableEditor({ label, params, onChange }) {
+function ParamTableEditor({ isDarkTheme = false, label, params, onChange }) {
+  const editorTheme = isDarkTheme ? {
+    panelBg: '#121620',
+    panelBorder: '#303544',
+    title: '#f3f4f7',
+    muted: '#8f98aa',
+    inputBg: '#171a22',
+    inputBorder: '#343847',
+    inputText: '#f3f4f7',
+    actionBg: '#17233e',
+    actionBorder: '#364f91',
+    actionText: '#9fc0ff',
+    dangerBg: '#2a1715',
+    dangerText: '#ffb3a8',
+  } : {
+    panelBg: '#f8fafc',
+    panelBorder: '#dfe4ef',
+    title: '#1f2937',
+    muted: '#94a3b8',
+    inputBg: '#fff',
+    inputBorder: '#dfe4ef',
+    inputText: '#111827',
+    actionBg: '#eef2ff',
+    actionBorder: '#c7d2fe',
+    actionText: '#4d43e6',
+    dangerBg: '#fee2e2',
+    dangerText: '#ef4444',
+  };
   const addRow = () => {
     const newRow = {
       id: `param-${Date.now()}-${Math.random()}`,
@@ -3780,20 +3840,20 @@ function ParamTableEditor({ label, params, onChange }) {
   };
 
   return (
-    <div className="param-table-editor-wrapper" style={{ marginTop: '14px', border: '1px solid #dfe4ef', borderRadius: '10px', padding: '14px', background: '#f8fafc' }}>
+    <div className="param-table-editor-wrapper" style={{ marginTop: '14px', border: `1px solid ${editorTheme.panelBorder}`, borderRadius: '10px', padding: '14px', background: editorTheme.panelBg }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
-        <strong style={{ fontSize: '13px', color: '#1f2937' }}>{label}</strong>
+        <strong style={{ fontSize: '13px', color: editorTheme.title }}>{label}</strong>
         <button 
           type="button" 
           onClick={addRow}
-          style={{ background: '#eef2ff', color: '#4d43e6', border: '1px solid #c7d2fe', padding: '4px 10px', borderRadius: '6px', fontSize: '12px', fontWeight: 'bold', cursor: 'pointer' }}
+          style={{ background: editorTheme.actionBg, color: editorTheme.actionText, border: `1px solid ${editorTheme.actionBorder}`, padding: '4px 10px', borderRadius: '6px', fontSize: '12px', fontWeight: 'bold', cursor: 'pointer' }}
         >
           + 添加参数
         </button>
       </div>
       
       {params.length === 0 ? (
-        <p style={{ fontStyle: 'italic', fontSize: '12px', color: '#94a3b8', margin: '4px 0', textAlign: 'center' }}>暂无参数，点击右上角一键添加。</p>
+        <p style={{ fontStyle: 'italic', fontSize: '12px', color: editorTheme.muted, margin: '4px 0', textAlign: 'center' }}>暂无参数，点击右上角一键添加。</p>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
           {params.map((row) => (
@@ -3803,19 +3863,19 @@ function ParamTableEditor({ label, params, onChange }) {
                 placeholder="参数名" 
                 value={row.name} 
                 onChange={(e) => updateRow(row.id, { name: e.target.value })}
-                style={{ flex: 2, padding: '5px 8px', border: '1px solid #dfe4ef', borderRadius: '6px', fontSize: '12px', color: '#111827' }}
+                style={{ flex: 2, padding: '5px 8px', border: `1px solid ${editorTheme.inputBorder}`, borderRadius: '6px', fontSize: '12px', background: editorTheme.inputBg, color: editorTheme.inputText }}
               />
               <select 
                 value={row.type} 
                 onChange={(e) => updateRow(row.id, { type: e.target.value })}
-                style={{ flex: 1.5, padding: '5px 8px', border: '1px solid #dfe4ef', borderRadius: '6px', fontSize: '12px', background: '#fff', color: '#111827' }}
+                style={{ flex: 1.5, padding: '5px 8px', border: `1px solid ${editorTheme.inputBorder}`, borderRadius: '6px', fontSize: '12px', background: editorTheme.inputBg, color: editorTheme.inputText }}
               >
                 <option value="string">string</option>
                 <option value="number">number</option>
                 <option value="integer">integer</option>
                 <option value="boolean">boolean</option>
               </select>
-              <label style={{ display: 'flex', alignItems: 'center', gap: '4px', cursor: 'pointer', fontSize: '12px', color: '#4b5563', padding: '0 4px', whiteSpace: 'nowrap' }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: '4px', cursor: 'pointer', fontSize: '12px', color: editorTheme.muted, padding: '0 4px', whiteSpace: 'nowrap' }}>
                 <input 
                   type="checkbox" 
                   checked={row.required} 
@@ -3828,12 +3888,12 @@ function ParamTableEditor({ label, params, onChange }) {
                 placeholder="参数描述或说明" 
                 value={row.description} 
                 onChange={(e) => updateRow(row.id, { description: e.target.value })}
-                style={{ flex: 3, padding: '5px 8px', border: '1px solid #dfe4ef', borderRadius: '6px', fontSize: '12px', color: '#111827' }}
+                style={{ flex: 3, padding: '5px 8px', border: `1px solid ${editorTheme.inputBorder}`, borderRadius: '6px', fontSize: '12px', background: editorTheme.inputBg, color: editorTheme.inputText }}
               />
               <button 
                 type="button" 
                 onClick={() => removeRow(row.id)}
-                style={{ background: '#fee2e2', color: '#ef4444', border: 'none', padding: '6px 10px', borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold', fontSize: '12px' }}
+                style={{ background: editorTheme.dangerBg, color: editorTheme.dangerText, border: 'none', padding: '6px 10px', borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold', fontSize: '12px' }}
               >
                 ✕
               </button>
@@ -3845,7 +3905,7 @@ function ParamTableEditor({ label, params, onChange }) {
   );
 }
 
-function ToolsPanel({ createToolConfig, deleteToolConfig, requestDeleteConfirm, setProfileError, testToolConfig, tools, updateToolConfig }) {
+function ToolsPanel({ createToolConfig, deleteToolConfig, isDarkTheme = false, requestDeleteConfirm, setProfileError, testToolConfig, tools, updateToolConfig }) {
   const [form, setForm] = useState(createToolForm);
   const [formOpen, setFormOpen] = useState(false);
   const [editingTool, setEditingTool] = useState(null);
@@ -3868,6 +3928,88 @@ function ToolsPanel({ createToolConfig, deleteToolConfig, requestDeleteConfirm, 
   const needsAuthSecret = isHttpForm && form.auth_type !== 'none';
   const needsAuthHeader = isHttpForm && ['bearer', 'header'].includes(form.auth_type);
   const needsAuthQuery = isHttpForm && form.auth_type === 'query';
+  const toolTheme = isDarkTheme ? {
+    rowBg: '#121620',
+    rowBorder: '#303544',
+    rowHoverBorder: '#5976c8',
+    rowShadow: '0 1px 3px rgba(0,0,0,0.18)',
+    rowHoverShadow: '0 12px 24px rgba(0,0,0,0.26)',
+    title: '#f3f4f7',
+    text: '#9aa3b6',
+    muted: '#6f7789',
+    codeBg: '#1f2430',
+    codeText: '#c5cad7',
+    methodBg: '#1f2430',
+    methodText: '#d8dbe6',
+    buttonBg: '#1f2430',
+    buttonBorder: '#3a4050',
+    buttonText: '#d8dbe6',
+    accentBg: '#17233e',
+    accentBorder: '#364f91',
+    accentText: '#9fc0ff',
+    successBg: 'rgba(126, 224, 170, 0.13)',
+    successText: '#7ee0aa',
+    warnText: '#f7c76f',
+    dangerBg: '#2a1715',
+    dangerBorder: '#79372d',
+    dangerText: '#ffb3a8',
+    typeNeutral: { background: '#1f2430', color: '#d8dbe6', border: '1px solid #3a4050' },
+    typeSearch: { background: '#17233e', color: '#9fc0ff', border: '1px solid #364f91' },
+    typeBuiltin: { background: '#2b2141', color: '#d9b8ff', border: '1px solid #59407a' },
+    typeHttp: { background: '#10281f', color: '#7ee0aa', border: '1px solid #2d7255' },
+    emptyBg: '#121620',
+    emptyBorder: '#303544',
+  } : {
+    rowBg: '#ffffff',
+    rowBorder: '#e5e7eb',
+    rowHoverBorder: '#4d43e6',
+    rowShadow: '0 1px 3px rgba(0,0,0,0.02)',
+    rowHoverShadow: '0 10px 20px rgba(77, 67, 230, 0.05)',
+    title: '#111827',
+    text: '#6b7280',
+    muted: '#9ca3af',
+    codeBg: '#f3f4f6',
+    codeText: '#4b5563',
+    methodBg: '#f3f4f6',
+    methodText: '#374151',
+    buttonBg: '#ffffff',
+    buttonBorder: '#dfe4ef',
+    buttonText: '#374151',
+    accentBg: 'rgba(77, 67, 230, 0.08)',
+    accentBorder: 'rgba(77, 67, 230, 0.15)',
+    accentText: '#4d43e6',
+    successBg: 'rgba(16, 185, 129, 0.08)',
+    successText: '#10b981',
+    warnText: '#d97706',
+    dangerBg: '#fee2e2',
+    dangerBorder: '#fecaca',
+    dangerText: '#ef4444',
+    typeNeutral: { background: '#f3f4f6', color: '#374151', border: '1px solid #e5e7eb' },
+    typeSearch: { background: '#e0f2fe', color: '#0369a1', border: '1px solid #bae6fd' },
+    typeBuiltin: { background: '#f3e8ff', color: '#6b21a8', border: '1px solid #e9d5ff' },
+    typeHttp: { background: '#dcfce7', color: '#15803d', border: '1px solid #bbf7d0' },
+    emptyBg: '#f9fafb',
+    emptyBorder: '#e5e7eb',
+  };
+  const toolButtonStyle = {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '4px',
+    padding: '6px 12px',
+    borderRadius: '8px',
+    background: toolTheme.buttonBg,
+    border: `1px solid ${toolTheme.buttonBorder}`,
+    color: toolTheme.buttonText,
+    fontWeight: 600,
+    cursor: 'pointer',
+    fontSize: '12px',
+  };
+  const toolAccentButtonStyle = {
+    ...toolButtonStyle,
+    background: toolTheme.accentBg,
+    border: `1px solid ${toolTheme.accentBorder}`,
+    color: toolTheme.accentText,
+  };
 
   function switchType(type) {
     const preset = createToolForm(type);
@@ -4120,6 +4262,7 @@ function ToolsPanel({ createToolConfig, deleteToolConfig, requestDeleteConfirm, 
               <div className="coze-param-editor-container" style={{ gridColumn: 'span 2', display: 'flex', flexDirection: 'column', gap: '12px', marginTop: '8px' }}>
                 {isHttpForm && (
                   <ParamTableEditor 
+                    isDarkTheme={isDarkTheme}
                     label="Headers 参数结构定义 (headers_schema)" 
                     params={headersParams} 
                     onChange={(next) => {
@@ -4129,6 +4272,7 @@ function ToolsPanel({ createToolConfig, deleteToolConfig, requestDeleteConfirm, 
                   />
                 )}
                 <ParamTableEditor 
+                  isDarkTheme={isDarkTheme}
                   label={isHttpForm ? "Query 请求参数定义 (query_schema)" : "联网搜索参数定义 (search_query_schema)"} 
                   params={queryParams} 
                   onChange={(next) => {
@@ -4138,6 +4282,7 @@ function ToolsPanel({ createToolConfig, deleteToolConfig, requestDeleteConfirm, 
                 />
                 {needsBodySchema && (
                   <ParamTableEditor 
+                    isDarkTheme={isDarkTheme}
                     label="Body 请求体定义 (body_schema)" 
                     params={bodyParams} 
                     onChange={(next) => {
@@ -4210,11 +4355,10 @@ function ToolsPanel({ createToolConfig, deleteToolConfig, requestDeleteConfirm, 
           const isSearch = type === 'builtin_search';
           const isBuiltin = type === 'builtin';
 
-          // Type Badges styling
-          let typeStyle = { background: '#f3f4f6', color: '#374151', border: '1px solid #e5e7eb' };
-          if (isSearch) typeStyle = { background: '#e0f2fe', color: '#0369a1', border: '1px solid #bae6fd' };
-          else if (isBuiltin) typeStyle = { background: '#f3e8ff', color: '#6b21a8', border: '1px solid #e9d5ff' };
-          else if (isHttp) typeStyle = { background: '#dcfce7', color: '#15803d', border: '1px solid #bbf7d0' };
+          let typeStyle = toolTheme.typeNeutral;
+          if (isSearch) typeStyle = toolTheme.typeSearch;
+          else if (isBuiltin) typeStyle = toolTheme.typeBuiltin;
+          else if (isHttp) typeStyle = toolTheme.typeHttp;
 
           const enabled = tool.enabled !== false;
           
@@ -4224,19 +4368,19 @@ function ToolsPanel({ createToolConfig, deleteToolConfig, requestDeleteConfirm, 
               key={tool.id}
               style={{
                 transition: 'all 0.2s ease',
-                border: '1px solid #e5e7eb',
+                border: `1px solid ${toolTheme.rowBorder}`,
                 borderRadius: '12px',
                 padding: '16px',
-                background: '#ffffff',
-                boxShadow: '0 1px 3px rgba(0,0,0,0.02)',
+                background: toolTheme.rowBg,
+                boxShadow: toolTheme.rowShadow,
               }}
               onMouseEnter={(e) => {
-                e.currentTarget.style.borderColor = '#4d43e6';
-                e.currentTarget.style.boxShadow = '0 10px 20px rgba(77, 67, 230, 0.05)';
+                e.currentTarget.style.borderColor = toolTheme.rowHoverBorder;
+                e.currentTarget.style.boxShadow = toolTheme.rowHoverShadow;
               }}
               onMouseLeave={(e) => {
-                e.currentTarget.style.borderColor = '#e5e7eb';
-                e.currentTarget.style.boxShadow = '0 1px 3px rgba(0,0,0,0.02)';
+                e.currentTarget.style.borderColor = toolTheme.rowBorder;
+                e.currentTarget.style.boxShadow = toolTheme.rowShadow;
               }}
             >
               <div className="tool-row-main" style={{ display: 'flex', gap: '14px', alignItems: 'center', minWidth: 0, flex: 1 }}>
@@ -4256,7 +4400,7 @@ function ToolsPanel({ createToolConfig, deleteToolConfig, requestDeleteConfirm, 
                 </span>
                 <div style={{ minWidth: 0, flex: 1 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                    <strong style={{ fontSize: '14px', fontWeight: 700, color: '#111827' }}>{tool.label || tool.name}</strong>
+                    <strong style={{ fontSize: '14px', fontWeight: 700, color: toolTheme.title }}>{tool.label || tool.name}</strong>
                     <span 
                       style={{
                         display: 'inline-flex',
@@ -4265,17 +4409,17 @@ function ToolsPanel({ createToolConfig, deleteToolConfig, requestDeleteConfirm, 
                         padding: '2px 8px',
                         borderRadius: '12px',
                         fontSize: '11px',
-                        background: enabled ? 'rgba(16, 185, 129, 0.08)' : 'rgba(107, 114, 128, 0.08)',
-                        color: enabled ? '#10b981' : '#6b7280',
+                        background: enabled ? toolTheme.successBg : toolTheme.codeBg,
+                        color: enabled ? toolTheme.successText : toolTheme.muted,
                         fontWeight: 600,
                       }}
                     >
-                      <span style={{ width: '6px', height: '6px', borderRadius: '50%', background: enabled ? '#10b981' : '#6b7280' }} />
+                      <span style={{ width: '6px', height: '6px', borderRadius: '50%', background: enabled ? toolTheme.successText : toolTheme.muted }} />
                       {enabled ? '已启用' : '已禁用'}
                     </span>
                   </div>
-                  <small style={{ display: 'block', marginTop: '4px', fontSize: '12px', color: '#6b7280', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={tool.description}>
-                    <code style={{ background: '#f3f4f6', padding: '2px 6px', borderRadius: '4px', marginRight: '6px', fontSize: '11px', fontFamily: 'monospace', color: '#4b5563' }}>
+                  <small style={{ display: 'block', marginTop: '4px', fontSize: '12px', color: toolTheme.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={tool.description}>
+                    <code style={{ background: toolTheme.codeBg, padding: '2px 6px', borderRadius: '4px', marginRight: '6px', fontSize: '11px', fontFamily: 'monospace', color: toolTheme.codeText }}>
                       {tool.name}
                     </code>
                     {tool.description || '暂无详细说明'}
@@ -4283,14 +4427,14 @@ function ToolsPanel({ createToolConfig, deleteToolConfig, requestDeleteConfirm, 
                 </div>
               </div>
 
-              <div className="tool-row-meta" style={{ display: 'flex', gap: '12px', alignItems: 'center', color: '#4b5563', fontSize: '12px' }}>
-                <span style={{ background: '#f3f4f6', padding: '3px 8px', borderRadius: '6px', fontWeight: 'bold', color: '#374151' }}>
+              <div className="tool-row-meta" style={{ display: 'flex', gap: '12px', alignItems: 'center', color: toolTheme.text, fontSize: '12px' }}>
+                <span style={{ background: toolTheme.methodBg, padding: '3px 8px', borderRadius: '6px', fontWeight: 'bold', color: toolTheme.methodText }}>
                   {tool.method || 'GET'}
                 </span>
-                <span style={{ color: '#9ca3af' }}>|</span>
+                <span style={{ color: toolTheme.muted }}>|</span>
                 <span>超时 {tool.timeout_seconds || 10}s</span>
-                <span style={{ color: '#9ca3af' }}>|</span>
-                <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', color: toolHasSecret(tool) ? '#b45309' : '#6b7280' }}>
+                <span style={{ color: toolTheme.muted }}>|</span>
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', color: toolHasSecret(tool) ? toolTheme.warnText : toolTheme.text }}>
                   <KeyRound size={12} />
                   {toolHasSecret(tool) ? '已配密钥' : '免鉴权'}
                 </span>
@@ -4301,19 +4445,7 @@ function ToolsPanel({ createToolConfig, deleteToolConfig, requestDeleteConfirm, 
                   type="button" 
                   disabled={testingId === tool.id} 
                   onClick={() => openToolTest(tool)}
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: '4px',
-                    padding: '6px 12px',
-                    borderRadius: '8px',
-                    background: 'rgba(77, 67, 230, 0.08)',
-                    color: '#4d43e6',
-                    border: '1px solid rgba(77, 67, 230, 0.15)',
-                    fontWeight: 600,
-                    cursor: 'pointer',
-                    fontSize: '12px',
-                  }}
+                  style={toolAccentButtonStyle}
                 >
                   <Sparkles size={13} />
                   {testingId === tool.id ? '测试中...' : '测试'}
@@ -4324,19 +4456,7 @@ function ToolsPanel({ createToolConfig, deleteToolConfig, requestDeleteConfirm, 
                       type="button" 
                       disabled={saving} 
                       onClick={() => openEditTool(tool)}
-                      style={{
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: '4px',
-                        padding: '6px 12px',
-                        borderRadius: '8px',
-                        background: '#ffffff',
-                        border: '1px solid #dfe4ef',
-                        color: '#374151',
-                        fontWeight: 600,
-                        cursor: 'pointer',
-                        fontSize: '12px',
-                      }}
+                      style={toolButtonStyle}
                     >
                       <SquarePen size={13} />
                       编辑
@@ -4346,17 +4466,8 @@ function ToolsPanel({ createToolConfig, deleteToolConfig, requestDeleteConfirm, 
                       disabled={saving} 
                       onClick={() => patchTool(tool, { enabled: tool.enabled === false })}
                       style={{
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: '4px',
-                        padding: '6px 12px',
-                        borderRadius: '8px',
-                        background: '#ffffff',
-                        border: '1px solid #dfe4ef',
-                        color: enabled ? '#d97706' : '#059669',
-                        fontWeight: 600,
-                        cursor: 'pointer',
-                        fontSize: '12px',
+                        ...toolButtonStyle,
+                        color: enabled ? toolTheme.warnText : toolTheme.successText,
                       }}
                     >
                       <Shield size={13} />
@@ -4367,19 +4478,7 @@ function ToolsPanel({ createToolConfig, deleteToolConfig, requestDeleteConfirm, 
                         type="button" 
                         disabled={saving} 
                         onClick={() => setSecretDialogTool(tool)}
-                        style={{
-                          display: 'flex',
-                          alignItems: 'center',
-                          gap: '4px',
-                          padding: '6px 12px',
-                          borderRadius: '8px',
-                          background: '#ffffff',
-                          border: '1px solid #dfe4ef',
-                          color: '#4b5563',
-                          fontWeight: 600,
-                          cursor: 'pointer',
-                          fontSize: '12px',
-                        }}
+                        style={toolButtonStyle}
                       >
                         <KeyRound size={13} />
                         更新密钥
@@ -4391,17 +4490,10 @@ function ToolsPanel({ createToolConfig, deleteToolConfig, requestDeleteConfirm, 
                       disabled={saving} 
                       onClick={() => deleteTool(tool)}
                       style={{
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: '4px',
-                        padding: '6px 12px',
-                        borderRadius: '8px',
-                        background: '#fee2e2',
-                        border: '1px solid #fecaca',
-                        color: '#ef4444',
-                        fontWeight: 600,
-                        cursor: 'pointer',
-                        fontSize: '12px',
+                        ...toolButtonStyle,
+                        background: toolTheme.dangerBg,
+                        border: `1px solid ${toolTheme.dangerBorder}`,
+                        color: toolTheme.dangerText,
                       }}
                     >
                       <Trash2 size={13} />
@@ -4413,19 +4505,7 @@ function ToolsPanel({ createToolConfig, deleteToolConfig, requestDeleteConfirm, 
                     type="button" 
                     disabled={saving} 
                     onClick={() => openCopyTool(tool)}
-                    style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: '4px',
-                      padding: '6px 12px',
-                      borderRadius: '8px',
-                      background: 'rgba(77, 67, 230, 0.05)',
-                      border: '1px solid rgba(77, 67, 230, 0.15)',
-                      color: '#4d43e6',
-                      fontWeight: 600,
-                      cursor: 'pointer',
-                      fontSize: '12px',
-                    }}
+                    style={toolAccentButtonStyle}
                   >
                     <Layers size={13} />
                     复制为自定义
@@ -4436,7 +4516,7 @@ function ToolsPanel({ createToolConfig, deleteToolConfig, requestDeleteConfirm, 
           );
         })}
         {tools.length === 0 && (
-          <p className="muted" style={{ padding: '24px', textAlign: 'center', background: '#f9fafb', borderRadius: '12px', border: '1px dashed #e5e7eb', color: '#6b7280' }}>
+          <p className="muted" style={{ padding: '24px', textAlign: 'center', background: toolTheme.emptyBg, borderRadius: '12px', border: `1px dashed ${toolTheme.emptyBorder}`, color: toolTheme.text }}>
             当前没有可用工具。保存 builtin_search 或 HTTP 工具后即可在 Builder 中绑定。
           </p>
         )}
