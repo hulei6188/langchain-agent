@@ -4748,7 +4748,7 @@ function UserModelsPanel({
       setForm(createUserModelForm());
       setFormOpen(false);
       setDraftTestResult(null);
-      setNotice(saved?.supports_image ? '模型连接已保存，图片探测通过。' : '模型连接已保存；图片探测未通过，但聊天发送不会被前端拦截。');
+      setNotice(saved?.supports_image ? '模型连接已保存，图片探测通过。' : '模型连接已保存；图片探测未通过，图片附件发送会提示切换视觉模型。');
     } catch (err) {
       setProfileError(errorMessage(err));
     } finally {
@@ -4778,7 +4778,7 @@ function UserModelsPanel({
     try {
       const updated = await updateUserModelConfig(config.id, patch);
       if (updated?.image_detection?.tested) {
-        setNotice(updated.supports_image ? '图片探测通过。' : '图片探测未通过；这只是诊断结果，不会拦截图片发送。');
+        setNotice(updated.supports_image ? '图片探测通过。' : '图片探测未通过；图片附件发送会提示切换视觉模型。');
       }
     } catch (err) {
       setProfileError(errorMessage(err));
@@ -4797,7 +4797,7 @@ function UserModelsPanel({
       const updated = await updateUserModelConfig(editConfig.id, userModelEditPayload(editForm));
       setEditConfig(null);
       setEditForm(null);
-      setNotice(updated?.supports_image ? '模型已保存，图片探测通过。' : '模型已保存；图片探测未通过，但聊天发送不会被前端拦截。');
+      setNotice(updated?.supports_image ? '模型已保存，图片探测通过。' : '模型已保存；图片探测未通过，图片附件发送会提示切换视觉模型。');
     } catch (err) {
       setProfileError(errorMessage(err));
     } finally {
@@ -4967,7 +4967,7 @@ function UserModelsPanel({
                 <input type="checkbox" checked disabled />
                 <span>
                   <strong>图片测试仅用于诊断</strong>
-                  <small>保存和测试会向模型发送最小图片请求；无论探测结果如何，聊天发送都不会被前端拦截。</small>
+                  <small>保存和测试会向模型发送最小图片请求；图片探测未通过时，聊天会阻止图片附件发送。</small>
                 </span>
               </label>
               <div className="model-capability-summary">
@@ -4975,13 +4975,13 @@ function UserModelsPanel({
                 <span className={imageProbeStatus.className}>{imageProbeStatus.label}</span>
                 <span className="enabled">文档附件后端解析</span>
                 <span className={reasoningCapabilityForModel(form).supported ? 'enabled' : ''}>{reasoningCapabilityForModel(form).label}</span>
-                <small>图片附件会随聊天请求发送；如果网关或模型不支持，会显示真实返回结果。</small>
+                <small>图片探测通过后可以发送图片附件；未通过时请切换视觉模型。</small>
               </div>
               <div className="model-checks state-checks">
                 <label><input type="checkbox" checked={form.enabled} onChange={(event) => updateForm({ enabled: event.target.checked })} />启用</label>
                 <label><input type="checkbox" checked={form.is_default} onChange={(event) => updateForm({ is_default: event.target.checked })} />设为默认</label>
               </div>
-              {formReady && !draftTestResult?.ok && <p className="model-row-warning">保存前请先点击“测试当前配置”。图片探测只作诊断；文档附件由后端解析成文本，RAG/Embedding 使用后端默认配置。</p>}
+              {formReady && !draftTestResult?.ok && <p className="model-row-warning">保存前请先点击“测试当前配置”。图片探测用于判断是否可发送图片附件；文档附件由后端解析成文本，RAG/Embedding 使用后端默认配置。</p>}
               {draftTestResult && <UserModelTestResult result={draftTestResult} />}
               <div className="model-form-actions">
                 <button className="preset-action" type="button" disabled={draftTesting || saving || !formReady} onClick={testDraftModel}>{draftTesting ? '检测中' : '测试当前配置'}</button>
@@ -5043,7 +5043,7 @@ function UserModelsPanel({
               <div className="model-channel-card">
                 <div className="model-channel-heading">
                   <strong>{editConfig.display_name || editConfig.chat_model}</strong>
-                  <small>测试连接会检查 chat 和图片请求，但图片发送不依赖预探测结果。</small>
+                  <small>测试连接会检查 chat 和图片请求；图片附件会按探测结果校验。</small>
                 </div>
                 <div className="user-model-grid compact">
                   <label className="field-stack">
@@ -5089,7 +5089,7 @@ function UserModelsPanel({
                 </div>
                 <div className="model-capability-summary">
                   <span className="enabled">文本</span>
-                  <span className="enabled">图片可发送</span>
+                  <span className={editForm.supports_image ? 'enabled' : ''}>{editForm.supports_image ? '图片可发送' : '图片未通过'}</span>
                   <span className={editForm.supports_document ? 'enabled' : ''}>文档附件后端解析</span>
                   <span className={reasoningCapabilityForModel(editForm).supported ? 'enabled' : ''}>{reasoningCapabilityForModel(editForm).label}</span>
                 </div>

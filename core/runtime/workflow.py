@@ -592,6 +592,9 @@ class WorkflowRunner:
     def _validate_model_capabilities(self, model: ModelConfig | UserModelConfig | None, uploads: list[Upload]) -> None:
         if not model:
             return
+        has_image = any(upload.kind == "image" for upload in uploads)
+        if has_image and not getattr(model, "supports_image", False):
+            raise ValueError("Selected model does not support image input")
         has_document = any(upload.kind == "document" for upload in uploads)
         if has_document and not getattr(model, "supports_document", True):
             raise ValueError("Selected model does not support document input")

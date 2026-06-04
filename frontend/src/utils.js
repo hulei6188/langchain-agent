@@ -430,8 +430,8 @@ function modelCapabilityChips(model) {
   if (!model) return [];
   const chips = [];
   if (model.supports_text !== false) chips.push('文本');
-  chips.push('图片可发送');
-  chips.push('文档附件后端解析');
+  if (model.supports_image === true) chips.push('图片可发送');
+  if (model.supports_document !== false) chips.push('文档附件后端解析');
   return chips.length ? chips : ['未声明能力'];
 }
 
@@ -478,7 +478,7 @@ function imageCapabilityFromTest(form, result) {
   if (check.tested || image.image_status === 'failed') {
     return { className: 'pending', label: image.image_error_code ? `图片探测失败：${image.image_error_code}` : '图片探测失败' };
   }
-  return { className: 'pending', label: '图片可发送，待测试' };
+  return { className: 'pending', label: '图片待测试' };
 }
 
 function thinkingStatusText(capability, enabled) {
@@ -609,7 +609,9 @@ function attachmentKind(item = {}) {
 function modelCapabilityWarning(model, attachments = []) {
   if (!attachments.length) return '';
   if (!model) return '请先选择一个已启用模型再发送附件。';
+  const hasImage = attachments.some((item) => attachmentKind(item) === 'image');
   const hasDocument = attachments.some((item) => attachmentKind(item) === 'document');
+  if (hasImage && model.supports_image !== true) return '当前模型不支持图片附件，请切换到视觉模型或移除图片附件。';
   if (hasDocument && model.supports_document === false) return '当前模型配置关闭了文档附件解析，请开启文档解析或移除文档附件。';
   return '';
 }

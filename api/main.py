@@ -151,6 +151,7 @@ from core.services.web_search import search_web, web_search_status
 
 PUBLIC_CHAT_ERRORS = (
     "Selected model does not support document input",
+    "Selected model does not support image input",
     "Upload not found or not accessible",
     "Stored API key is invalid",
     "Secure API key encryption is not configured",
