@@ -17,6 +17,7 @@ import {
   Brain,
   Check,
   ChevronLeft,
+  ChevronRight,
   Database,
   FileText,
   FileX2,
@@ -431,7 +432,7 @@ function App() {
       name: agent.name || '',
       avatar: agent.avatar || 'AI',
       description: agent.description || '',
-      opening_message: agent.opening_message || '',
+      opening_message: '',
       system_prompt: agent.system_prompt || '',
       model_id: agent.model_id || agent.model_config?.id || '',
       user_model_config_id: agent.user_model_config_id || agent.user_model_config?.id || '',
@@ -450,7 +451,7 @@ function App() {
     setSearchEnabled(false);
     setChatVariables(initVariableValues(agent.variables || []));
     setActiveSessionId(null);
-    setMessages(agent.opening_message ? [{ role: 'assistant', content: agent.opening_message }] : []);
+    setMessages([]);
     setSources([]);
     setToolDebugEvents([]);
     setFeedbackByMessage({});
@@ -572,7 +573,7 @@ function App() {
     if (sessionId === activeSessionId) {
       setActiveSessionId(null);
       setSessionTitleDraft('');
-      setMessages(activeAgent?.opening_message ? [{ role: 'assistant', content: activeAgent.opening_message }] : []);
+      setMessages([]);
       setSources([]);
       setToolDebugEvents([]);
       setFeedbackByMessage({});
@@ -1078,7 +1079,7 @@ function App() {
   function startNewChat() {
     setActiveSessionId(null);
     setSessionTitleDraft('');
-    setMessages(activeAgent?.opening_message ? [{ role: 'assistant', content: activeAgent.opening_message }] : []);
+    setMessages([]);
     setSources([]);
     setToolDebugEvents([]);
     setFeedbackByMessage({});
@@ -1157,7 +1158,11 @@ function App() {
     setBusy(true);
     setError('');
     setChatAttachments([]);
-    setMessages((items) => [...items, { role: 'user', content: text, attachments: outgoingAttachments }, { role: 'assistant', content: '', pending: true }]);
+    setMessages((items) => [
+      ...items,
+      { role: 'user', content: text, attachments: outgoingAttachments },
+      { role: 'assistant', content: '', pending: true, reasoning: '', reasoningPending: effectiveThinkingEnabled },
+    ]);
     setToolDebugEvents([]);
     try {
       const response = await fetch(`${API_BASE}/api/agents/${activeAgentId}/chat/stream`, {
@@ -1205,7 +1210,7 @@ function App() {
           const next = [...items];
           const last = next[next.length - 1];
           if (last?.role === 'assistant' && last.pending) {
-            next[next.length - 1] = { ...last, pending: false, error: true, content: message };
+            next[next.length - 1] = { ...last, pending: false, reasoningPending: false, error: true, content: message };
           }
           return next;
         });
@@ -1248,7 +1253,21 @@ function App() {
       setMessages((items) => {
         const next = [...items];
         const last = next[next.length - 1];
-        next[next.length - 1] = { ...last, pending: false, content: (last.content || '') + data.content };
+        next[next.length - 1] = { ...last, pending: false, reasoningPending: false, content: (last.content || '') + data.content };
+        return next;
+      });
+    }
+    if (event === 'reasoning_token') {
+      setMessages((items) => {
+        const next = [...items];
+        const last = next[next.length - 1];
+        if (last?.role === 'assistant') {
+          next[next.length - 1] = {
+            ...last,
+            reasoningPending: true,
+            reasoning: (last.reasoning || '') + (data.content || ''),
+          };
+        }
         return next;
       });
     }
@@ -1283,6 +1302,7 @@ function App() {
             id: data.message_id,
             run_id: data.run_id,
             pending: false,
+            reasoningPending: false,
             content: data.content || last.content,
           };
         }
@@ -1296,7 +1316,7 @@ function App() {
         const next = [...items];
         const last = next[next.length - 1];
         if (last?.role === 'assistant') {
-          next[next.length - 1] = { ...last, pending: false, error: true, content: detail };
+          next[next.length - 1] = { ...last, pending: false, reasoningPending: false, error: true, content: detail };
         }
         return next;
       });
@@ -1365,7 +1385,7 @@ function App() {
       name: '智能体一号',
       avatar: '66',
       description: '喜欢唱跳 rap 篮球的活泼角色扮演智能体。',
-      opening_message: '你好',
+      opening_message: '',
       system_prompt: JIGE_PROMPT,
       suggested_questions: ['你想问啥？'],
       variables: [
@@ -1565,6 +1585,7 @@ function App() {
 
 
 function HomeView(props) {
+  const [sidebarHidden, setSidebarHidden] = useState(false);
   const {
     activeAgent,
     activeAgentId,
@@ -1738,11 +1759,36 @@ function HomeView(props) {
   }
 
   return (
-    <main className="chat-app">
+    <main className={`chat-app ${sidebarHidden ? 'sidebar-hidden' : ''}`}>
+      {sidebarHidden && (
+        <button
+          className="sidebar-reopen-button"
+          type="button"
+          title="展开侧栏"
+          aria-label="展开侧栏"
+          onClick={() => setSidebarHidden(false)}
+        >
+          <ChevronRight size={17} />
+        </button>
+      )}
       <aside className="chat-sidebar">
         <div className="sidebar-brand">
           <span className="brand-dot"><Sparkles size={18} /></span>
           <strong>Lingshu Agent</strong>
+          <button
+            className="sidebar-toggle"
+            type="button"
+            title="隐藏侧栏"
+            aria-label="隐藏侧栏"
+            onClick={() => {
+              setSidebarHidden(true);
+              setAccountMenuOpen(false);
+              setSessionMenuId(null);
+              setSessionMenuPosition(null);
+            }}
+          >
+            <ChevronLeft size={16} />
+          </button>
         </div>
         <button className="new-chat" type="button" onClick={startNewChat}><SquarePen size={16} />新建会话</button>
         <nav className="main-nav">

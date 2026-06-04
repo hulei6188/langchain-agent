@@ -1,10 +1,10 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 import 'katex/dist/katex.min.css';
-import { ThumbsUp, ThumbsDown, FileText, Search, ImagePlus } from 'lucide-react';
+import { Brain, ThumbsUp, ThumbsDown, FileText, Search, ImagePlus } from 'lucide-react';
 import { AgentAvatar } from './AgentAvatar.jsx';
 
 export function MessageList({ messages, feedbackByMessage = {}, submitFeedback = () => {}, avatar = 'AI' }) {
@@ -20,7 +20,14 @@ export function MessageList({ messages, feedbackByMessage = {}, submitFeedback =
           <div className="message-body">
             {message.role === 'assistant' ? (
               <div className={message.error ? 'message-error' : ''}>
-                {message.pending && !message.content ? <p className="message-pending">思考中...</p> : <MarkdownContent content={message.content || ''} />}
+                {(message.reasoning || message.reasoningPending) && (
+                  <MessageReasoning content={message.reasoning || ''} pending={message.reasoningPending} />
+                )}
+                {message.pending && !message.content ? (
+                  <p className="message-pending">{message.reasoning ? '正在组织回答...' : '思考中...'}</p>
+                ) : (
+                  <MarkdownContent content={message.content || ''} />
+                )}
               </div>
             ) : <>
               <p>{message.content}</p>
@@ -65,6 +72,27 @@ export function MessageList({ messages, feedbackByMessage = {}, submitFeedback =
         </div>
       ))}
     </>
+  );
+}
+
+function MessageReasoning({ content, pending }) {
+  const [open, setOpen] = useState(true);
+
+  useEffect(() => {
+    if (pending) setOpen(true);
+  }, [pending]);
+
+  return (
+    <details className="message-reasoning" open={open} onToggle={(event) => setOpen(event.currentTarget.open)}>
+      <summary>
+        <Brain size={14} />
+        <strong>{pending ? '思考中' : '已思考'}</strong>
+        {content ? <small>{content.length} 字</small> : null}
+      </summary>
+      <div className="message-reasoning-content">
+        {content ? <MarkdownContent content={content} /> : <p>等待模型返回推理过程...</p>}
+      </div>
+    </details>
   );
 }
 

@@ -272,7 +272,7 @@ function defaultAgentForm() {
     name: '智能体一号',
     avatar: '66',
     description: '喜欢唱跳 rap 篮球的活泼角色扮演智能体。',
-    opening_message: '你好',
+    opening_message: '',
     system_prompt: JIGE_PROMPT,
     model_id: '',
     user_model_config_id: '',
@@ -295,6 +295,7 @@ function agentPayload(form, { model = null } = {}) {
   const rag = form.rag || { enabled_by_default: true, top_k: 4 };
   return {
     ...form,
+    opening_message: '',
     model_id: Number.isFinite(systemModelId) && systemModelId > 0 ? systemModelId : null,
     user_model_config_id: Number.isFinite(userModelId) && userModelId > 0 ? userModelId : null,
     model: form.model || null,

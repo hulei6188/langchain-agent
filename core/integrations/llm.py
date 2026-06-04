@@ -21,6 +21,13 @@ class ChatResponse:
     tool_calls: list[dict] | None = None
 
 
+@dataclass
+class ChatStreamChunk:
+    type: str
+    content: str = ""
+    tool_calls: list[dict] | None = None
+
+
 class OpenAICompatibleProvider:
     """Small OpenAI-compatible client with function calling support."""
 
@@ -36,6 +43,7 @@ class OpenAICompatibleProvider:
         temperature: float = 0.4,
         runtime_config: dict | None = None,
         tools: list[dict] | None = None,
+        thinking_enabled: bool | None = None,
     ) -> ChatResponse:
         settings = get_settings()
         api_key = self._api_key(settings, runtime_config, purpose="chat")
@@ -57,13 +65,16 @@ class OpenAICompatibleProvider:
             raise RuntimeError("Chat model API key is not configured")
         self.last_chat_mock = False
 
-        url = self._api_base(settings, runtime_config, purpose="chat").rstrip("/") + "/chat/completions"
+        api_base = self._api_base(settings, runtime_config, purpose="chat")
+        chat_model = model or (runtime_config or {}).get("chat_model") or settings.openai_model
+        url = api_base.rstrip("/") + "/chat/completions"
         payload: dict = {
-            "model": model or (runtime_config or {}).get("chat_model") or settings.openai_model,
+            "model": chat_model,
             "messages": messages,
             "temperature": temperature,
             "stream": False,
         }
+        self._apply_thinking_payload(payload, api_base=api_base, model=chat_model, thinking_enabled=thinking_enabled)
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
@@ -78,29 +89,63 @@ class OpenAICompatibleProvider:
         temperature: float = 0.4,
         runtime_config: dict | None = None,
         tools: list[dict] | None = None,
+        thinking_enabled: bool | None = None,
     ) -> Iterable[str]:
+        for chunk in self.chat_stream_events(
+            messages,
+            model=model,
+            temperature=temperature,
+            runtime_config=runtime_config,
+            tools=tools,
+            thinking_enabled=thinking_enabled,
+        ):
+            if chunk.type == "content":
+                yield chunk.content
+            elif chunk.type == "tool_calls":
+                yield json.dumps({"tool_calls": chunk.tool_calls or []}, ensure_ascii=False)
+
+    def chat_stream_events(
+        self,
+        messages: list[dict],
+        *,
+        model: str | None = None,
+        temperature: float = 0.4,
+        runtime_config: dict | None = None,
+        tools: list[dict] | None = None,
+        thinking_enabled: bool | None = None,
+    ) -> Iterable[ChatStreamChunk]:
         settings = get_settings()
         api_key = self._api_key(settings, runtime_config, purpose="chat")
         if settings.mock_llm:
             self.last_chat_mock = True
-            text = self.chat(messages, model=model, temperature=temperature, runtime_config=runtime_config, tools=tools)
+            text = self.chat(
+                messages,
+                model=model,
+                temperature=temperature,
+                runtime_config=runtime_config,
+                tools=tools,
+                thinking_enabled=thinking_enabled,
+            )
             if text.tool_calls:
-                yield json.dumps({"tool_calls": text.tool_calls}, ensure_ascii=False)
+                yield ChatStreamChunk(type="tool_calls", tool_calls=text.tool_calls)
                 return
             for index in range(0, len(text.content or ""), 24):
-                yield (text.content or "")[index : index + 24]
+                yield ChatStreamChunk(type="content", content=(text.content or "")[index : index + 24])
             return
         if not api_key:
             raise RuntimeError("Chat model API key is not configured")
         self.last_chat_mock = False
 
-        url = self._api_base(settings, runtime_config, purpose="chat").rstrip("/") + "/chat/completions"
+        api_base = self._api_base(settings, runtime_config, purpose="chat")
+        chat_model = model or (runtime_config or {}).get("chat_model") or settings.openai_model
+        url = api_base.rstrip("/") + "/chat/completions"
         payload: dict = {
-            "model": model or (runtime_config or {}).get("chat_model") or settings.openai_model,
+            "model": chat_model,
             "messages": messages,
             "temperature": temperature,
             "stream": True,
         }
+        self._apply_thinking_payload(payload, api_base=api_base, model=chat_model, thinking_enabled=thinking_enabled)
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
@@ -245,7 +290,21 @@ class OpenAICompatibleProvider:
                 f"Model call failed: cannot connect to model gateway {url}. Check OPENAI_API_BASE, proxy, certs and API key. Raw error: {exc}"
             ) from exc
 
-    def _post_json_stream(self, url: str, payload: dict, api_key: str) -> Iterable[str]:
+    def _apply_thinking_payload(self, payload: dict, *, api_base: str, model: str, thinking_enabled: bool | None) -> None:
+        if thinking_enabled is None or not self._is_dashscope_qwen(api_base, model):
+            return
+        payload["enable_thinking"] = bool(thinking_enabled)
+
+    @staticmethod
+    def _is_dashscope_qwen(api_base: str, model: str) -> bool:
+        normalized_base = (api_base or "").lower()
+        normalized_model = (model or "").lower()
+        return (
+            ("dashscope.aliyuncs.com" in normalized_base or "dashscope-intl.aliyuncs.com" in normalized_base)
+            and normalized_model.startswith("qwen")
+        )
+
+    def _post_json_stream(self, url: str, payload: dict, api_key: str) -> Iterable[ChatStreamChunk]:
         request = urllib.request.Request(
             url,
             data=json.dumps(payload).encode("utf-8"),
@@ -269,9 +328,7 @@ class OpenAICompatibleProvider:
                         data = json.loads(payload_text)
                     except json.JSONDecodeError:
                         continue
-                    token = self._stream_delta(data)
-                    if token:
-                        yield token
+                    yield from self._stream_chunks(data)
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")[:800]
             raise RuntimeError(
@@ -283,26 +340,62 @@ class OpenAICompatibleProvider:
             ) from exc
 
     def _stream_delta(self, data: dict) -> str:
+        return "".join(chunk.content for chunk in self._stream_chunks(data) if chunk.type == "content")
+
+    def _stream_chunks(self, data: dict) -> list[ChatStreamChunk]:
         choices = data.get("choices") or []
         if not choices:
-            return ""
+            return []
         first = choices[0] or {}
         delta = first.get("delta") or {}
+        chunks: list[ChatStreamChunk] = []
         if isinstance(delta, dict):
-            content = delta.get("content")
-            if isinstance(content, str):
-                return content
-            if isinstance(content, list):
-                parts = []
-                for item in content:
-                    if isinstance(item, dict) and isinstance(item.get("text"), str):
-                        parts.append(item["text"])
-                return "".join(parts)
+            chunks.extend(self._typed_value_chunks(delta.get("reasoning_content"), "reasoning"))
+            chunks.extend(self._typed_value_chunks(delta.get("reasoning"), "reasoning"))
+            chunks.extend(self._typed_value_chunks(delta.get("thinking"), "reasoning"))
+            chunks.extend(self._typed_value_chunks(delta.get("content"), "content"))
+            chunks.extend(self._typed_value_chunks(delta.get("text"), "content"))
+            if chunks:
+                return chunks
         message = first.get("message") or {}
-        if isinstance(message, dict) and isinstance(message.get("content"), str):
-            return message["content"]
+        if isinstance(message, dict):
+            chunks.extend(self._typed_value_chunks(message.get("reasoning_content"), "reasoning"))
+            chunks.extend(self._typed_value_chunks(message.get("reasoning"), "reasoning"))
+            chunks.extend(self._typed_value_chunks(message.get("thinking"), "reasoning"))
+            chunks.extend(self._typed_value_chunks(message.get("content"), "content"))
+            if chunks:
+                return chunks
         text = first.get("text")
-        return text if isinstance(text, str) else ""
+        return [ChatStreamChunk(type="content", content=text)] if isinstance(text, str) else []
+
+    def _typed_value_chunks(self, value, default_type: str) -> list[ChatStreamChunk]:
+        if not value:
+            return []
+        if isinstance(value, str):
+            return [ChatStreamChunk(type=default_type, content=value)]
+        if isinstance(value, list):
+            chunks: list[ChatStreamChunk] = []
+            for item in value:
+                if isinstance(item, str):
+                    chunks.append(ChatStreamChunk(type=default_type, content=item))
+                    continue
+                if not isinstance(item, dict):
+                    continue
+                text = self._stream_item_text(item)
+                if not text:
+                    continue
+                item_type = str(item.get("type") or default_type).lower()
+                chunk_type = "reasoning" if ("reason" in item_type or "thinking" in item_type) else default_type
+                chunks.append(ChatStreamChunk(type=chunk_type, content=text))
+            return chunks
+        return []
+
+    def _stream_item_text(self, item: dict) -> str:
+        for key in ("text", "content", "reasoning_content", "reasoning", "thinking"):
+            value = item.get(key)
+            if isinstance(value, str):
+                return value
+        return ""
 
     def _content_text(self, content) -> str:
         if isinstance(content, str):

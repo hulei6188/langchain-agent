@@ -1464,6 +1464,8 @@ def stream_chat_events(db: Session, agent: Agent, user_id: int, request: ChatReq
         ):
             if event["event"] == "token":
                 yield sse_event("token", {"content": event.get("content", "")})
+            elif event["event"] == "reasoning_token":
+                yield sse_event("reasoning_token", {"content": event.get("content", "")})
             elif event["event"] == "step":
                 step = event["step"]
                 for runtime_event in step.get("events", []):

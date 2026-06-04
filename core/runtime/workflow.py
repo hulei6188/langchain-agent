@@ -418,7 +418,13 @@ class WorkflowRunner:
                         tools_used.append(tool_name)
 
             # Max rounds reached — get final answer from accumulated context
-            final = self.provider.chat(messages, model=agent.model, temperature=agent.temperature, runtime_config=agent.runtime_config)
+            final = self.provider.chat(
+                messages,
+                model=agent.model,
+                temperature=agent.temperature,
+                runtime_config=agent.runtime_config,
+                thinking_enabled=self._thinking_request_value(context),
+            )
             return {
                 "draft": final.content or "",
                 "tool_outputs": [],
@@ -429,7 +435,13 @@ class WorkflowRunner:
             if context.get("draft"):
                 return self._llm_output(agent, context, context["draft"])
             messages = self._llm_messages(agent, context)
-            draft = self.provider.chat(messages, model=agent.model, temperature=agent.temperature, runtime_config=agent.runtime_config).content or ""
+            draft = self.provider.chat(
+                messages,
+                model=agent.model,
+                temperature=agent.temperature,
+                runtime_config=agent.runtime_config,
+                thinking_enabled=self._thinking_request_value(context),
+            ).content or ""
             return self._llm_output(agent, context, draft)
         if node_type == "Answer":
             answer = (context.get("draft") or "").strip()
@@ -447,11 +459,28 @@ class WorkflowRunner:
             return self._llm_output(agent, context, draft)
         messages = self._llm_messages(agent, context)
         chunks = []
-        for token in self.provider.chat_stream(messages, model=agent.model, temperature=agent.temperature, runtime_config=agent.runtime_config):
-            chunks.append(token)
-            yield {"event": "token", "content": token}
+        reasoning_chunks = []
+        for chunk in self.provider.chat_stream_events(
+            messages,
+            model=agent.model,
+            temperature=agent.temperature,
+            runtime_config=agent.runtime_config,
+            thinking_enabled=self._thinking_request_value(context),
+        ):
+            if chunk.type == "reasoning":
+                reasoning_chunks.append(chunk.content)
+                yield {"event": "reasoning_token", "content": chunk.content}
+            elif chunk.type == "content":
+                chunks.append(chunk.content)
+                yield {"event": "token", "content": chunk.content}
         draft = "".join(chunks)
-        return self._llm_output(agent, context, draft)
+        return self._llm_output(agent, context, draft, reasoning="".join(reasoning_chunks))
+
+    def _thinking_request_value(self, context: dict) -> bool | None:
+        status = context.get("thinking_status") or {}
+        if status.get("type") not in {"native", "prompt"}:
+            return None
+        return bool(status.get("enabled"))
 
     def _llm_messages(self, agent, context: dict) -> list[dict]:
         source_text = "\n".join(f"- {item['title']}: {item['snippet']}" for item in context.get("sources", []))
@@ -497,7 +526,7 @@ class WorkflowRunner:
             {"role": "user", "content": self._user_content(context["input"], context.get("uploads", []))},
         ]
 
-    def _llm_output(self, agent, context: dict, draft: str) -> dict:
+    def _llm_output(self, agent, context: dict, draft: str, *, reasoning: str = "") -> dict:
         return {
             "draft": draft,
             "used_memory": bool(context.get("memory_summary")),
@@ -507,6 +536,7 @@ class WorkflowRunner:
             "mock": self.provider.last_chat_mock,
             "thinking_enabled": bool(context.get("thinking_enabled")),
             "thinking_type": (context.get("thinking_status") or {}).get("type", "none"),
+            "reasoning_chars": len(reasoning or ""),
             "search_enabled": bool(context.get("search_enabled")),
             "search_result_count": len(context.get("web_sources", [])),
         }

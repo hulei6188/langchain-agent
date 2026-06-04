@@ -667,22 +667,11 @@ export function BuilderView(props) {
             <div className="coze-accordion-header" onClick={() => toggleSection('onboarding')}>
               <div className="coze-header-left">
                 <ChevronRight size={14} className="coze-caret-icon" />
-                <span>开场白与引导问题</span>
+                <span>开场引导问题</span>
               </div>
             </div>
             <div className="coze-accordion-body">
-              <label className="field-label" style={{ fontWeight: 600, color: '#374151', fontSize: '13px' }}>开场白文案</label>
-              <textarea 
-                value={agentForm.opening_message} 
-                onChange={(e) => setAgentForm({ ...agentForm, opening_message: e.target.value })} 
-                placeholder="例如：你好！我是智能助理，今天有什么可以帮您的？" 
-                style={{ width: '100%', minHeight: '80px', padding: '10px', borderRadius: '8px', border: '1px solid #dfe4ef', marginTop: '6px', fontSize: '13px' }}
-              />
-              <small className="counter" style={{ display: 'block', textAlign: 'right', margin: '4px 0 10px', color: '#94a3b8' }}>
-                {agentForm.opening_message?.length ?? 0}/1000
-              </small>
-              
-              <div style={{ borderTop: '1px solid #eef0f5', paddingTop: '10px', marginTop: '10px' }}>
+              <div>
                 <ConfigRow label="开场引导问题"><span className="muted" style={{ fontSize: '12px', color: '#94a3b8' }}>前台展示</span></ConfigRow>
                 <div className="dynamic-list" style={{ marginTop: '8px' }}>
                   {(agentForm.suggested_questions || []).map((question, index) => (
@@ -889,7 +878,6 @@ export function BuilderView(props) {
               <div className="preview-hero compact">
                 <AgentAvatar value={agentForm.avatar} className="bot-avatar large" />
                 <strong>{agentForm.name || '智能体一号'}</strong>
-                <p>{agentForm.opening_message || '你好'}</p>
               </div>
             ) : (
               <MessageList messages={messages} feedbackByMessage={feedbackByMessage} submitFeedback={submitFeedback} avatar={activeAgent?.avatar || agentForm.avatar || 'AI'} />
