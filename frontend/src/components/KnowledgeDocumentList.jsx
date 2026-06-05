@@ -69,15 +69,15 @@ export function DocumentRow({ deleteDocument, document, expandedChunks, onToggle
         <FileX2 size={14} />
       </button>
       {isExpanded && expandedChunks?.items && (
-        <div style={{ gridColumn: '1 / -1', borderTop: '1px solid #eef0f5', paddingTop: 8, marginTop: 4 }}>
+        <div className="document-chunk-list">
           {isLoading ? <span className="muted">加载中...</span> : expandedChunks.items.map((chunk, idx) => (
-            <div key={chunk.id || idx} style={{ border: '1px solid #eef0f5', borderRadius: 8, padding: '8px 10px', marginBottom: 6, fontSize: 12, lineHeight: 1.55 }}>
-              <div style={{ display: 'flex', gap: 8, marginBottom: 4 }}>
-                <span className="document-status indexed" style={{ fontSize: 10 }}>#{chunk.chunk_index}</span>
-                <small style={{ color: '#667085' }}>{chunk.chunk_id}</small>
-                <small style={{ color: '#98a2b3' }}>{chunk.embedding_dimension}d</small>
+            <div key={chunk.id || idx} className="document-chunk-card">
+              <div className="document-chunk-meta">
+                <span className="document-status indexed">#{chunk.chunk_index}</span>
+                <small>{chunk.chunk_id}</small>
+                <small>{chunk.embedding_dimension}d</small>
               </div>
-              <div style={{ color: '#344054', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{chunk.text}</div>
+              <div className="document-chunk-text">{chunk.text}</div>
             </div>
           ))}
         </div>
