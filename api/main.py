@@ -1398,7 +1398,7 @@ def get_session(session_id: int, membership: WorkspaceMember = Depends(get_curre
         raise HTTPException(status_code=404, detail="Session not found")
     require_session_access(session, membership)
     messages = db.query(Message).filter(Message.session_id == session.id).order_by(Message.id.asc()).all()
-    return {"session": session_payload(session, db), "messages": [message_payload(message) for message in messages]}
+    return {"session": session_payload(session, db), "messages": chat_message_payloads(messages)}
 
 
 @app.patch("/api/sessions/{session_id}")
@@ -1453,6 +1453,8 @@ def stream_chat_events(db: Session, agent: Agent, user_id: int, request: ChatReq
         reasoning = ""
         reasoning_started_at = None
         reasoning_duration_ms = None
+        used_tools = False
+        requires_reasoning_replay = False
         for event in runner.run_events(
             agent=agent,
             chat_session=session,
@@ -1464,6 +1466,7 @@ def stream_chat_events(db: Session, agent: Agent, user_id: int, request: ChatReq
             thinking_enabled=request.thinking_enabled,
             search_enabled=request.search_enabled,
             attachments=request.attachments,
+            current_message_id=user_message.id,
         ):
             if event["event"] == "token":
                 if reasoning_started_at is not None and reasoning_duration_ms is None:
@@ -1478,12 +1481,31 @@ def stream_chat_events(db: Session, agent: Agent, user_id: int, request: ChatReq
             elif event["event"] == "step":
                 step = event["step"]
                 for runtime_event in step.get("events", []):
-                    yield sse_event(runtime_event.get("event", "tool_call"), runtime_event.get("data", {}))
+                    runtime_event_name = runtime_event.get("event", "tool_call")
+                    runtime_event_data = runtime_event.get("data", {}) or {}
+                    if runtime_event_name == "reasoning_token":
+                        content = runtime_event_data.get("content", "")
+                        if content:
+                            if reasoning_started_at is None:
+                                reasoning_started_at = time.perf_counter()
+                            reasoning += content
+                        yield sse_event("reasoning_token", {"content": content})
+                        continue
+                    yield sse_event(runtime_event_name, runtime_event_data)
                 yield sse_event("run_step", step)
             elif event["event"] == "complete":
                 run = event["run"]
                 answer = event["answer"]
                 sources = event["sources"]
+                used_tools = any(
+                    (step.get("node_type") == "Tool")
+                    and int(((step.get("output") or {}).get("tool_stats") or {}).get("total_calls") or 0) > 0
+                    for step in event.get("steps", [])
+                )
+                requires_reasoning_replay = any(
+                    bool((step.get("output") or {}).get("reasoning_replay_required"))
+                    for step in event.get("steps", [])
+                )
         if reasoning_started_at is not None and reasoning_duration_ms is None:
             reasoning_duration_ms = int((time.perf_counter() - reasoning_started_at) * 1000)
         if sources:
@@ -1495,6 +1517,11 @@ def stream_chat_events(db: Session, agent: Agent, user_id: int, request: ChatReq
             reasoning=reasoning,
             reasoning_duration_ms=reasoning_duration_ms,
             sources=sources,
+            meta={
+                **({"used_tools": True} if used_tools else {}),
+                **({"reasoning_includes_intermediate": True} if used_tools and reasoning else {}),
+                **({"requires_reasoning_replay": True} if used_tools and requires_reasoning_replay else {}),
+            },
         )
         db.add(assistant)
         db.commit()
@@ -1586,7 +1613,8 @@ def invite_payload(invite: WorkspaceInvite, *, include_token: bool = False) -> d
 
 
 def session_payload(session: ChatSession, db: Session) -> dict:
-    count = db.query(Message).filter(Message.session_id == session.id).count()
+    messages = db.query(Message).filter(Message.session_id == session.id).all()
+    count = len([message for message in messages if visible_chat_message(message)])
     return {
         "id": session.id,
         "agent_id": session.agent_id,
@@ -1597,6 +1625,33 @@ def session_payload(session: ChatSession, db: Session) -> dict:
     }
 
 
+def chat_message_payloads(messages: list[Message]) -> list[dict]:
+    payloads: list[dict] = []
+    pending_reasoning: list[str] = []
+    for message in messages:
+        meta = message.meta or {}
+        if message.role == "assistant" and meta.get("is_intermediate"):
+            if message.reasoning:
+                pending_reasoning.append(message.reasoning)
+            continue
+        if not visible_chat_message(message):
+            continue
+        if message.role == "user":
+            pending_reasoning = []
+        payload = message_payload(message)
+        if message.role == "assistant" and pending_reasoning:
+            payload_meta = payload.get("meta") or {}
+            if not payload_meta.get("reasoning_includes_intermediate"):
+                payload["reasoning"] = merge_reasoning_parts([*pending_reasoning, payload.get("reasoning") or ""])
+            pending_reasoning = []
+        payloads.append(payload)
+    return payloads
+
+
+def merge_reasoning_parts(parts: list[str]) -> str:
+    return "\n\n".join(part.strip() for part in parts if part and part.strip())
+
+
 def message_payload(message: Message) -> dict:
     return {
         "id": message.id,
@@ -1605,8 +1660,18 @@ def message_payload(message: Message) -> dict:
         "reasoning": message.reasoning or "",
         "reasoningDurationMs": message.reasoning_duration_ms,
         "sources": message.sources or [],
+        "toolCalls": message.tool_calls or [],
+        "toolCallId": message.tool_call_id or "",
+        "toolName": message.tool_name or "",
+        "meta": message.meta or {},
         "created_at": message.created_at.isoformat() if message.created_at else None,
     }
+
+
+def visible_chat_message(message: Message) -> bool:
+    if message.role == "tool":
+        return False
+    return not bool((message.meta or {}).get("is_intermediate"))
 
 
 def invite_workspace(db: Session, workspace_id: int):

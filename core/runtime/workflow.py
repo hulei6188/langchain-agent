@@ -12,6 +12,7 @@ from core.db.models import (
     AgentKnowledgeBase,
     AgentTool,
     AgentVersion,
+    Message,
     ModelConfig,
     Run,
     RunStep,
@@ -22,7 +23,7 @@ from core.db.models import (
     Upload,
     WorkflowDefinition,
 )
-from core.integrations.llm import OpenAICompatibleProvider
+from core.integrations.llm import ChatResponse, OpenAICompatibleProvider
 from core.services.agents import get_agent_detail, normalize_memory, normalize_rag, normalize_tool_policy
 from core.services.rag import retrieve
 from core.services.memory import format_profile_memory, get_memory_profile, memory_used_event
@@ -34,7 +35,6 @@ from core.services.user_models import (
     user_model_runtime_config,
 )
 from core.services import web_search as web_search_service
-from core.services.web_search import WebSearchError
 
 
 def default_workflow() -> list[dict]:
@@ -74,6 +74,7 @@ class WorkflowRunner:
         search_status = self._search_status(user_message, search_enabled)
 
         rag_config = normalize_rag({**dict(runtime.settings.get("rag") or {}), **dict(rag_options or {})})
+        memory_config = normalize_memory(runtime.settings.get("memory"))
         effective_rag_enabled = rag_config["enabled_by_default"] if rag_enabled is None else bool(rag_enabled)
 
         run = Run(workspace_id=agent.workspace_id, agent_id=agent.id, session_id=chat_session.id, status="running")
@@ -92,21 +93,26 @@ class WorkflowRunner:
         profile_memory_text = format_profile_memory(profile_memory)
         profile_memory_event = memory_used_event(profile_memory, session_summary_used=bool(memory and memory.summary))
         context: dict = {
+            "session_id": chat_session.id,
+            "run_id": run.id,
             "input": user_message,
             "sources": [],
             "tool_outputs": [],
             "draft": "",
+            "history_messages": self._session_history(chat_session.id, max_messages=int(memory_config.get("max_messages") or 12)),
+            "current_message_id": None,
             "variables": self._merge_variables(runtime.settings.get("variables", []), variables or {}),
             "memory_summary": memory.summary if memory else "",
             "profile_memory": profile_memory_text,
             "profile_memory_used": profile_memory_event,
-            "memory_enabled": normalize_memory(runtime.settings.get("memory")).get("enabled", False),
+            "memory_enabled": memory_config.get("enabled", False),
             "rag_enabled": effective_rag_enabled,
             **({"rag_enabled_request": rag_enabled} if rag_enabled is not None else {}),
             "rag_top_k": rag_config["top_k"],
             "rag_config": rag_config,
             "thinking_enabled": thinking_status["enabled"],
             "thinking_status": thinking_status,
+            "reasoning_replay_required": self.provider.requires_reasoning_replay(model=runtime.model, runtime_config=runtime.runtime_config),
             "search_enabled": search_status["enabled"],
             "search_status": search_status,
             "web_sources": search_status.get("sources", []),
@@ -170,6 +176,7 @@ class WorkflowRunner:
         thinking_enabled: bool | None = None,
         search_enabled: bool | None = None,
         attachments: list[dict] | None = None,
+        current_message_id: int | None = None,
     ):
         runtime, run, context = self._start_run(
             agent=agent,
@@ -182,11 +189,14 @@ class WorkflowRunner:
             thinking_enabled=thinking_enabled,
             search_enabled=search_enabled,
             attachments=attachments,
+            current_message_id=current_message_id,
         )
         steps: list[dict] = []
         for node in runtime.workflow:
             if node["type"] == "LLM":
                 output = yield from self._stream_llm_node(runtime, node, context)
+            elif node["type"] == "Tool":
+                output = yield from self._stream_tool_node(runtime, node, context)
             else:
                 output = self._execute_node(runtime, node, context)
             if not steps:
@@ -239,6 +249,7 @@ class WorkflowRunner:
         thinking_enabled: bool | None,
         search_enabled: bool | None,
         attachments: list[dict] | None,
+        current_message_id: int | None = None,
     ) -> tuple[object, Run, dict]:
         runtime = self._runtime_agent(agent, mode, chat_session.user_id)
         upload_ids = [str(item.get("id")) for item in attachments or [] if item.get("id")]
@@ -248,6 +259,7 @@ class WorkflowRunner:
         search_status = self._search_status(user_message, search_enabled)
 
         rag_config = normalize_rag({**dict(runtime.settings.get("rag") or {}), **dict(rag_options or {})})
+        memory_config = normalize_memory(runtime.settings.get("memory"))
         effective_rag_enabled = rag_config["enabled_by_default"] if rag_enabled is None else bool(rag_enabled)
 
         run = Run(workspace_id=agent.workspace_id, agent_id=agent.id, session_id=chat_session.id, status="running")
@@ -266,21 +278,26 @@ class WorkflowRunner:
         profile_memory_text = format_profile_memory(profile_memory)
         profile_memory_event = memory_used_event(profile_memory, session_summary_used=bool(memory and memory.summary))
         context: dict = {
+            "session_id": chat_session.id,
+            "run_id": run.id,
             "input": user_message,
             "sources": [],
             "tool_outputs": [],
             "draft": "",
+            "history_messages": self._session_history(chat_session.id, max_messages=int(memory_config.get("max_messages") or 12)),
+            "current_message_id": current_message_id,
             "variables": self._merge_variables(runtime.settings.get("variables", []), variables or {}),
             "memory_summary": memory.summary if memory else "",
             "profile_memory": profile_memory_text,
             "profile_memory_used": profile_memory_event,
-            "memory_enabled": normalize_memory(runtime.settings.get("memory")).get("enabled", False),
+            "memory_enabled": memory_config.get("enabled", False),
             "rag_enabled": effective_rag_enabled,
             **({"rag_enabled_request": rag_enabled} if rag_enabled is not None else {}),
             "rag_top_k": rag_config["top_k"],
             "rag_config": rag_config,
             "thinking_enabled": thinking_status["enabled"],
             "thinking_status": thinking_status,
+            "reasoning_replay_required": self.provider.requires_reasoning_replay(model=runtime.model, runtime_config=runtime.runtime_config),
             "search_enabled": search_status["enabled"],
             "search_status": search_status,
             "web_sources": search_status.get("sources", []),
@@ -351,11 +368,11 @@ class WorkflowRunner:
             status = {**rag_result.status, "effective_source": effective_source}
             return {"sources": sources, "rag_enabled": True, "rag_status": status, "events": [{"event": "rag_status", "data": status}]}
         if node_type == "Tool":
-            bound_tools = self._runtime_tools(agent, node)
+            bound_tools = self._runtime_tools(agent, node, context)
             tool_policy = (agent.settings.get("tool_policy") or {})
             allowed_names = set(tool_policy.get("allowed_tool_names") or [])
             if allowed_names:
-                bound_tools = [t for t in bound_tools if t.name in allowed_names]
+                bound_tools = [t for t in bound_tools if t.name in allowed_names or t.type == "builtin_search"]
             if not bound_tools:
                 return {"tool_outputs": [], "tool_stats": {"total_calls": 0, "tools_used": []}}
 
@@ -364,6 +381,8 @@ class WorkflowRunner:
             total_calls = 0
             tools_used: list[str] = []
             events = []
+            web_sources = list(context.get("web_sources", []))
+            search_status = dict(context.get("search_status") or {})
             max_tool_calls = 20
             max_tool_wall_time = 120  # seconds
             tool_loop_start = time.monotonic()
@@ -379,18 +398,39 @@ class WorkflowRunner:
                     temperature=agent.temperature,
                     runtime_config=agent.runtime_config,
                     tools=tool_schemas,
+                    thinking_enabled=self._thinking_request_value(context),
                 )
                 if response.content and not response.tool_calls:
                     return {
                         "draft": response.content,
+                        "draft_reasoning": response.reasoning_content or "",
+                        "web_sources": web_sources,
+                        "search_status": search_status,
                         "tool_outputs": [],
                         "tool_stats": {"total_calls": total_calls, "tools_used": tools_used},
+                        "events": events,
                     }
                 if response.tool_calls:
-                    assistant_msg = {"role": "assistant", "content": response.content, "tool_calls": response.tool_calls}
-                    messages.append(assistant_msg)
-                    # Limit tool_calls per round to remaining budget
                     calls_this_round = response.tool_calls[:max_tool_calls - total_calls]
+                    if not calls_this_round:
+                        break
+                    if response.reasoning_content and context.get("thinking_enabled"):
+                        reasoning_content = response.reasoning_content.strip()
+                        if reasoning_content:
+                            events.append({"event": "reasoning_token", "data": {"content": f"{reasoning_content}\n\n"}})
+                    assistant_msg = {"role": "assistant", "content": response.content, "tool_calls": calls_this_round}
+                    if response.reasoning_content:
+                        assistant_msg["reasoning_content"] = response.reasoning_content
+                    messages.append(assistant_msg)
+                    self._persist_intermediate_message(
+                        context,
+                        role="assistant",
+                        content=response.content or "",
+                        reasoning=response.reasoning_content or "",
+                        tool_calls=calls_this_round,
+                        meta={"node_id": node["id"], "round": _round, "kind": "tool_calls"},
+                    )
+                    # Limit tool_calls per round to remaining budget
                     for tc in calls_this_round:
                         if time.monotonic() - tool_loop_start > max_tool_wall_time:
                             break
@@ -406,14 +446,49 @@ class WorkflowRunner:
                             try:
                                 result = execute_tool(matching, {"input": tool_args})
                                 result["latency_ms"] = result.get("latency_ms", int((time.monotonic() - started) * 1000))
-                                events.append({"event": "tool_call", "data": tool_call_event(matching, result, input_preview=json.dumps(tool_args, ensure_ascii=False))})
-                                messages.append({"role": "tool", "tool_call_id": tc["id"], "content": result.get("content") or result.get("result_preview") or ""})
+                                tool_content = result.get("content") or result.get("result_preview") or ""
+                                event_data = tool_call_event(matching, result, input_preview=json.dumps(tool_args, ensure_ascii=False))
+                                events.append({"event": "tool_call", "data": event_data})
+                                if matching.type == "builtin_search":
+                                    web_sources, search_status = self._merge_web_search_tool_result(web_sources, search_status, result)
+                                    events.append({"event": "search_status", "data": self._search_status_event(search_status)})
+                                messages.append({"role": "tool", "tool_call_id": tc["id"], "content": tool_content})
+                                self._persist_intermediate_message(
+                                    context,
+                                    role="tool",
+                                    content=tool_content,
+                                    tool_call_id=tc["id"],
+                                    tool_name=tool_name,
+                                    meta={**event_data, "node_id": node["id"], "round": _round, "kind": "tool_result"},
+                                )
                             except ValueError as exc:
-                                events.append({"event": "tool_call", "data": tool_call_event(matching, {"tool": tool_name, "content": "", "result_preview": "", "latency_ms": int((time.monotonic() - started) * 1000), "error": str(exc)}, status="error", input_preview=json.dumps(tool_args, ensure_ascii=False), error_code="tool_error")})
-                                messages.append({"role": "tool", "tool_call_id": tc["id"], "content": f"Error: {exc}"})
+                                error_result = {"tool": tool_name, "content": "", "result_preview": "", "latency_ms": int((time.monotonic() - started) * 1000), "error": str(exc)}
+                                event_data = tool_call_event(matching, error_result, status="error", input_preview=json.dumps(tool_args, ensure_ascii=False), error_code="tool_error")
+                                tool_content = f"Error: {exc}"
+                                events.append({"event": "tool_call", "data": event_data})
+                                messages.append({"role": "tool", "tool_call_id": tc["id"], "content": tool_content})
+                                self._persist_intermediate_message(
+                                    context,
+                                    role="tool",
+                                    content=tool_content,
+                                    tool_call_id=tc["id"],
+                                    tool_name=tool_name,
+                                    meta={**event_data, "node_id": node["id"], "round": _round, "kind": "tool_result"},
+                                )
                         else:
-                            events.append({"event": "tool_call", "data": tool_call_event(type("_", (), {"id": None, "name": tool_name, "type": "unknown"})(), {"tool": tool_name, "content": "", "result_preview": "", "latency_ms": 0}, status="error", input_preview="{}", error_code="tool_not_found")})
-                            messages.append({"role": "tool", "tool_call_id": tc["id"], "content": f"Tool '{tool_name}' not found"})
+                            unknown_tool = type("_", (), {"id": None, "name": tool_name, "type": "unknown"})()
+                            event_data = tool_call_event(unknown_tool, {"tool": tool_name, "content": "", "result_preview": "", "latency_ms": 0}, status="error", input_preview="{}", error_code="tool_not_found")
+                            tool_content = f"Tool '{tool_name}' not found"
+                            events.append({"event": "tool_call", "data": event_data})
+                            messages.append({"role": "tool", "tool_call_id": tc["id"], "content": tool_content})
+                            self._persist_intermediate_message(
+                                context,
+                                role="tool",
+                                content=tool_content,
+                                tool_call_id=tc["id"],
+                                tool_name=tool_name,
+                                meta={**event_data, "node_id": node["id"], "round": _round, "kind": "tool_result"},
+                            )
                         total_calls += 1
                         tools_used.append(tool_name)
 
@@ -427,13 +502,16 @@ class WorkflowRunner:
             )
             return {
                 "draft": final.content or "",
+                "draft_reasoning": final.reasoning_content or "",
+                "web_sources": web_sources,
+                "search_status": search_status,
                 "tool_outputs": [],
                 "tool_stats": {"total_calls": total_calls, "tools_used": tools_used, "max_rounds_reached": True},
                 "events": events,
             }
         if node_type == "LLM":
             if context.get("draft"):
-                return self._llm_output(agent, context, context["draft"])
+                return self._llm_output(agent, context, context["draft"], reasoning=context.get("draft_reasoning") or "")
             messages = self._llm_messages(agent, context)
             draft = self.provider.chat(
                 messages,
@@ -450,13 +528,263 @@ class WorkflowRunner:
             return {"answer": answer, "citation_count": len([*context.get("sources", []), *context.get("web_sources", [])])}
         return {}
 
+    def _stream_tool_node(self, agent, node: dict, context: dict):
+        bound_tools = self._runtime_tools(agent, node, context)
+        tool_policy = (agent.settings.get("tool_policy") or {})
+        allowed_names = set(tool_policy.get("allowed_tool_names") or [])
+        if allowed_names:
+            bound_tools = [t for t in bound_tools if t.name in allowed_names or t.type == "builtin_search"]
+        if not bound_tools:
+            return {"tool_outputs": [], "tool_stats": {"total_calls": 0, "tools_used": []}}
+
+        tool_schemas = [tool_schema_for_llm(t) for t in bound_tools]
+        messages = self._llm_messages(agent, context)
+        total_calls = 0
+        tools_used: list[str] = []
+        events = []
+        web_sources = list(context.get("web_sources", []))
+        search_status = dict(context.get("search_status") or {})
+        max_tool_calls = 20
+        max_tool_wall_time = 120
+        tool_loop_start = time.monotonic()
+
+        for _round in range(8):
+            if total_calls >= max_tool_calls:
+                break
+            if time.monotonic() - tool_loop_start > max_tool_wall_time:
+                break
+            response = yield from self._stream_chat_response(
+                agent,
+                messages,
+                context,
+                tools=tool_schemas,
+                stream_content=True,
+            )
+            reasoning_streamed = bool(response.reasoning_content and context.get("thinking_enabled"))
+            if response.content and not response.tool_calls:
+                return {
+                    "draft": response.content,
+                    "draft_streamed": True,
+                    "draft_reasoning": response.reasoning_content or "",
+                    "draft_reasoning_streamed": reasoning_streamed,
+                    "web_sources": web_sources,
+                    "search_status": search_status,
+                    "tool_outputs": [],
+                    "tool_stats": {"total_calls": total_calls, "tools_used": tools_used},
+                    "events": events,
+                }
+            if response.tool_calls:
+                calls_this_round = response.tool_calls[:max_tool_calls - total_calls]
+                if not calls_this_round:
+                    break
+                assistant_msg = {"role": "assistant", "content": response.content, "tool_calls": calls_this_round}
+                if response.reasoning_content:
+                    assistant_msg["reasoning_content"] = response.reasoning_content
+                messages.append(assistant_msg)
+                self._persist_intermediate_message(
+                    context,
+                    role="assistant",
+                    content=response.content or "",
+                    reasoning=response.reasoning_content or "",
+                    tool_calls=calls_this_round,
+                    meta={"node_id": node["id"], "round": _round, "kind": "tool_calls"},
+                )
+                for tc in calls_this_round:
+                    if time.monotonic() - tool_loop_start > max_tool_wall_time:
+                        break
+                    web_sources, search_status, tool_name = self._execute_stream_tool_call(
+                        tc,
+                        bound_tools,
+                        messages,
+                        events,
+                        web_sources,
+                        search_status,
+                        context,
+                        node,
+                        _round,
+                    )
+                    total_calls += 1
+                    tools_used.append(tool_name)
+            else:
+                break
+
+        final = yield from self._stream_chat_response(agent, messages, context, stream_content=True)
+        return {
+            "draft": final.content or "",
+            "draft_streamed": bool(final.content),
+            "draft_reasoning": final.reasoning_content or "",
+            "draft_reasoning_streamed": bool(final.reasoning_content and context.get("thinking_enabled")),
+            "web_sources": web_sources,
+            "search_status": search_status,
+            "tool_outputs": [],
+            "tool_stats": {"total_calls": total_calls, "tools_used": tools_used, "max_rounds_reached": True},
+            "events": events,
+        }
+
+    def _stream_chat_response(self, agent, messages: list[dict], context: dict, *, tools: list[dict] | None = None, stream_content: bool = False):
+        content_chunks: list[str] = []
+        reasoning_chunks: list[str] = []
+        tool_call_builders: dict[int, dict] = {}
+        final_tool_calls: list[dict] = []
+        saw_tool_call = False
+        for chunk in self.provider.chat_stream_events(
+            messages,
+            model=agent.model,
+            temperature=agent.temperature,
+            runtime_config=agent.runtime_config,
+            tools=tools,
+            thinking_enabled=self._thinking_request_value(context),
+        ):
+            if chunk.type == "reasoning":
+                if not context.get("thinking_enabled"):
+                    continue
+                reasoning_chunks.append(chunk.content)
+                yield {"event": "reasoning_token", "content": chunk.content}
+            elif chunk.type == "content":
+                content_chunks.append(chunk.content)
+                if stream_content and not saw_tool_call:
+                    yield {"event": "token", "content": chunk.content}
+            elif chunk.type == "tool_call_delta":
+                saw_tool_call = True
+                self._merge_stream_tool_call_deltas(tool_call_builders, chunk.tool_calls or [])
+            elif chunk.type == "tool_calls":
+                saw_tool_call = True
+                final_tool_calls = chunk.tool_calls or []
+        if not final_tool_calls:
+            final_tool_calls = self._finalize_stream_tool_calls(tool_call_builders)
+        return ChatResponse(
+            content="".join(content_chunks) or None,
+            reasoning_content="".join(reasoning_chunks),
+            tool_calls=final_tool_calls or None,
+        )
+
+    def _merge_stream_tool_call_deltas(self, builders: dict[int, dict], deltas: list[dict]) -> None:
+        for delta in deltas:
+            if not isinstance(delta, dict):
+                continue
+            try:
+                index = int(delta.get("index")) if delta.get("index") is not None else len(builders)
+            except (TypeError, ValueError):
+                index = len(builders)
+            call = builders.setdefault(index, {"id": "", "type": "function", "function": {"name": "", "arguments": ""}})
+            if delta.get("id"):
+                call["id"] = str(delta.get("id"))
+            if delta.get("type"):
+                call["type"] = str(delta.get("type"))
+            func = delta.get("function") or {}
+            if not isinstance(func, dict):
+                continue
+            name_part = func.get("name")
+            if name_part:
+                name_part = str(name_part)
+                current_name = call["function"].get("name") or ""
+                if not current_name or name_part.startswith(current_name):
+                    call["function"]["name"] = name_part
+                elif not current_name.endswith(name_part):
+                    call["function"]["name"] = current_name + name_part
+            if func.get("arguments") is not None:
+                call["function"]["arguments"] = (call["function"].get("arguments") or "") + str(func.get("arguments"))
+
+    def _finalize_stream_tool_calls(self, builders: dict[int, dict]) -> list[dict]:
+        calls = []
+        for index in sorted(builders):
+            call = builders[index]
+            function = call.get("function") or {}
+            name = function.get("name") or ""
+            if not name:
+                continue
+            calls.append(
+                {
+                    "id": call.get("id") or f"call_{index}",
+                    "type": call.get("type") or "function",
+                    "function": {
+                        "name": name,
+                        "arguments": function.get("arguments") or "{}",
+                    },
+                }
+            )
+        return calls
+
+    def _execute_stream_tool_call(
+        self,
+        tc: dict,
+        bound_tools: list[Tool],
+        messages: list[dict],
+        events: list[dict],
+        web_sources: list[dict],
+        search_status: dict,
+        context: dict,
+        node: dict,
+        round_index: int,
+    ) -> tuple[list[dict], dict, str]:
+        func = tc["function"]
+        tool_name = func["name"]
+        try:
+            tool_args = json.loads(func.get("arguments") or "{}")
+        except json.JSONDecodeError:
+            tool_args = {"input": func.get("arguments") or ""}
+        matching = next((t for t in bound_tools if t.name == tool_name), None)
+        started = time.monotonic()
+        if matching:
+            try:
+                result = execute_tool(matching, {"input": tool_args})
+                result["latency_ms"] = result.get("latency_ms", int((time.monotonic() - started) * 1000))
+                tool_content = result.get("content") or result.get("result_preview") or ""
+                event_data = tool_call_event(matching, result, input_preview=json.dumps(tool_args, ensure_ascii=False))
+                events.append({"event": "tool_call", "data": event_data})
+                if matching.type == "builtin_search":
+                    web_sources, search_status = self._merge_web_search_tool_result(web_sources, search_status, result)
+                    events.append({"event": "search_status", "data": self._search_status_event(search_status)})
+                messages.append({"role": "tool", "tool_call_id": tc["id"], "content": tool_content})
+                self._persist_intermediate_message(
+                    context,
+                    role="tool",
+                    content=tool_content,
+                    tool_call_id=tc["id"],
+                    tool_name=tool_name,
+                    meta={**event_data, "node_id": node["id"], "round": round_index, "kind": "tool_result"},
+                )
+            except ValueError as exc:
+                error_result = {"tool": tool_name, "content": "", "result_preview": "", "latency_ms": int((time.monotonic() - started) * 1000), "error": str(exc)}
+                event_data = tool_call_event(matching, error_result, status="error", input_preview=json.dumps(tool_args, ensure_ascii=False), error_code="tool_error")
+                tool_content = f"Error: {exc}"
+                events.append({"event": "tool_call", "data": event_data})
+                messages.append({"role": "tool", "tool_call_id": tc["id"], "content": tool_content})
+                self._persist_intermediate_message(
+                    context,
+                    role="tool",
+                    content=tool_content,
+                    tool_call_id=tc["id"],
+                    tool_name=tool_name,
+                    meta={**event_data, "node_id": node["id"], "round": round_index, "kind": "tool_result"},
+                )
+        else:
+            unknown_tool = type("_", (), {"id": None, "name": tool_name, "type": "unknown"})()
+            event_data = tool_call_event(unknown_tool, {"tool": tool_name, "content": "", "result_preview": "", "latency_ms": 0}, status="error", input_preview="{}", error_code="tool_not_found")
+            tool_content = f"Tool '{tool_name}' not found"
+            events.append({"event": "tool_call", "data": event_data})
+            messages.append({"role": "tool", "tool_call_id": tc["id"], "content": tool_content})
+            self._persist_intermediate_message(
+                context,
+                role="tool",
+                content=tool_content,
+                tool_call_id=tc["id"],
+                tool_name=tool_name,
+                meta={**event_data, "node_id": node["id"], "round": round_index, "kind": "tool_result"},
+            )
+        return web_sources, search_status, tool_name
+
     def _stream_llm_node(self, agent, node: dict, context: dict):
         draft = context.get("draft", "")
         if draft:
-            # Draft already produced by the tool-calling loop — stream as chunked text
-            for index in range(0, len(draft), 24):
-                yield {"event": "token", "content": draft[index : index + 24]}
-            return self._llm_output(agent, context, draft)
+            draft_reasoning = context.get("draft_reasoning") or ""
+            if draft_reasoning and context.get("thinking_enabled") and not context.get("draft_reasoning_streamed"):
+                yield {"event": "reasoning_token", "content": draft_reasoning}
+            if not context.get("draft_streamed"):
+                # Draft already produced by the tool-calling loop — stream as chunked text
+                for index in range(0, len(draft), 24):
+                    yield {"event": "token", "content": draft[index : index + 24]}
+            return self._llm_output(agent, context, draft, reasoning=draft_reasoning)
         messages = self._llm_messages(agent, context)
         chunks = []
         reasoning_chunks = []
@@ -494,6 +822,12 @@ class WorkflowRunner:
         thinking_msgs = self._thinking_messages(context)
         if thinking_msgs:
             thinking_blocks = [msg["content"] for msg in thinking_msgs]
+        search_instruction = ""
+        if context.get("search_enabled"):
+            search_instruction = (
+                "本轮联网搜索工具可用，但不是必选。只有当问题需要最新信息、外部事实、网页资料、天气、价格、新闻或可变信息时才调用；"
+                "简单算术、常识推理、翻译、代码解释、当前会话内容总结等不需要联网搜索的问题，请直接回答。"
+            )
             
         raw_summary = context.get('memory_summary') or ''
         formatted_summary = "无"
@@ -510,6 +844,7 @@ class WorkflowRunner:
         system_parts = [
             agent.system_prompt or "你是一个自定义智能体。",
             *thinking_blocks,
+            search_instruction,
             f"Web search results for this turn:\n{web_source_text or 'None'}",
             f"可用知识片段：\n{source_text or '无'}",
             f"工具输出：\n{tool_text or '无'}",
@@ -523,10 +858,68 @@ class WorkflowRunner:
         max_system_chars = 100_000  # ~50k tokens, safe for most model context windows
         if len(system_content) > max_system_chars:
             system_content = system_content[:max_system_chars] + "\n\n[上下文已截断以避免超出模型上下文窗口限制]"
-        return [
-            {"role": "system", "content": system_content},
-            {"role": "user", "content": self._user_content(context["input"], context.get("uploads", []))},
-        ]
+        messages = [{"role": "system", "content": system_content}]
+        history_messages = self._history_messages_for_llm(context)
+        messages.extend(history_messages)
+        if not self._history_contains_current_message(context):
+            messages.append({"role": "user", "content": self._user_content(context["input"], context.get("uploads", []))})
+        return messages
+
+    def _history_messages_for_llm(self, context: dict) -> list[dict]:
+        messages = []
+        current_message_id = context.get("current_message_id")
+        history = context.get("history_messages") or []
+        index = 0
+        while index < len(history):
+            item = history[index]
+            role = item.get("role")
+            if role not in {"user", "assistant", "tool"}:
+                index += 1
+                continue
+            if role == "tool":
+                index += 1
+                continue
+            content = item.get("content") or ""
+            if current_message_id and item.get("id") == current_message_id and role == "user":
+                content = self._user_content(context["input"], context.get("uploads", []))
+            tool_calls = item.get("tool_calls") or []
+            if role == "assistant" and tool_calls:
+                tool_call_ids = {call.get("id") for call in tool_calls if call.get("id")}
+                tool_messages = []
+                next_index = index + 1
+                while next_index < len(history) and history[next_index].get("role") == "tool":
+                    tool_item = history[next_index]
+                    if tool_item.get("tool_call_id") in tool_call_ids:
+                        tool_messages.append(tool_item)
+                    next_index += 1
+                if tool_call_ids and tool_call_ids.issubset({tool.get("tool_call_id") for tool in tool_messages}):
+                    assistant_message = {"role": "assistant", "content": content, "tool_calls": tool_calls}
+                    if item.get("reasoning") and (item.get("meta") or {}).get("requires_reasoning_replay"):
+                        assistant_message["reasoning_content"] = item.get("reasoning")
+                    messages.append(assistant_message)
+                    for tool_item in tool_messages:
+                        messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": tool_item.get("tool_call_id"),
+                                "content": tool_item.get("content") or "",
+                            }
+                        )
+                index = next_index
+                continue
+            if content:
+                message = {"role": role, "content": content}
+                if role == "assistant" and item.get("reasoning") and (item.get("meta") or {}).get("requires_reasoning_replay"):
+                    message["reasoning_content"] = item.get("reasoning")
+                messages.append(message)
+            index += 1
+        return messages
+
+    def _history_contains_current_message(self, context: dict) -> bool:
+        current_message_id = context.get("current_message_id")
+        if not current_message_id:
+            return False
+        return any(item.get("id") == current_message_id for item in context.get("history_messages") or [])
 
     def _llm_output(self, agent, context: dict, draft: str, *, reasoning: str = "") -> dict:
         return {
@@ -534,10 +927,12 @@ class WorkflowRunner:
             "used_memory": bool(context.get("memory_summary")),
             "used_profile_memory": bool(context.get("profile_memory")),
             "attachment_count": len(context.get("uploads", [])),
+            "history_message_count": len(context.get("history_messages") or []),
             "model": agent.model,
             "mock": self.provider.last_chat_mock,
             "thinking_enabled": bool(context.get("thinking_enabled")),
             "thinking_type": (context.get("thinking_status") or {}).get("type", "none"),
+            "reasoning_replay_required": bool(context.get("reasoning_replay_required")),
             "reasoning_chars": len(reasoning or ""),
             "search_enabled": bool(context.get("search_enabled")),
             "search_result_count": len(context.get("web_sources", [])),
@@ -689,7 +1084,8 @@ class WorkflowRunner:
         return {"native": "深度思考", "prompt": "提示词增强", "none": "不支持"}.get(reasoning_type, "不支持")
 
     def _search_status(self, query: str, requested: bool | None) -> dict:
-        provider = web_search_service.web_search_status().get("provider", "duckduckgo_html")
+        runtime = web_search_service.web_search_status()
+        provider = runtime.get("provider", "duckduckgo_html")
         if not requested:
             return {
                 "enabled": False,
@@ -702,22 +1098,7 @@ class WorkflowRunner:
                 "sources": [],
                 "reason": "not_requested",
             }
-        try:
-            result = web_search_service.search_web(query)
-            sources = web_search_service.search_items_as_sources(result.get("items", []))
-            return {
-                "enabled": bool(sources),
-                "requested": True,
-                "query": result.get("query", query),
-                "provider": result.get("provider", "duckduckgo_html"),
-                "matched_results": len(sources),
-                "sources_emitted": bool(sources),
-                "items": result.get("items", []),
-                "sources": sources,
-                "latency_ms": result.get("latency_ms", 0),
-                "reason": "enabled" if sources else "no_results",
-            }
-        except WebSearchError as exc:
+        if not runtime.get("configured"):
             return {
                 "enabled": False,
                 "requested": True,
@@ -727,11 +1108,47 @@ class WorkflowRunner:
                 "sources_emitted": False,
                 "items": [],
                 "sources": [],
-                "reason": str(exc),
+                "reason": "web_search_unavailable",
             }
+        return {
+            "enabled": True,
+            "requested": True,
+            "query": query,
+            "provider": provider,
+            "matched_results": 0,
+            "sources_emitted": False,
+            "items": [],
+            "sources": [],
+            "reason": "tool_available",
+        }
 
     def _search_status_event(self, status: dict) -> dict:
         return {key: value for key, value in status.items() if key != "sources"}
+
+    def _merge_web_search_tool_result(self, current_sources: list[dict], status: dict, result: dict) -> tuple[list[dict], dict]:
+        result_json = result.get("result_json") if isinstance(result.get("result_json"), dict) else {}
+        items = result_json.get("items") or []
+        next_sources = [dict(item) for item in current_sources]
+        new_sources = web_search_service.search_items_as_sources(items)
+        offset = len(next_sources)
+        for index, source in enumerate(new_sources, start=offset + 1):
+            source["source_id"] = f"web-{index}"
+            source["chunk_id"] = f"web-search-{index}"
+            next_sources.append(source)
+        next_status = {
+            **status,
+            "enabled": bool(next_sources),
+            "requested": True,
+            "query": result_json.get("query") or status.get("query") or "",
+            "provider": result_json.get("provider") or status.get("provider") or "duckduckgo_html",
+            "matched_results": len(next_sources),
+            "sources_emitted": bool(next_sources),
+            "items": [*(status.get("items") or []), *items],
+            "sources": next_sources,
+            "latency_ms": result.get("latency_ms", status.get("latency_ms", 0)),
+            "reason": "tool_called" if next_sources else "no_results",
+        }
+        return next_sources, next_status
 
     def _web_source_text(self, sources: list[dict]) -> str:
         lines = []
@@ -742,16 +1159,29 @@ class WorkflowRunner:
             lines.append(f"{index}. {title}\nURL: {url}\nSnippet: {snippet}")
         return "\n\n".join(lines)
 
-    def _runtime_tools(self, agent, node: dict) -> list[Tool]:
+    def _runtime_tools(self, agent, node: dict, context: dict | None = None) -> list[Tool]:
         tool_ids = getattr(agent, "tool_ids", []) or []
+        tools: list[Tool] = []
         if tool_ids:
-            return (
+            tools = (
                 self.db.query(Tool)
                 .filter(Tool.id.in_(tool_ids), Tool.enabled.is_(True))
                 .order_by(Tool.id.asc())
                 .all()
             )
-        return []
+        if context and context.get("search_enabled"):
+            from core.services.bootstrap import ensure_builtin_tools
+
+            ensure_builtin_tools(self.db)
+            existing_ids = {tool.id for tool in tools}
+            search_tool = (
+                self.db.query(Tool)
+                .filter(Tool.name == "web_search", Tool.type == "builtin_search", Tool.enabled.is_(True))
+                .first()
+            )
+            if search_tool and search_tool.id not in existing_ids:
+                tools.append(search_tool)
+        return tools
 
     def _attachment_text(self, uploads: list[Upload]) -> str:
         lines = []
@@ -784,6 +1214,79 @@ class WorkflowRunner:
 
     def _session_memory(self, session_id: int) -> SessionMemory | None:
         return self.db.query(SessionMemory).filter(SessionMemory.session_id == session_id).first()
+
+    def _persist_intermediate_message(
+        self,
+        context: dict,
+        *,
+        role: str,
+        content: str,
+        reasoning: str = "",
+        tool_calls: list[dict] | None = None,
+        tool_call_id: str = "",
+        tool_name: str = "",
+        meta: dict | None = None,
+    ) -> None:
+        session_id = context.get("session_id")
+        if not session_id:
+            return
+        visible_reasoning = reasoning if context.get("thinking_enabled") else ""
+        payload_meta = {
+            "is_intermediate": True,
+            "run_id": context.get("run_id"),
+            "thinking_enabled": bool(context.get("thinking_enabled")),
+            **(meta or {}),
+        }
+        if role == "assistant" and visible_reasoning and context.get("reasoning_replay_required"):
+            payload_meta["requires_reasoning_replay"] = True
+        message = Message(
+            session_id=session_id,
+            role=role,
+            content=content or "",
+            reasoning=visible_reasoning or "",
+            sources=[],
+            tool_calls=tool_calls or [],
+            tool_call_id=tool_call_id or "",
+            tool_name=tool_name or "",
+            meta=payload_meta,
+        )
+        self.db.add(message)
+        self.db.flush()
+        self.db.commit()
+
+    def _session_history(self, session_id: int, *, max_messages: int) -> list[dict]:
+        rows = (
+            self.db.query(Message)
+            .filter(Message.session_id == session_id, Message.role.in_(["user", "assistant", "tool"]))
+            .order_by(Message.id.desc())
+            .limit(max(1, min(int(max_messages or 12), 100)))
+            .all()
+        )
+        history = []
+        for message in reversed(rows):
+            content = self._trim_history_content(message.content or "")
+            if not content and message.role != "assistant":
+                continue
+            history.append(
+                {
+                    "id": message.id,
+                    "role": message.role,
+                    "content": content,
+                    "reasoning": self._trim_history_content(message.reasoning or ""),
+                    "tool_calls": message.tool_calls or [],
+                    "tool_call_id": message.tool_call_id or "",
+                    "tool_name": message.tool_name or "",
+                    "meta": message.meta or {},
+                }
+            )
+        return history
+
+    @staticmethod
+    def _trim_history_content(content: str, limit: int = 6000) -> str:
+        text = content.strip()
+        if len(text) <= limit:
+            return text
+        return text[:limit] + "\n[历史消息过长，已截断]"
 
     def _update_session_memory(self, session_id: int, user_message: str, answer: str, max_messages: int) -> None:
         memory = self._session_memory(session_id)

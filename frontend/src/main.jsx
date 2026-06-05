@@ -161,8 +161,8 @@ function App() {
   const [feedbackByMessage, setFeedbackByMessage] = useState({});
   const [chatMode, setChatMode] = useState('published');
   const [chatVariables, setChatVariables] = useState({});
-  const [ragEnabled, setRagEnabled] = useState(true);
-  const [thinkingEnabled, setThinkingEnabled] = useState(false);
+  const [ragEnabled, setRagEnabled] = useState(false);
+  const [thinkingEnabled, setThinkingEnabled] = useState(true);
   const [searchEnabled, setSearchEnabled] = useState(false);
   const [chatAttachments, setChatAttachments] = useState([]);
   const [uploadingAttachment, setUploadingAttachment] = useState(false);
@@ -412,7 +412,8 @@ function App() {
     setFeedbackByMessage({});
     setChatMode('published');
     setChatVariables({});
-    setThinkingEnabled(false);
+    setRagEnabled(false);
+    setThinkingEnabled(true);
     setSearchEnabled(false);
     setDraft('');
     setHomePrompt('');
@@ -462,8 +463,8 @@ function App() {
       rag: agent.rag || { enabled_by_default: true, top_k: 4 },
       tool_policy: agent.tool_policy || { mode: 'auto', allowed_tool_names: [] },
     });
-    setRagEnabled(agent.rag?.enabled_by_default ?? true);
-    setThinkingEnabled(false);
+    setRagEnabled(false);
+    setThinkingEnabled(true);
     setSearchEnabled(false);
     setChatVariables(initVariableValues(agent.variables || []));
     setActiveSessionId(null);
@@ -1103,8 +1104,8 @@ function App() {
     setHomePrompt('');
     setError('');
     setChatVariables(initVariableValues(agentForm.variables || []));
-    setRagEnabled(agentForm.rag?.enabled_by_default ?? true);
-    setThinkingEnabled(false);
+    setRagEnabled(false);
+    setThinkingEnabled(true);
     setSearchEnabled(false);
     setChatAttachments([]);
     if (view !== 'builder') {
