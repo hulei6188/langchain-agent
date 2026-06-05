@@ -1177,7 +1177,15 @@ function App() {
     setMessages((items) => [
       ...items,
       { role: 'user', content: text, attachments: outgoingAttachments },
-      { role: 'assistant', content: '', pending: true, reasoning: '', reasoningPending: effectiveThinkingEnabled },
+      {
+        role: 'assistant',
+        content: '',
+        pending: true,
+        reasoning: '',
+        reasoningPending: effectiveThinkingEnabled,
+        reasoningStartedAt: effectiveThinkingEnabled ? Date.now() : null,
+        reasoningFinishedAt: null,
+      },
     ]);
     setToolDebugEvents([]);
     try {
@@ -1226,7 +1234,14 @@ function App() {
           const next = [...items];
           const last = next[next.length - 1];
           if (last?.role === 'assistant' && last.pending) {
-            next[next.length - 1] = { ...last, pending: false, reasoningPending: false, error: true, content: message };
+            next[next.length - 1] = {
+              ...last,
+              pending: false,
+              reasoningPending: false,
+              reasoningFinishedAt: last.reasoningStartedAt && !last.reasoningFinishedAt ? Date.now() : last.reasoningFinishedAt,
+              error: true,
+              content: message,
+            };
           }
           return next;
         });
@@ -1269,7 +1284,13 @@ function App() {
       setMessages((items) => {
         const next = [...items];
         const last = next[next.length - 1];
-        next[next.length - 1] = { ...last, pending: false, reasoningPending: false, content: (last.content || '') + data.content };
+        next[next.length - 1] = {
+          ...last,
+          pending: false,
+          reasoningPending: false,
+          reasoningFinishedAt: last?.reasoningPending && last?.reasoningStartedAt && !last?.reasoningFinishedAt ? Date.now() : last?.reasoningFinishedAt,
+          content: (last.content || '') + data.content,
+        };
         return next;
       });
     }
@@ -1281,6 +1302,7 @@ function App() {
           next[next.length - 1] = {
             ...last,
             reasoningPending: true,
+            reasoningStartedAt: last.reasoningStartedAt || Date.now(),
             reasoning: (last.reasoning || '') + (data.content || ''),
           };
         }
@@ -1319,6 +1341,8 @@ function App() {
             run_id: data.run_id,
             pending: false,
             reasoningPending: false,
+            reasoningFinishedAt: last.reasoningStartedAt && !last.reasoningFinishedAt ? Date.now() : last.reasoningFinishedAt,
+            reasoningDurationMs: data.reasoning_duration_ms ?? last.reasoningDurationMs,
             content: data.content || last.content,
           };
         }
@@ -1332,7 +1356,14 @@ function App() {
         const next = [...items];
         const last = next[next.length - 1];
         if (last?.role === 'assistant') {
-          next[next.length - 1] = { ...last, pending: false, reasoningPending: false, error: true, content: detail };
+          next[next.length - 1] = {
+            ...last,
+            pending: false,
+            reasoningPending: false,
+            reasoningFinishedAt: last.reasoningStartedAt && !last.reasoningFinishedAt ? Date.now() : last.reasoningFinishedAt,
+            error: true,
+            content: detail,
+          };
         }
         return next;
       });

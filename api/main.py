@@ -1450,6 +1450,9 @@ def stream_chat_events(db: Session, agent: Agent, user_id: int, request: ChatReq
         runner = WorkflowRunner(db)
         answer = ""
         sources = []
+        reasoning = ""
+        reasoning_started_at = None
+        reasoning_duration_ms = None
         for event in runner.run_events(
             agent=agent,
             chat_session=session,
@@ -1463,9 +1466,15 @@ def stream_chat_events(db: Session, agent: Agent, user_id: int, request: ChatReq
             attachments=request.attachments,
         ):
             if event["event"] == "token":
+                if reasoning_started_at is not None and reasoning_duration_ms is None:
+                    reasoning_duration_ms = int((time.perf_counter() - reasoning_started_at) * 1000)
                 yield sse_event("token", {"content": event.get("content", "")})
             elif event["event"] == "reasoning_token":
-                yield sse_event("reasoning_token", {"content": event.get("content", "")})
+                content = event.get("content", "")
+                if reasoning_started_at is None:
+                    reasoning_started_at = time.perf_counter()
+                reasoning += content
+                yield sse_event("reasoning_token", {"content": content})
             elif event["event"] == "step":
                 step = event["step"]
                 for runtime_event in step.get("events", []):
@@ -1475,13 +1484,31 @@ def stream_chat_events(db: Session, agent: Agent, user_id: int, request: ChatReq
                 run = event["run"]
                 answer = event["answer"]
                 sources = event["sources"]
+        if reasoning_started_at is not None and reasoning_duration_ms is None:
+            reasoning_duration_ms = int((time.perf_counter() - reasoning_started_at) * 1000)
         if sources:
             yield sse_event("sources", {"items": sources})
-        assistant = Message(session_id=session.id, role="assistant", content=answer, sources=sources)
+        assistant = Message(
+            session_id=session.id,
+            role="assistant",
+            content=answer,
+            reasoning=reasoning,
+            reasoning_duration_ms=reasoning_duration_ms,
+            sources=sources,
+        )
         db.add(assistant)
         db.commit()
         db.refresh(assistant)
-        yield sse_event("done", {"session_id": session.id, "message_id": assistant.id, "run_id": run.id, "content": answer})
+        yield sse_event(
+            "done",
+            {
+                "session_id": session.id,
+                "message_id": assistant.id,
+                "run_id": run.id,
+                "content": answer,
+                "reasoning_duration_ms": reasoning_duration_ms,
+            },
+        )
     except Exception as exc:
         if run is not None:
             try:
@@ -1575,6 +1602,8 @@ def message_payload(message: Message) -> dict:
         "id": message.id,
         "role": message.role,
         "content": message.content,
+        "reasoning": message.reasoning or "",
+        "reasoningDurationMs": message.reasoning_duration_ms,
         "sources": message.sources or [],
         "created_at": message.created_at.isoformat() if message.created_at else None,
     }

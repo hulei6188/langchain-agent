@@ -543,6 +543,7 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
 
 .chat-home {
   min-height: 0;
+  min-width: 0;
   display: grid;
   grid-template-rows: minmax(0, 1fr) auto auto auto auto auto;
   overflow: hidden;
@@ -569,7 +570,9 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
 
 .conversation {
   min-height: 0;
+  min-width: 0;
   overflow: auto;
+  overflow-x: hidden;
   padding: 34px 24px 24px;
 }
 
@@ -2969,6 +2972,7 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
 .messages {
   min-height: 0;
   overflow: auto;
+  overflow-x: hidden;
   padding: 36px 34px 24px;
   background: #fff;
 }
@@ -2987,7 +2991,9 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
   grid-template-columns: 34px minmax(0, 1fr);
   gap: 12px;
   margin: 0 auto 20px;
-  max-width: 820px;
+  width: min(820px, 100%);
+  min-width: 0;
+  max-width: 100%;
   font-size: 15.5px;
 }
 .message.user {
@@ -3018,12 +3024,17 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
 .message.assistant .message-body {
   justify-self: start;
 }
-.message-body { min-width: 0; max-width: min(680px, 100%); }
+.message-body {
+  min-width: 0;
+  max-width: min(680px, 100%);
+  overflow-wrap: anywhere;
+}
 .message p {
   margin: 0;
   line-height: 1.78;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+  word-break: break-word;
 }
 .message-attachments {
   display: flex;
@@ -3052,9 +3063,15 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
 .markdown-content {
   display: grid;
   gap: 10px;
+  min-width: 0;
+  max-width: 100%;
   font-size: 15.5px;
   line-height: 1.78;
   overflow-wrap: anywhere;
+}
+.markdown-content > * {
+  min-width: 0;
+  max-width: 100%;
 }
 .markdown-content p,
 .markdown-content ul,
@@ -3077,6 +3094,15 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
   border: 1px solid #e4e7ec;
   border-radius: 8px;
 }
+.markdown-content pre {
+  min-width: 0;
+  max-width: 100%;
+  margin: 0;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
 .markdown-content th,
 .markdown-content td {
   padding: 8px 10px;
@@ -3085,10 +3111,15 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
   white-space: nowrap;
 }
 .markdown-content th { background: #f8fafc; }
+.markdown-content a {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
 .markdown-content blockquote {
   padding-left: 12px;
   border-left: 3px solid #d0d5dd;
   color: #475467;
+  overflow-wrap: anywhere;
 }
 .markdown-content code {
   padding: 2px 5px;
@@ -3096,8 +3127,12 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
   background: #f2f4f7;
   font-family: "Cascadia Code", Consolas, monospace;
   font-size: .92em;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 .code-block {
+  min-width: 0;
+  max-width: 100%;
   overflow: hidden;
   border: 1px solid #e5e7eb;
   border-radius: 10px;
@@ -3120,15 +3155,27 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
   background: #344054;
   color: #fff;
 }
+.code-header span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .code-block pre {
   margin: 0;
   padding: 12px;
   overflow-x: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 .code-block code {
   padding: 0;
   background: transparent;
   color: inherit;
+  white-space: inherit;
+  overflow-wrap: inherit;
+  word-break: inherit;
 }
 .message.user .message-body {
   padding: 11px 14px;
@@ -3144,6 +3191,9 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
   margin: 0 0 12px;
   border-left: 2px solid #8aa7ff;
   color: #475467;
+}
+.message-reasoning.is-pending {
+  border-left-color: #5b7cfa;
 }
 .message-reasoning summary {
   width: fit-content;
@@ -3168,17 +3218,34 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
 }
 .message-reasoning summary small {
   color: #667085;
-  font-size: 12px;
+  font-size: 11.5px;
 }
 .message-reasoning-content {
   margin-top: 6px;
   padding-left: 13px;
   color: #475467;
-  font-size: 14.5px;
+  font-size: 13.5px;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 .message-reasoning-content .markdown-content {
   gap: 8px;
-  line-height: 1.65;
+  font-size: 13.5px;
+  line-height: 1.62;
+}
+.message-reasoning-content .markdown-content h3 {
+  font-size: 14.5px;
+  line-height: 1.45;
+}
+.message-reasoning-content .markdown-content h4,
+.message-reasoning-content .markdown-content h5 {
+  font-size: 14px;
+  line-height: 1.45;
+}
+.message-reasoning-content .markdown-content code,
+.message-reasoning-content .code-header,
+.message-reasoning-content .code-block pre {
+  font-size: 12.5px;
 }
 
 .feedback-actions { gap: 5px; margin-top: 8px; }
@@ -3198,6 +3265,8 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
   font-style: italic;
 }
 .message-error {
+  min-width: 0;
+  max-width: 100%;
   color: #b42318;
 }
 .message-error .markdown-content p {
@@ -4110,6 +4179,25 @@ body.dark .rich-composer .attachment-button,
 body.dark .rich-composer .composer-icon-button {
   color: #c5cad7;
 }
+body.dark .agent-select button,
+body.dark .agent-edit-button {
+  border-color: #303544;
+  background: #1f2430;
+  color: #d8dbe6;
+}
+body.dark .agent-select button:hover:not(:disabled),
+body.dark .agent-edit-button:hover:not(:disabled) {
+  border-color: #536078;
+  background: #242938;
+  color: #f3f4f7;
+}
+body.dark .agent-select button:disabled,
+body.dark .agent-edit-button:disabled {
+  border-color: #303544;
+  background: #171a22;
+  color: #6f7789;
+  opacity: 1;
+}
 body.dark .mode-toggle,
 body.dark .auth-toggle {
   background: #1f2430;
@@ -4155,8 +4243,36 @@ body.dark .message-reasoning {
   border-left-color: #7c8cff;
   color: #aab2c4;
 }
+body.dark .message-reasoning.is-pending {
+  border-left-color: #9fb0ff;
+}
 body.dark .message-reasoning summary {
   color: #d8dbe6;
+}
+body.dark .message-reasoning summary small {
+  color: #8f98aa;
+}
+body.dark .message-reasoning-content,
+body.dark .message-reasoning-content .markdown-content {
+  color: #aab2c4;
+}
+body.dark .message-reasoning-content .markdown-content h3,
+body.dark .message-reasoning-content .markdown-content h4,
+body.dark .message-reasoning-content .markdown-content h5,
+body.dark .message-reasoning-content .markdown-content strong {
+  color: #c2c9d8;
+}
+body.dark .message-reasoning-content .markdown-content blockquote {
+  border-left-color: #536078;
+  color: #9aa3b6;
+}
+body.dark .message-reasoning-content .markdown-content code,
+body.dark .message-reasoning-content .markdown-content th,
+body.dark .message-reasoning-content .code-header,
+body.dark .message-reasoning-content .code-block pre {
+  border-color: #303544;
+  background: #1f2430;
+  color: #b8c0d4;
 }
 body.dark .message-reasoning summary:hover,
 body.dark .message-sources summary:hover,
@@ -6214,6 +6330,556 @@ body.dark .coze-accordion-item {
   animation: coze-spin 0.8s linear infinite;
   display: inline-block;
   flex-shrink: 0;
+}
+
+/* Late dark-theme overrides for workspace suites declared after the main theme block. */
+body.dark .knowledge-home-page,
+body.dark .builder-shell,
+body.dark .workbench,
+body.dark .persona-panel,
+body.dark .builder-panel,
+body.dark .chat-stage {
+  background: #0f1117;
+  color: #e6e8ef;
+}
+
+body.dark .dashboard-header,
+body.dark .workspace-header,
+body.dark .builder-topbar,
+body.dark .column-header,
+body.dark .stage-header,
+body.dark .persona-panel,
+body.dark .builder-panel,
+body.dark .panel,
+body.dark .prompt-library,
+body.dark .config-row,
+body.dark .profile-grid,
+body.dark .account-menu-group,
+body.dark .account-menu-logout {
+  border-color: #303544;
+}
+
+body.dark .builder-topbar,
+body.dark .column-header,
+body.dark .stage-header {
+  background: rgba(20, 23, 32, .96);
+  color: #f3f4f7;
+}
+
+body.dark .dashboard-header h2,
+body.dark .workspace-kb-title-block h3,
+body.dark .kb-meta-details strong,
+body.dark .doc-row-details strong,
+body.dark .doc-meta-title-row h4,
+body.dark .meta-item strong,
+body.dark .chunk-list-section h5,
+body.dark .profile-card h3,
+body.dark .profile-grid strong,
+body.dark .bot-title strong,
+body.dark .agent-basics-avatar-copy strong,
+body.dark .agent-basics-field span,
+body.dark .prompt-library-head strong,
+body.dark .template-grid strong,
+body.dark .config-row > div,
+body.dark .resegment-panel-heading h3,
+body.dark .resegment-panel-heading strong,
+body.dark .config-group-label,
+body.dark .strategy-card strong,
+body.dark .coze-bound-card-title,
+body.dark .coze-modal-header h3,
+body.dark .coze-modal-row-title {
+  color: #f3f4f7;
+}
+
+body.dark .dashboard-header p,
+body.dark .workspace-kb-title-block p,
+body.dark .kb-meta-details small,
+body.dark .kb-time-cell,
+body.dark .doc-row-details small,
+body.dark .meta-item span,
+body.dark .chunk-dim,
+body.dark .chunks-loading,
+body.dark .workspace-empty-detail,
+body.dark .profile-card p,
+body.dark .profile-grid span,
+body.dark .account-card-copy small,
+body.dark .agent-basics-avatar-copy span,
+body.dark .agent-basics-field em,
+body.dark .builder-switcher span,
+body.dark .template-grid span,
+body.dark .builder-template-preview p,
+body.dark .section-copy,
+body.dark .config-row > span,
+body.dark .toggle-switch,
+body.dark .resegment-panel-heading p,
+body.dark .config-help-text,
+body.dark .strategy-card small,
+body.dark .preview-chunk-header .idx-badge,
+body.dark .loading-preview,
+body.dark .empty-preview-placeholder,
+body.dark .coze-bound-card-meta,
+body.dark .coze-modal-row-desc {
+  color: #9aa3b6;
+}
+
+body.dark .dashboard-table-container,
+body.dark .workspace-column,
+body.dark .doc-detail-header-card,
+body.dark .chunk-card,
+body.dark .account-menu-card,
+body.dark .profile-dialog,
+body.dark .resegment-sliding-panel,
+body.dark .conditional-group,
+body.dark .preview-results-area,
+body.dark .preview-chunk-item-card,
+body.dark .coze-modal-container,
+body.dark .coze-modal-row {
+  border-color: #303544;
+  background: #171a22;
+  color: #e6e8ef;
+}
+
+body.dark .dashboard-table th,
+body.dark .search-box-wrapper,
+body.dark .coze-modal-header,
+body.dark .preview-results-area h5 {
+  border-color: #303544;
+  background: #1f2430;
+  color: #c5cad7;
+}
+
+body.dark .dashboard-table td,
+body.dark .doc-detail-header-card,
+body.dark .resegment-panel-heading,
+body.dark .resegment-panel-footer {
+  border-color: #303544;
+}
+
+body.dark .dashboard-table td {
+  color: #c5cad7;
+}
+
+body.dark .kb-row-interactive:hover,
+body.dark .workspace-doc-row:hover,
+body.dark .prompt-template-card:hover .prompt-template-card-main,
+body.dark .prompt-template-card:focus-within .prompt-template-card-main,
+body.dark .coze-modal-row:hover {
+  background: #242938;
+}
+
+body.dark .workspace-doc-row.active,
+body.dark .strategy-card.active {
+  border-color: #5f6fee;
+  background: #1d2440;
+}
+
+body.dark .kb-doc-count-pill,
+body.dark .mode-chip,
+body.dark .soft-pill {
+  border-color: #364052;
+  background: #1f2430;
+  color: #c5cad7;
+}
+
+body.dark .kb-icon-wrapper {
+  background: linear-gradient(135deg, #27315f 0%, #1f284c 100%);
+  color: #9fb0ff;
+  box-shadow: none;
+}
+
+body.dark .bubble-dropdown-menu,
+body.dark .add-dropdown-menu {
+  border-color: #303544;
+  background: rgba(23, 26, 34, .96);
+  box-shadow: 0 18px 42px rgba(0, 0, 0, .34);
+}
+
+body.dark .bubble-dropdown-menu button,
+body.dark .add-dropdown-menu button,
+body.dark .btn-more,
+body.dark .btn-back,
+body.dark .builder-switcher button,
+body.dark .prompt-library-head button,
+body.dark .panel button,
+body.dark .profile-actions button,
+body.dark .profile-edit button,
+body.dark .avatar-upload,
+body.dark .account-menu-card,
+body.dark .account-menu-group button,
+body.dark .account-menu-logout,
+body.dark .segmented button,
+body.dark .segmented-switch button,
+body.dark .coze-modal-row-btn.added {
+  border-color: #364052;
+  background: #1f2430;
+  color: #d8dbe6;
+}
+
+body.dark .bubble-dropdown-menu button:hover,
+body.dark .add-dropdown-menu button:hover,
+body.dark .btn-more:hover,
+body.dark .btn-back:hover,
+body.dark .builder-switcher button:hover:not(:disabled),
+body.dark .prompt-library-head button:hover:not(:disabled),
+body.dark .panel button:hover:not(:disabled),
+body.dark .profile-actions button:hover:not(:disabled),
+body.dark .profile-edit button:hover:not(:disabled),
+body.dark .avatar-upload:hover,
+body.dark .account-menu-card:hover,
+body.dark .account-menu-group button:hover,
+body.dark .account-menu-logout:hover {
+  border-color: #536078;
+  background: #242938;
+  color: #f3f4f7;
+}
+
+body.dark .search-box-wrapper input,
+body.dark .coze-modal-search input,
+body.dark .prompt-editor {
+  border-color: #343847;
+  background: #121620;
+  color: #f3f4f7;
+}
+
+body.dark .search-box-wrapper input:focus,
+body.dark .coze-modal-search input:focus {
+  border-color: #7c8cff;
+  background: #151a25;
+  box-shadow: 0 0 0 3px rgba(124, 140, 255, .18);
+}
+
+body.dark .doc-row-details strong,
+body.dark .chunk-text-content,
+body.dark .preview-chunk-text {
+  color: #d8dbe6;
+}
+
+body.dark .document-status.indexed,
+body.dark .kb-type-badge,
+body.dark .chunk-path-badge,
+body.dark .preview-chunk-header .path-badge {
+  border-color: #2d7255;
+  background: #10281f;
+  color: #7ee0aa;
+}
+
+body.dark .document-status.indexing {
+  background: #33270f;
+  color: #f7c76f;
+}
+
+body.dark .document-status.failed {
+  background: #321817;
+  color: #ff9d91;
+}
+
+body.dark .btn-clear-documents,
+body.dark .btn-delete-active-doc,
+body.dark .danger-action,
+body.dark .account-menu-logout {
+  border-color: #79372d;
+  background: #2a1715;
+  color: #ffb3a8;
+}
+
+body.dark .btn-clear-documents:hover:not(:disabled),
+body.dark .btn-delete-active-doc:hover:not(:disabled),
+body.dark .danger-action:hover,
+body.dark .account-menu-logout:hover {
+  border-color: #a6483b;
+  background: #321817;
+  color: #ffd0ca;
+}
+
+body.dark .btn-resegment-trigger,
+body.dark .btn-preview-chunks {
+  border-color: #4b57c6;
+  background: #1d2440;
+  color: #aebaff;
+}
+
+body.dark .btn-resegment-trigger:hover,
+body.dark .btn-preview-chunks:hover {
+  border-color: #7c8cff;
+  background: #7c8cff;
+  color: #0f1117;
+}
+
+body.dark .prompt-template-card-main,
+body.dark .builder-template-preview,
+body.dark .builder-template-preview pre,
+body.dark .segmented,
+body.dark .segmented-switch,
+body.dark .strategy-card,
+body.dark .coze-accordion-item,
+body.dark .coze-accordion-body,
+body.dark .coze-bound-card {
+  border-color: #303544;
+  background: #171a22;
+  color: #e6e8ef;
+}
+
+body.dark .library-tabs button,
+body.dark .media-tabs button {
+  color: #aab2c4;
+}
+
+body.dark .library-tabs button.active,
+body.dark .media-tabs button.active,
+body.dark .segmented button.active,
+body.dark .segmented-switch button.active {
+  background: #30364a;
+  color: #f3f4f7;
+  box-shadow: none;
+}
+
+body.dark .coze-accordion-header:hover,
+body.dark .coze-bound-card:hover {
+  background: #242938;
+}
+
+body.dark .coze-bound-card-remove:hover {
+  background: #321817;
+  color: #ff9d91;
+}
+
+body.dark .coze-modal-row-btn.added {
+  color: #8f98aa;
+}
+
+/* Supplementary dark cleanup for legacy panels, dialogs, and resource cards. */
+body.dark .resource-section,
+body.dark .resource-side-actions,
+body.dark .prompt-preview-panel,
+body.dark .prompt-template-form,
+body.dark .knowledge-base-list button,
+body.dark .knowledge-file-drop,
+body.dark .model-form-section,
+body.dark .model-enabled-check,
+body.dark .model-preset-banner,
+body.dark .user-model-form,
+body.dark .model-channel-card,
+body.dark .provider-preset-panel,
+body.dark .provider-preset-grid button,
+body.dark .model-checks label,
+body.dark .model-capability-summary span,
+body.dark .model-admin-row,
+body.dark .user-model-row,
+body.dark .tool-form,
+body.dark .tool-type-switch,
+body.dark .tool-edit-secret-note,
+body.dark .tool-list-row,
+body.dark .tool-row-meta span,
+body.dark .tool-row-actions button,
+body.dark .tool-test-result,
+body.dark .confirm-dialog,
+body.dark .private-model-guide,
+body.dark .rag-model-status,
+body.dark .suggestion-strip,
+body.dark .chat-variable-bar,
+body.dark .session-editor,
+body.dark .attachment-preview,
+body.dark .error,
+body.dark .toast {
+  border-color: #303544;
+  background: #171a22;
+  color: #e6e8ef;
+}
+
+body.dark .resource-section-title,
+body.dark .provider-preset-grid button.active,
+body.dark .tool-type-switch button.active,
+body.dark .private-model-guide.ready,
+body.dark .rag-model-status.ready {
+  border-color: #303544;
+  background: #1f2430;
+  color: #f3f4f7;
+}
+
+body.dark .resource-tabs,
+body.dark .resource-row,
+body.dark .knowledge-or-line::before,
+body.dark .knowledge-or-line::after,
+body.dark .tool-test-result pre,
+body.dark .confirm-dialog-detail {
+  border-color: #303544;
+}
+
+body.dark .resource-row:hover,
+body.dark .resource-row.active,
+body.dark .knowledge-base-list button:hover,
+body.dark .knowledge-base-list button.active,
+body.dark .knowledge-file-drop:hover,
+body.dark .knowledge-file-drop.loading,
+body.dark .provider-preset-grid button:hover,
+body.dark .tool-row-actions button:hover:not(:disabled) {
+  border-color: #536078;
+  background: #242938;
+  color: #f3f4f7;
+}
+
+body.dark .resource-tabs button,
+body.dark .resource-type,
+body.dark .resource-meta,
+body.dark .resource-section-title span,
+body.dark .resource-row small,
+body.dark .prompt-preview-head p,
+body.dark .knowledge-base-list small,
+body.dark .knowledge-base-list span,
+body.dark .knowledge-file-drop small,
+body.dark .knowledge-or-line,
+body.dark .model-section-title span,
+body.dark .field-stack span,
+body.dark .model-enabled-check small,
+body.dark .model-preset-banner small,
+body.dark .model-channel-heading small,
+body.dark .provider-preset-header small,
+body.dark .provider-preset-note,
+body.dark .provider-preset-grid button small,
+body.dark .model-capability-summary small,
+body.dark .model-admin-row small,
+body.dark .user-model-row small,
+body.dark .tool-edit-secret-note span,
+body.dark .tool-row-main small,
+body.dark .tool-security-note,
+body.dark .tool-test-result span,
+body.dark .message-sources summary,
+body.dark .message-source-list small,
+body.dark .chat-variable-bar label,
+body.dark .rag-grid-settings label,
+body.dark .private-model-guide small,
+body.dark .rag-model-status small,
+body.dark .confirm-dialog p {
+  color: #9aa3b6;
+}
+
+body.dark .resource-tabs button.active,
+body.dark .resource-row strong,
+body.dark .prompt-preview-head h3,
+body.dark .knowledge-base-list strong,
+body.dark .knowledge-file-drop strong,
+body.dark .model-section-title strong,
+body.dark .model-enabled-check strong,
+body.dark .model-preset-banner strong,
+body.dark .model-channel-heading strong,
+body.dark .provider-preset-grid button strong,
+body.dark .model-admin-row strong,
+body.dark .user-model-row strong,
+body.dark .tool-edit-secret-note strong,
+body.dark .tool-row-main strong,
+body.dark .private-model-guide strong,
+body.dark .rag-model-status strong,
+body.dark .confirm-dialog h2 {
+  color: #f3f4f7;
+}
+
+body.dark .resource-icon,
+body.dark .knowledge-file-drop svg {
+  background: #1d2440;
+  color: #9fb0ff;
+}
+
+body.dark .resource-row-actions button,
+body.dark .prompt-preview-actions button,
+body.dark .builder-add-resource,
+body.dark .dialog-actions button,
+body.dark .model-admin-form .preset-action,
+body.dark .model-advanced-toggle,
+body.dark .user-model-form .preset-action,
+body.dark .private-model-guide button,
+body.dark .model-state-toggle,
+body.dark .model-admin-capabilities button,
+body.dark .tool-type-switch button,
+body.dark .confirm-dialog footer button,
+body.dark .attachment-button,
+body.dark .thinking-toggle,
+body.dark .search-toggle,
+body.dark .rag-toggle {
+  border-color: #364052;
+  background: #1f2430;
+  color: #d8dbe6;
+}
+
+body.dark .resource-row-actions button:hover:not(:disabled),
+body.dark .prompt-preview-actions button:hover:not(:disabled),
+body.dark .builder-add-resource:hover:not(:disabled),
+body.dark .dialog-actions button:hover:not(:disabled),
+body.dark .model-admin-form .preset-action:hover:not(:disabled),
+body.dark .model-advanced-toggle:hover:not(:disabled),
+body.dark .user-model-form .preset-action:hover:not(:disabled),
+body.dark .private-model-guide button:hover:not(:disabled),
+body.dark .model-state-toggle:hover:not(:disabled),
+body.dark .model-admin-capabilities button:hover:not(:disabled),
+body.dark .tool-type-switch button:hover:not(:disabled),
+body.dark .confirm-dialog footer button:hover:not(:disabled),
+body.dark .attachment-button:hover,
+body.dark .thinking-toggle:hover,
+body.dark .search-toggle:hover,
+body.dark .rag-toggle:hover {
+  border-color: #536078;
+  background: #242938;
+  color: #f3f4f7;
+}
+
+body.dark .prompt-preview-panel pre,
+body.dark .tool-test-result pre,
+body.dark .confirm-dialog-detail {
+  border-color: #303544;
+  background: #101520;
+  color: #c5cad7;
+}
+
+body.dark .model-capability-summary span.enabled,
+body.dark .model-row-tags span.enabled,
+body.dark .model-admin-capabilities button.enabled,
+body.dark .model-state-toggle.enabled,
+body.dark .tool-row-meta span.enabled,
+body.dark .tool-kind.builtin_search,
+body.dark .toast.success {
+  border-color: #2d7255;
+  background: #10281f;
+  color: #7ee0aa;
+}
+
+body.dark .model-row-warning,
+body.dark .tool-test-result,
+body.dark .rag-model-status.warning {
+  border-color: #846327;
+  background: #33270f;
+  color: #f7c76f;
+}
+
+body.dark .user-model-test,
+body.dark .error,
+body.dark .toast.error,
+body.dark .composer-warning,
+body.dark .confirm-dialog-detail {
+  border-color: #79372d;
+  background: #321817;
+  color: #ffb3a8;
+}
+
+body.dark .home-composer .thinking-toggle.on,
+body.dark .composer .thinking-toggle.on,
+body.dark .home-composer .thinking-toggle:hover,
+body.dark .composer .thinking-toggle:hover {
+  border-color: #4b57c6;
+  background: #1d2440;
+  color: #aebaff;
+}
+
+body.dark .home-composer .search-toggle.on,
+body.dark .composer .search-toggle.on {
+  border-color: #2d7255;
+  background: #10281f;
+  color: #7ee0aa;
+}
+
+body.dark .home-composer .rag-toggle.on,
+body.dark .composer .rag-toggle.on {
+  border-color: #846327;
+  background: #33270f;
+  color: #f7c76f;
 }
 
 

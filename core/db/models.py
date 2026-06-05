@@ -338,6 +338,8 @@ class Message(Base):
     session_id: Mapped[int] = mapped_column(ForeignKey("sessions.id", ondelete="CASCADE"), index=True)
     role: Mapped[str] = mapped_column(String(20))
     content: Mapped[str] = mapped_column(Text)
+    reasoning: Mapped[str] = mapped_column(Text, default="")
+    reasoning_duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     sources: Mapped[list] = mapped_column(JSON, default=list)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
 
