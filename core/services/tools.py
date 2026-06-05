@@ -1122,11 +1122,19 @@ def _tool_name_exists(db: Session, *, workspace_id: int | None, user_id: int | N
 
 def tool_schema_for_llm(tool: Tool) -> dict:
     """Convert a Tool into an OpenAI function-calling JSON Schema."""
+    description = tool.description or tool.label
+    if tool.type == "builtin_search":
+        description = (
+            "Search the public web for current, time-sensitive, or external factual information. "
+            "Use this only when the answer depends on recent events, live data, URLs, news, prices, weather, "
+            "or facts that may have changed. Do not use it for arithmetic, simple reasoning, translation, "
+            "summarizing the current conversation, or stable common knowledge."
+        )
     return {
         "type": "function",
         "function": {
             "name": tool.name,
-            "description": tool.description or tool.label,
+            "description": description,
             "parameters": _tool_parameters_schema(tool),
         },
     }

@@ -35,7 +35,6 @@ from core.services.user_models import (
     user_model_runtime_config,
 )
 from core.services import web_search as web_search_service
-from core.services.web_search import WebSearchError
 
 
 def default_workflow() -> list[dict]:
@@ -367,11 +366,11 @@ class WorkflowRunner:
             status = {**rag_result.status, "effective_source": effective_source}
             return {"sources": sources, "rag_enabled": True, "rag_status": status, "events": [{"event": "rag_status", "data": status}]}
         if node_type == "Tool":
-            bound_tools = self._runtime_tools(agent, node)
+            bound_tools = self._runtime_tools(agent, node, context)
             tool_policy = (agent.settings.get("tool_policy") or {})
             allowed_names = set(tool_policy.get("allowed_tool_names") or [])
             if allowed_names:
-                bound_tools = [t for t in bound_tools if t.name in allowed_names]
+                bound_tools = [t for t in bound_tools if t.name in allowed_names or t.type == "builtin_search"]
             if not bound_tools:
                 return {"tool_outputs": [], "tool_stats": {"total_calls": 0, "tools_used": []}}
 
@@ -380,6 +379,8 @@ class WorkflowRunner:
             total_calls = 0
             tools_used: list[str] = []
             events = []
+            web_sources = list(context.get("web_sources", []))
+            search_status = dict(context.get("search_status") or {})
             max_tool_calls = 20
             max_tool_wall_time = 120  # seconds
             tool_loop_start = time.monotonic()
@@ -401,8 +402,11 @@ class WorkflowRunner:
                     return {
                         "draft": response.content,
                         "draft_reasoning": response.reasoning_content or "",
+                        "web_sources": web_sources,
+                        "search_status": search_status,
                         "tool_outputs": [],
                         "tool_stats": {"total_calls": total_calls, "tools_used": tools_used},
+                        "events": events,
                     }
                 if response.tool_calls:
                     calls_this_round = response.tool_calls[:max_tool_calls - total_calls]
@@ -439,6 +443,9 @@ class WorkflowRunner:
                                 tool_content = result.get("content") or result.get("result_preview") or ""
                                 event_data = tool_call_event(matching, result, input_preview=json.dumps(tool_args, ensure_ascii=False))
                                 events.append({"event": "tool_call", "data": event_data})
+                                if matching.type == "builtin_search":
+                                    web_sources, search_status = self._merge_web_search_tool_result(web_sources, search_status, result)
+                                    events.append({"event": "search_status", "data": self._search_status_event(search_status)})
                                 messages.append({"role": "tool", "tool_call_id": tc["id"], "content": tool_content})
                                 self._persist_intermediate_message(
                                     context,
@@ -490,6 +497,8 @@ class WorkflowRunner:
             return {
                 "draft": final.content or "",
                 "draft_reasoning": final.reasoning_content or "",
+                "web_sources": web_sources,
+                "search_status": search_status,
                 "tool_outputs": [],
                 "tool_stats": {"total_calls": total_calls, "tools_used": tools_used, "max_rounds_reached": True},
                 "events": events,
@@ -560,6 +569,12 @@ class WorkflowRunner:
         thinking_msgs = self._thinking_messages(context)
         if thinking_msgs:
             thinking_blocks = [msg["content"] for msg in thinking_msgs]
+        search_instruction = ""
+        if context.get("search_enabled"):
+            search_instruction = (
+                "本轮联网搜索工具可用，但不是必选。只有当问题需要最新信息、外部事实、网页资料、天气、价格、新闻或可变信息时才调用；"
+                "简单算术、常识推理、翻译、代码解释、当前会话内容总结等不需要联网搜索的问题，请直接回答。"
+            )
             
         raw_summary = context.get('memory_summary') or ''
         formatted_summary = "无"
@@ -576,6 +591,7 @@ class WorkflowRunner:
         system_parts = [
             agent.system_prompt or "你是一个自定义智能体。",
             *thinking_blocks,
+            search_instruction,
             f"Web search results for this turn:\n{web_source_text or 'None'}",
             f"可用知识片段：\n{source_text or '无'}",
             f"工具输出：\n{tool_text or '无'}",
@@ -815,7 +831,8 @@ class WorkflowRunner:
         return {"native": "深度思考", "prompt": "提示词增强", "none": "不支持"}.get(reasoning_type, "不支持")
 
     def _search_status(self, query: str, requested: bool | None) -> dict:
-        provider = web_search_service.web_search_status().get("provider", "duckduckgo_html")
+        runtime = web_search_service.web_search_status()
+        provider = runtime.get("provider", "duckduckgo_html")
         if not requested:
             return {
                 "enabled": False,
@@ -828,22 +845,7 @@ class WorkflowRunner:
                 "sources": [],
                 "reason": "not_requested",
             }
-        try:
-            result = web_search_service.search_web(query)
-            sources = web_search_service.search_items_as_sources(result.get("items", []))
-            return {
-                "enabled": bool(sources),
-                "requested": True,
-                "query": result.get("query", query),
-                "provider": result.get("provider", "duckduckgo_html"),
-                "matched_results": len(sources),
-                "sources_emitted": bool(sources),
-                "items": result.get("items", []),
-                "sources": sources,
-                "latency_ms": result.get("latency_ms", 0),
-                "reason": "enabled" if sources else "no_results",
-            }
-        except WebSearchError as exc:
+        if not runtime.get("configured"):
             return {
                 "enabled": False,
                 "requested": True,
@@ -853,11 +855,47 @@ class WorkflowRunner:
                 "sources_emitted": False,
                 "items": [],
                 "sources": [],
-                "reason": str(exc),
+                "reason": "web_search_unavailable",
             }
+        return {
+            "enabled": True,
+            "requested": True,
+            "query": query,
+            "provider": provider,
+            "matched_results": 0,
+            "sources_emitted": False,
+            "items": [],
+            "sources": [],
+            "reason": "tool_available",
+        }
 
     def _search_status_event(self, status: dict) -> dict:
         return {key: value for key, value in status.items() if key != "sources"}
+
+    def _merge_web_search_tool_result(self, current_sources: list[dict], status: dict, result: dict) -> tuple[list[dict], dict]:
+        result_json = result.get("result_json") if isinstance(result.get("result_json"), dict) else {}
+        items = result_json.get("items") or []
+        next_sources = [dict(item) for item in current_sources]
+        new_sources = web_search_service.search_items_as_sources(items)
+        offset = len(next_sources)
+        for index, source in enumerate(new_sources, start=offset + 1):
+            source["source_id"] = f"web-{index}"
+            source["chunk_id"] = f"web-search-{index}"
+            next_sources.append(source)
+        next_status = {
+            **status,
+            "enabled": bool(next_sources),
+            "requested": True,
+            "query": result_json.get("query") or status.get("query") or "",
+            "provider": result_json.get("provider") or status.get("provider") or "duckduckgo_html",
+            "matched_results": len(next_sources),
+            "sources_emitted": bool(next_sources),
+            "items": [*(status.get("items") or []), *items],
+            "sources": next_sources,
+            "latency_ms": result.get("latency_ms", status.get("latency_ms", 0)),
+            "reason": "tool_called" if next_sources else "no_results",
+        }
+        return next_sources, next_status
 
     def _web_source_text(self, sources: list[dict]) -> str:
         lines = []
@@ -868,16 +906,29 @@ class WorkflowRunner:
             lines.append(f"{index}. {title}\nURL: {url}\nSnippet: {snippet}")
         return "\n\n".join(lines)
 
-    def _runtime_tools(self, agent, node: dict) -> list[Tool]:
+    def _runtime_tools(self, agent, node: dict, context: dict | None = None) -> list[Tool]:
         tool_ids = getattr(agent, "tool_ids", []) or []
+        tools: list[Tool] = []
         if tool_ids:
-            return (
+            tools = (
                 self.db.query(Tool)
                 .filter(Tool.id.in_(tool_ids), Tool.enabled.is_(True))
                 .order_by(Tool.id.asc())
                 .all()
             )
-        return []
+        if context and context.get("search_enabled"):
+            from core.services.bootstrap import ensure_builtin_tools
+
+            ensure_builtin_tools(self.db)
+            existing_ids = {tool.id for tool in tools}
+            search_tool = (
+                self.db.query(Tool)
+                .filter(Tool.name == "web_search", Tool.type == "builtin_search", Tool.enabled.is_(True))
+                .first()
+            )
+            if search_tool and search_tool.id not in existing_ids:
+                tools.append(search_tool)
+        return tools
 
     def _attachment_text(self, uploads: list[Upload]) -> str:
         lines = []

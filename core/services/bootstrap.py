@@ -57,6 +57,7 @@ def ensure_builtin_tools(db: Session) -> None:
         search_tool.type = "builtin_search"
         search_tool.label = "Web Search"
         search_tool.description = "Built-in web search adapter for Agent tools"
+        search_tool.enabled = True
     else:
         db.add(Tool(name="web_search", label="Web Search", description="Built-in web search adapter for Agent tools", schema={}, type="builtin_search"))
 
