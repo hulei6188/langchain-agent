@@ -599,7 +599,7 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
 }
 .welcome-panel h1 {
   margin: 0;
-  font-size: clamp(28px, 4vw, 42px);
+  font-size: clamp(24px, 3vw, 34px);
   letter-spacing: 0;
   font-weight: 650;
 }
@@ -2250,6 +2250,27 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
   backdrop-filter: blur(10px);
 }
 .stage-header { position: static; }
+.stage-clear-button {
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid #dfe4ef;
+  border-radius: 6px;
+  padding: 5px 10px;
+  background: #ffffff;
+  color: #667085;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all .2s ease;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, .05);
+}
+.stage-clear-button:hover {
+  border-color: #4d43e6;
+  background: rgba(77, 67, 230, .02);
+  color: #4d43e6;
+}
 
 .column-header h2,
 .stage-header h2 {
@@ -2813,6 +2834,23 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
   color: #111827;
 }
 
+.builder-knowledge-doc-panel {
+  margin-top: 8px;
+  padding: 12px;
+  border: 1px dashed #dfe4ef;
+  border-radius: 8px;
+  background: #ffffff;
+}
+.builder-knowledge-doc-heading {
+  margin-bottom: 8px;
+  color: #4d43e6;
+  font-size: 11px;
+  font-weight: 800;
+}
+.builder-knowledge-upload-wrap {
+  margin-top: 10px;
+}
+
 .config-note {
   display: grid;
   gap: 4px;
@@ -2919,6 +2957,39 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
   line-height: 1.45;
 }
 .document-row button { width: 30px; height: 30px; padding: 0; }
+.document-chunk-list {
+  grid-column: 1 / -1;
+  margin-top: 4px;
+  padding-top: 8px;
+  border-top: 1px solid #eef0f5;
+}
+.document-chunk-card {
+  margin-bottom: 6px;
+  border: 1px solid #eef0f5;
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 1.55;
+}
+.document-chunk-meta {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.document-chunk-meta .document-status {
+  font-size: 10px;
+}
+.document-chunk-meta small {
+  color: #667085;
+}
+.document-chunk-meta small:last-child {
+  color: #98a2b3;
+}
+.document-chunk-text {
+  color: #344054;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 .document-status {
   align-self: start;
   border-radius: 999px;
@@ -6880,6 +6951,151 @@ body.dark .composer .rag-toggle.on {
   border-color: #846327;
   background: #33270f;
   color: #f7c76f;
+}
+
+/* Targeted dark fixes for builder knowledge docs, memory profile, and empty review states. */
+body.dark .coze-bound-card.is-selected {
+  border-color: #6f7cff !important;
+  background: #1d2440 !important;
+}
+
+body.dark .builder-knowledge-doc-panel,
+body.dark .document-list,
+body.dark .memory-profile-head,
+body.dark .empty-state {
+  border-color: #303544;
+  background: #171a22;
+  color: #e6e8ef;
+}
+
+body.dark .builder-knowledge-doc-panel {
+  border-style: dashed;
+}
+
+body.dark .builder-knowledge-doc-heading {
+  color: #9fb0ff;
+}
+
+body.dark .document-row,
+body.dark .document-row.status-indexed,
+body.dark .document-row.status-indexing,
+body.dark .document-row.status-uploaded,
+body.dark .document-row.status-failed,
+body.dark .document-chunk-card {
+  border-color: #303544;
+  background: #101520;
+  color: #d8dbe6;
+}
+
+body.dark .document-row:hover {
+  border-color: #536078;
+  background: #171d2a;
+}
+
+body.dark .document-row svg {
+  color: #8f98aa;
+}
+
+body.dark .document-row strong,
+body.dark .memory-profile-head strong {
+  color: #f3f4f7;
+}
+
+body.dark .document-row small,
+body.dark .document-row em,
+body.dark .document-chunk-meta small,
+body.dark .memory-profile-head span,
+body.dark .memory-profile-meta span,
+body.dark .memory-profile-shell small {
+  color: #9aa3b6;
+}
+
+body.dark .document-row b {
+  color: #ffb3a8;
+}
+
+body.dark .document-row button,
+body.dark .knowledge-upload-box button,
+body.dark .memory-profile-actions button {
+  border-color: #364052;
+  background: #1f2430;
+  color: #d8dbe6;
+}
+
+body.dark .document-row button:hover:not(:disabled),
+body.dark .knowledge-upload-box button:hover:not(:disabled),
+body.dark .memory-profile-actions button:hover:not(:disabled) {
+  border-color: #536078;
+  background: #242938;
+  color: #f3f4f7;
+}
+
+body.dark .document-chunk-list {
+  border-top-color: #303544;
+}
+
+body.dark .document-chunk-text {
+  color: #c5cad7;
+}
+
+body.dark .document-status,
+body.dark .memory-profile-meta span {
+  border-color: #364052;
+  background: #1f2430;
+  color: #c5cad7;
+}
+
+body.dark .document-status.indexed,
+body.dark .document-status.status-indexed {
+  border-color: #2d7255;
+  background: #10281f;
+  color: #7ee0aa;
+}
+
+body.dark .document-status.indexing,
+body.dark .document-status.uploaded {
+  border-color: #4b57c6;
+  background: #1d2440;
+  color: #aebaff;
+}
+
+body.dark .document-status.failed {
+  border-color: #79372d;
+  background: #321817;
+  color: #ffb3a8;
+}
+
+body.dark .memory-profile-shell textarea.invalid {
+  border-color: #79372d;
+  background: #321817;
+  color: #ffb3a8;
+}
+
+body.dark .memory-profile-actions .danger {
+  border-color: #79372d;
+  background: #2a1715;
+  color: #ffb3a8;
+}
+
+body.dark .memory-profile-actions .danger:hover:not(:disabled) {
+  border-color: #a6483b;
+  background: #321817;
+  color: #ffd0ca;
+}
+
+body.dark .stage-clear-button,
+body.dark .suggestion-strip button {
+  border-color: #364052;
+  background: #1f2430;
+  color: #d8dbe6;
+  box-shadow: none;
+}
+
+body.dark .stage-clear-button:hover,
+body.dark .suggestion-strip button:hover {
+  border-color: #536078;
+  background: #242938;
+  color: #f3f4f7;
 }
 
 

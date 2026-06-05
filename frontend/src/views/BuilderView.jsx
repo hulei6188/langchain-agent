@@ -516,13 +516,9 @@ export function BuilderView(props) {
                 const isSelectedForUpload = String(docForm.kb_id) === String(kb.id);
                 return (
                   <div key={kb.id} style={{ marginBottom: '8px' }}>
-                    <div 
-                      className="coze-bound-card" 
-                      style={{ 
-                        cursor: 'pointer', 
-                        borderColor: isSelectedForUpload ? '#4d43e6' : '#dfe4ef',
-                        background: isSelectedForUpload ? 'rgba(77, 67, 230, 0.02)' : '#f8fafc'
-                      }}
+                    <div
+                      className={`coze-bound-card ${isSelectedForUpload ? 'is-selected' : ''}`}
+                      style={{ cursor: 'pointer' }}
                       onClick={() => setDocForm((current) => ({ ...current, kb_id: String(kb.id) }))}
                     >
                       <div className="coze-bound-card-info" style={{ minWidth: 0, flex: 1 }}>
@@ -546,15 +542,15 @@ export function BuilderView(props) {
                     
                     {/* Only show upload documents list if this KB card is selected */}
                     {isSelectedForUpload && (
-                      <div style={{ marginTop: '8px', padding: '12px', background: '#ffffff', border: '1px dashed #dfe4ef', borderRadius: '8px' }}>
-                        <div style={{ fontSize: '11px', fontWeight: 'bold', color: '#4d43e6', marginBottom: '8px' }}>
+                      <div className="builder-knowledge-doc-panel">
+                        <div className="builder-knowledge-doc-heading">
                           📂 知识文档管理 (当前知识库: “{kb.name}”)
                         </div>
                         <KnowledgeDocumentList 
                           documents={documents.filter(doc => String(doc.knowledge_base_id) === String(kb.id))} 
                           deleteDocument={deleteDocument} 
                         />
-                        <div style={{ marginTop: '10px' }}>
+                        <div className="builder-knowledge-upload-wrap">
                           <KnowledgeUploadBox
                             docForm={docForm}
                             setDocForm={setDocForm}
@@ -835,34 +831,8 @@ export function BuilderView(props) {
             <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
               <button
                 type="button"
-                className="coze-add-button"
-                style={{
-                  background: '#ffffff',
-                  border: '1px solid #dfe4ef',
-                  color: '#667085',
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '4px',
-                  padding: '5px 10px',
-                  fontSize: '12px',
-                  borderRadius: '6px',
-                  fontWeight: 600,
-                  cursor: 'pointer',
-                  transition: 'all 0.2s ease',
-                  boxShadow: '0 1px 2px rgba(0, 0, 0, 0.05)',
-                  height: '28px'
-                }}
+                className="stage-clear-button"
                 onClick={startNewChat}
-                onMouseEnter={(e) => {
-                  e.currentTarget.style.borderColor = '#4d43e6';
-                  e.currentTarget.style.color = '#4d43e6';
-                  e.currentTarget.style.background = 'rgba(77, 67, 230, 0.02)';
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.borderColor = '#dfe4ef';
-                  e.currentTarget.style.color = '#667085';
-                  e.currentTarget.style.background = '#ffffff';
-                }}
               >
                 <Trash2 size={13} />
                 <span>清空会话</span>

@@ -291,9 +291,14 @@ class OpenAICompatibleProvider:
             ) from exc
 
     def _apply_thinking_payload(self, payload: dict, *, api_base: str, model: str, thinking_enabled: bool | None) -> None:
-        if thinking_enabled is None or not self._is_dashscope_qwen(api_base, model):
+        if thinking_enabled is None:
             return
-        payload["enable_thinking"] = bool(thinking_enabled)
+        if self._is_dashscope_qwen(api_base, model):
+            payload["enable_thinking"] = bool(thinking_enabled)
+            return
+        if thinking_enabled and self._is_deepseek(api_base, model):
+            payload["reasoning_effort"] = "high"
+            payload["thinking"] = {"type": "enabled"}
 
     @staticmethod
     def _is_dashscope_qwen(api_base: str, model: str) -> bool:
@@ -303,6 +308,12 @@ class OpenAICompatibleProvider:
             ("dashscope.aliyuncs.com" in normalized_base or "dashscope-intl.aliyuncs.com" in normalized_base)
             and normalized_model.startswith("qwen")
         )
+
+    @staticmethod
+    def _is_deepseek(api_base: str, model: str) -> bool:
+        normalized_base = (api_base or "").lower()
+        normalized_model = (model or "").lower()
+        return "deepseek.com" in normalized_base or normalized_model.startswith("deepseek")
 
     def _post_json_stream(self, url: str, payload: dict, api_key: str) -> Iterable[ChatStreamChunk]:
         request = urllib.request.Request(

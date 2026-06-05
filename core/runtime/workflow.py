@@ -468,6 +468,8 @@ class WorkflowRunner:
             thinking_enabled=self._thinking_request_value(context),
         ):
             if chunk.type == "reasoning":
+                if not context.get("thinking_enabled"):
+                    continue
                 reasoning_chunks.append(chunk.content)
                 yield {"event": "reasoning_token", "content": chunk.content}
             elif chunk.type == "content":
