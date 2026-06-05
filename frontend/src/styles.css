@@ -3138,7 +3138,8 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
   max-width: 100%;
   font-size: 15.5px;
   line-height: 1.78;
-  overflow-wrap: anywhere;
+  overflow-wrap: break-word;
+  word-break: normal;
 }
 .markdown-content > * {
   min-width: 0;
@@ -3179,7 +3180,8 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
   padding: 8px 10px;
   border: 1px solid #e4e7ec;
   text-align: left;
-  white-space: nowrap;
+  vertical-align: top;
+  white-space: normal;
 }
 .markdown-content th { background: #f8fafc; }
 .markdown-content a {
@@ -3198,8 +3200,18 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
   background: #f2f4f7;
   font-family: "Cascadia Code", Consolas, monospace;
   font-size: .92em;
-  overflow-wrap: anywhere;
-  word-break: break-word;
+  overflow-wrap: break-word;
+  word-break: normal;
+}
+.markdown-content code.inline-code {
+  display: inline;
+  white-space: break-spaces;
+}
+.markdown-content th code.inline-code,
+.markdown-content td code.inline-code {
+  white-space: nowrap;
+  overflow-wrap: normal;
+  word-break: normal;
 }
 .code-block {
   min-width: 0;
