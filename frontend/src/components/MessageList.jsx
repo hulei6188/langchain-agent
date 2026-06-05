@@ -89,6 +89,7 @@ function toTimestamp(value) {
 }
 
 function formatDurationMs(durationMs) {
+  if (durationMs === null || durationMs === undefined || durationMs === '') return '';
   const numeric = Number(durationMs);
   if (!Number.isFinite(numeric) || numeric < 0) return '';
   const totalSeconds = Math.max(0, Math.floor(numeric / 1000));
