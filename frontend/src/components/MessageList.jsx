@@ -21,7 +21,13 @@ export function MessageList({ messages, feedbackByMessage = {}, submitFeedback =
             {message.role === 'assistant' ? (
               <div className={message.error ? 'message-error' : ''}>
                 {(message.reasoning || message.reasoningPending) && (
-                  <MessageReasoning content={message.reasoning || ''} pending={message.reasoningPending} />
+                  <MessageReasoning
+                    content={message.reasoning || ''}
+                    pending={message.reasoningPending}
+                    startedAt={message.reasoningStartedAt}
+                    finishedAt={message.reasoningFinishedAt}
+                    durationMs={message.reasoningDurationMs}
+                  />
                 )}
                 {message.pending && !message.content ? (
                   <p className="message-pending">{message.reasoning ? '正在组织回答...' : '思考中...'}</p>
@@ -75,19 +81,61 @@ export function MessageList({ messages, feedbackByMessage = {}, submitFeedback =
   );
 }
 
-function MessageReasoning({ content, pending }) {
+function toTimestamp(value) {
+  if (!value) return null;
+  if (typeof value === 'number') return value;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function formatDurationMs(durationMs) {
+  const numeric = Number(durationMs);
+  if (!Number.isFinite(numeric) || numeric < 0) return '';
+  const totalSeconds = Math.max(0, Math.floor(numeric / 1000));
+  if (totalSeconds < 60) return `${totalSeconds} 秒`;
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return seconds ? `${minutes} 分 ${seconds} 秒` : `${minutes} 分`;
+}
+
+function formatThinkingDuration(startedAt, finishedAt, now, durationMs) {
+  const storedDuration = formatDurationMs(durationMs);
+  if (storedDuration) return storedDuration;
+  const start = toTimestamp(startedAt);
+  if (!start) return '';
+  const end = toTimestamp(finishedAt) || now;
+  const totalSeconds = Math.max(0, Math.floor((end - start) / 1000));
+  if (totalSeconds < 60) return `${totalSeconds} 秒`;
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return seconds ? `${minutes} 分 ${seconds} 秒` : `${minutes} 分`;
+}
+
+function MessageReasoning({ content, pending, startedAt, finishedAt, durationMs }) {
   const [open, setOpen] = useState(true);
+  const [now, setNow] = useState(() => Date.now());
 
   useEffect(() => {
     if (pending) setOpen(true);
   }, [pending]);
 
+  useEffect(() => {
+    if (!pending || !startedAt) return undefined;
+    setNow(Date.now());
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [pending, startedAt]);
+
+  const duration = formatThinkingDuration(startedAt, finishedAt, now, pending ? null : durationMs);
+  const statusText = pending ? '思考中' : '已思考';
+  const durationText = duration ? (pending ? `（${duration}）` : `（用时 ${duration}）`) : '';
+
   return (
-    <details className="message-reasoning" open={open} onToggle={(event) => setOpen(event.currentTarget.open)}>
+    <details className={pending ? 'message-reasoning is-pending' : 'message-reasoning is-done'} open={open} onToggle={(event) => setOpen(event.currentTarget.open)}>
       <summary>
         <Brain size={14} />
-        <strong>{pending ? '思考中' : '已思考'}</strong>
-        {content ? <small>{content.length} 字</small> : null}
+        <strong>{statusText}{durationText}</strong>
+        {content ? <small className="message-reasoning-count">{content.length} 字</small> : null}
       </summary>
       <div className="message-reasoning-content">
         {content ? <MarkdownContent content={content} /> : <p>等待模型返回推理过程...</p>}

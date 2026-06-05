@@ -315,6 +315,8 @@ CREATE TABLE IF NOT EXISTS messages (
     session_id BIGINT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
     role VARCHAR(20) NOT NULL CHECK (role IN ('system', 'user', 'assistant', 'tool')),
     content TEXT NOT NULL,
+    reasoning TEXT NOT NULL DEFAULT '',
+    reasoning_duration_ms INTEGER NULL,
     sources JSONB NOT NULL DEFAULT '[]'::jsonb,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );

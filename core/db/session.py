@@ -79,6 +79,14 @@ def _run_compat_migrations() -> None:
                 "reasoning_label": "VARCHAR(80) DEFAULT '不支持'",
             },
         )
+    if "messages" in table_names:
+        _ensure_columns(
+            "messages",
+            {
+                "reasoning": "TEXT DEFAULT ''",
+                "reasoning_duration_ms": "INTEGER",
+            },
+        )
     if "agent_settings" in table_names:
         settings_columns = {column["name"] for column in inspector.get_columns("agent_settings")}
         if "rag" not in settings_columns:
