@@ -3207,8 +3207,17 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
   overflow: hidden;
   border: 1px solid #e5e7eb;
   border-radius: 10px;
-  background: #101828;
-  color: #f8fafc;
+  background: #ffffff;
+  color: #111827;
+}
+.code-block-plain {
+  border-radius: 8px;
+  border-color: #e5e7eb;
+  background: #ffffff;
+  color: #111827;
+}
+.code-block-plain pre {
+  background: #ffffff;
 }
 .code-header {
   display: flex;
@@ -3216,15 +3225,16 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
   justify-content: space-between;
   gap: 10px;
   padding: 7px 10px;
-  background: #1d2939;
-  color: #cbd5e1;
+  border-bottom: 1px solid #e5e7eb;
+  background: #f8fafc;
+  color: #475467;
   font-size: 12px;
 }
 .code-header button {
   padding: 4px 8px;
   border-radius: 6px;
-  background: #344054;
-  color: #fff;
+  background: #eef2ff;
+  color: #3730a3;
 }
 .code-header span {
   min-width: 0;
@@ -3239,6 +3249,7 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   word-break: break-word;
+  background: #ffffff;
 }
 .code-block code {
   padding: 0;
@@ -4302,6 +4313,29 @@ body.dark .source-more {
   border-color: #303544;
   background: #1f2430;
   color: #d8dbe6;
+}
+body.dark .code-block {
+  border-color: #303544;
+  background: #111827;
+  color: #d8dbe6;
+}
+body.dark .code-block pre {
+  background: #111827;
+}
+body.dark .code-block-plain,
+body.dark .code-block-plain pre {
+  border-color: #303544;
+  background: #111827;
+  color: #d8dbe6;
+}
+body.dark .code-header {
+  border-color: #303544;
+  background: #1f2430;
+  color: #aab2c4;
+}
+body.dark .code-header button {
+  background: #2b3343;
+  color: #f3f4f7;
 }
 body.dark .markdown-content table,
 body.dark .markdown-content th,

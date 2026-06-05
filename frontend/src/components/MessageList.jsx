@@ -172,15 +172,19 @@ export function MarkdownContent({ content }) {
 }
 
 export function CodeBlock({ language, code }) {
+  const normalizedLanguage = String(language || '').trim().toLowerCase();
+  const isPlainText = !normalizedLanguage || ['text', 'txt', 'plain', 'plaintext'].includes(normalizedLanguage);
   async function copyCode() {
     await navigator.clipboard?.writeText(code);
   }
   return (
-    <div className="code-block">
-      <div className="code-header">
-        <span>{language || 'text'}</span>
-        <button type="button" onClick={copyCode}>复制</button>
-      </div>
+    <div className={isPlainText ? 'code-block code-block-plain' : 'code-block'}>
+      {!isPlainText && (
+        <div className="code-header">
+          <span>{language}</span>
+          <button type="button" onClick={copyCode}>复制</button>
+        </div>
+      )}
       <pre><code>{code}</code></pre>
     </div>
   );

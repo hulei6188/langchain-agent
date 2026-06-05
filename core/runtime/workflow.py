@@ -558,11 +558,13 @@ class WorkflowRunner:
                 messages,
                 context,
                 tools=tool_schemas,
+                stream_content=True,
             )
             reasoning_streamed = bool(response.reasoning_content and context.get("thinking_enabled"))
             if response.content and not response.tool_calls:
                 return {
                     "draft": response.content,
+                    "draft_streamed": True,
                     "draft_reasoning": response.reasoning_content or "",
                     "draft_reasoning_streamed": reasoning_streamed,
                     "web_sources": web_sources,
@@ -606,9 +608,10 @@ class WorkflowRunner:
             else:
                 break
 
-        final = yield from self._stream_chat_response(agent, messages, context)
+        final = yield from self._stream_chat_response(agent, messages, context, stream_content=True)
         return {
             "draft": final.content or "",
+            "draft_streamed": bool(final.content),
             "draft_reasoning": final.reasoning_content or "",
             "draft_reasoning_streamed": bool(final.reasoning_content and context.get("thinking_enabled")),
             "web_sources": web_sources,
@@ -618,11 +621,12 @@ class WorkflowRunner:
             "events": events,
         }
 
-    def _stream_chat_response(self, agent, messages: list[dict], context: dict, *, tools: list[dict] | None = None):
+    def _stream_chat_response(self, agent, messages: list[dict], context: dict, *, tools: list[dict] | None = None, stream_content: bool = False):
         content_chunks: list[str] = []
         reasoning_chunks: list[str] = []
         tool_call_builders: dict[int, dict] = {}
         final_tool_calls: list[dict] = []
+        saw_tool_call = False
         for chunk in self.provider.chat_stream_events(
             messages,
             model=agent.model,
@@ -638,9 +642,13 @@ class WorkflowRunner:
                 yield {"event": "reasoning_token", "content": chunk.content}
             elif chunk.type == "content":
                 content_chunks.append(chunk.content)
+                if stream_content and not saw_tool_call:
+                    yield {"event": "token", "content": chunk.content}
             elif chunk.type == "tool_call_delta":
+                saw_tool_call = True
                 self._merge_stream_tool_call_deltas(tool_call_builders, chunk.tool_calls or [])
             elif chunk.type == "tool_calls":
+                saw_tool_call = True
                 final_tool_calls = chunk.tool_calls or []
         if not final_tool_calls:
             final_tool_calls = self._finalize_stream_tool_calls(tool_call_builders)
@@ -772,9 +780,10 @@ class WorkflowRunner:
             draft_reasoning = context.get("draft_reasoning") or ""
             if draft_reasoning and context.get("thinking_enabled") and not context.get("draft_reasoning_streamed"):
                 yield {"event": "reasoning_token", "content": draft_reasoning}
-            # Draft already produced by the tool-calling loop — stream as chunked text
-            for index in range(0, len(draft), 24):
-                yield {"event": "token", "content": draft[index : index + 24]}
+            if not context.get("draft_streamed"):
+                # Draft already produced by the tool-calling loop — stream as chunked text
+                for index in range(0, len(draft), 24):
+                    yield {"event": "token", "content": draft[index : index + 24]}
             return self._llm_output(agent, context, draft, reasoning=draft_reasoning)
         messages = self._llm_messages(agent, context)
         chunks = []
