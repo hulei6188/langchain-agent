@@ -1298,7 +1298,7 @@ function App() {
       setMessages((items) => {
         const next = [...items];
         const last = next[next.length - 1];
-        if (last?.role === 'assistant') {
+        if (last?.role === 'assistant' && (last.reasoningPending || last.reasoningStartedAt)) {
           next[next.length - 1] = {
             ...last,
             reasoningPending: true,
