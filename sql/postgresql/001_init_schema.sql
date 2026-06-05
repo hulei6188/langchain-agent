@@ -410,6 +410,261 @@ CREATE TABLE IF NOT EXISTS feedback (
 CREATE INDEX IF NOT EXISTS ix_feedback_message_id ON feedback (message_id);
 CREATE INDEX IF NOT EXISTS ix_feedback_user_id ON feedback (user_id);
 
+-- Column comments.
+COMMENT ON COLUMN users.id IS '用户主键';
+COMMENT ON COLUMN users.email IS '用户邮箱，唯一登录标识';
+COMMENT ON COLUMN users.name IS '用户显示名称';
+COMMENT ON COLUMN users.avatar_url IS '用户头像地址';
+COMMENT ON COLUMN users.password_hash IS '用户密码哈希值';
+COMMENT ON COLUMN users.is_active IS '用户是否启用';
+COMMENT ON COLUMN users.created_at IS '用户创建时间';
+
+COMMENT ON COLUMN workspaces.id IS '工作区主键';
+COMMENT ON COLUMN workspaces.name IS '工作区名称';
+COMMENT ON COLUMN workspaces.slug IS '工作区唯一标识 slug';
+COMMENT ON COLUMN workspaces.created_at IS '工作区创建时间';
+
+COMMENT ON COLUMN workspace_members.id IS '工作区成员关系主键';
+COMMENT ON COLUMN workspace_members.workspace_id IS '所属工作区 ID';
+COMMENT ON COLUMN workspace_members.user_id IS '成员用户 ID';
+COMMENT ON COLUMN workspace_members.role IS '成员角色';
+COMMENT ON COLUMN workspace_members.created_at IS '加入工作区时间';
+
+COMMENT ON COLUMN workspace_invites.id IS '工作区邀请主键';
+COMMENT ON COLUMN workspace_invites.workspace_id IS '目标工作区 ID';
+COMMENT ON COLUMN workspace_invites.email IS '被邀请邮箱';
+COMMENT ON COLUMN workspace_invites.role IS '邀请后授予的角色';
+COMMENT ON COLUMN workspace_invites.token IS '邀请令牌';
+COMMENT ON COLUMN workspace_invites.accepted_at IS '邀请接受时间';
+COMMENT ON COLUMN workspace_invites.created_at IS '邀请创建时间';
+
+COMMENT ON COLUMN model_configs.id IS '模型配置主键';
+COMMENT ON COLUMN model_configs.provider IS '模型提供方类型';
+COMMENT ON COLUMN model_configs.model_name IS '模型唯一标识';
+COMMENT ON COLUMN model_configs.display_name IS '模型展示名称';
+COMMENT ON COLUMN model_configs.supports_text IS '是否支持文本输入输出';
+COMMENT ON COLUMN model_configs.supports_image IS '是否支持图像能力';
+COMMENT ON COLUMN model_configs.supports_document IS '是否支持文档能力';
+COMMENT ON COLUMN model_configs.supports_reasoning IS '是否支持推理能力';
+COMMENT ON COLUMN model_configs.reasoning_type IS '推理能力接入方式';
+COMMENT ON COLUMN model_configs.reasoning_label IS '推理能力展示标签';
+COMMENT ON COLUMN model_configs.max_context IS '最大上下文长度';
+COMMENT ON COLUMN model_configs.default_temperature IS '默认生成温度';
+COMMENT ON COLUMN model_configs.enabled IS '模型是否启用';
+COMMENT ON COLUMN model_configs.created_at IS '模型配置创建时间';
+
+COMMENT ON COLUMN user_model_configs.id IS '用户模型配置主键';
+COMMENT ON COLUMN user_model_configs.user_id IS '所属用户 ID';
+COMMENT ON COLUMN user_model_configs.display_name IS '用户自定义模型名称';
+COMMENT ON COLUMN user_model_configs.provider IS '接入协议类型';
+COMMENT ON COLUMN user_model_configs.base_url IS '模型服务基础地址';
+COMMENT ON COLUMN user_model_configs.encrypted_api_key IS '加密后的 API Key';
+COMMENT ON COLUMN user_model_configs.chat_model IS '对话模型名称';
+COMMENT ON COLUMN user_model_configs.supports_image IS '是否支持图像能力';
+COMMENT ON COLUMN user_model_configs.supports_document IS '是否支持文档能力';
+COMMENT ON COLUMN user_model_configs.supports_reasoning IS '是否支持推理能力';
+COMMENT ON COLUMN user_model_configs.reasoning_type IS '推理能力接入方式';
+COMMENT ON COLUMN user_model_configs.reasoning_label IS '推理能力展示标签';
+COMMENT ON COLUMN user_model_configs.max_context IS '最大上下文长度';
+COMMENT ON COLUMN user_model_configs.default_temperature IS '默认生成温度';
+COMMENT ON COLUMN user_model_configs.enabled IS '配置是否启用';
+COMMENT ON COLUMN user_model_configs.is_default IS '是否为用户默认模型';
+COMMENT ON COLUMN user_model_configs.created_at IS '用户模型配置创建时间';
+COMMENT ON COLUMN user_model_configs.updated_at IS '用户模型配置更新时间';
+
+COMMENT ON COLUMN agents.id IS '智能体主键';
+COMMENT ON COLUMN agents.workspace_id IS '所属工作区 ID';
+COMMENT ON COLUMN agents.model_id IS '关联的平台预置模型配置 ID';
+COMMENT ON COLUMN agents.user_model_config_id IS '关联的用户模型配置 ID';
+COMMENT ON COLUMN agents.name IS '智能体名称';
+COMMENT ON COLUMN agents.avatar IS '智能体头像简称';
+COMMENT ON COLUMN agents.description IS '智能体简介';
+COMMENT ON COLUMN agents.opening_message IS '会话开场白';
+COMMENT ON COLUMN agents.system_prompt IS '系统提示词';
+COMMENT ON COLUMN agents.model IS '运行时模型名称快照';
+COMMENT ON COLUMN agents.temperature IS '生成温度';
+COMMENT ON COLUMN agents.status IS '智能体状态';
+COMMENT ON COLUMN agents.published_version_id IS '当前已发布版本 ID';
+COMMENT ON COLUMN agents.is_template IS '是否为模板智能体';
+COMMENT ON COLUMN agents.created_by IS '创建人用户 ID';
+COMMENT ON COLUMN agents.created_at IS '智能体创建时间';
+COMMENT ON COLUMN agents.updated_at IS '智能体更新时间';
+
+COMMENT ON COLUMN agent_versions.id IS '智能体版本主键';
+COMMENT ON COLUMN agent_versions.agent_id IS '所属智能体 ID';
+COMMENT ON COLUMN agent_versions.version IS '版本号';
+COMMENT ON COLUMN agent_versions.snapshot IS '版本快照数据';
+COMMENT ON COLUMN agent_versions.created_by IS '版本创建人用户 ID';
+COMMENT ON COLUMN agent_versions.created_at IS '版本创建时间';
+
+COMMENT ON COLUMN agent_settings.id IS '智能体设置主键';
+COMMENT ON COLUMN agent_settings.agent_id IS '所属智能体 ID';
+COMMENT ON COLUMN agent_settings.suggested_questions IS '建议提问列表';
+COMMENT ON COLUMN agent_settings.variables IS '提示词变量定义列表';
+COMMENT ON COLUMN agent_settings.memory IS '记忆配置';
+COMMENT ON COLUMN agent_settings.rag IS 'RAG 配置';
+COMMENT ON COLUMN agent_settings.tool_policy IS '工具调用策略配置';
+COMMENT ON COLUMN agent_settings.updated_at IS '智能体设置更新时间';
+
+COMMENT ON COLUMN tools.id IS '工具主键';
+COMMENT ON COLUMN tools.workspace_id IS '所属工作区 ID，全局工具为空';
+COMMENT ON COLUMN tools.user_id IS '所属用户 ID，全局工具为空';
+COMMENT ON COLUMN tools.type IS '工具类型';
+COMMENT ON COLUMN tools.name IS '工具唯一代码名';
+COMMENT ON COLUMN tools.label IS '工具展示名称';
+COMMENT ON COLUMN tools.description IS '工具描述';
+COMMENT ON COLUMN tools.schema IS '工具输入参数 Schema';
+COMMENT ON COLUMN tools.enabled IS '工具是否启用';
+COMMENT ON COLUMN tools.method IS 'HTTP 请求方法';
+COMMENT ON COLUMN tools.url IS 'HTTP 工具请求地址';
+COMMENT ON COLUMN tools.headers_schema IS '请求头参数 Schema';
+COMMENT ON COLUMN tools.query_schema IS '查询参数 Schema';
+COMMENT ON COLUMN tools.body_schema IS '请求体参数 Schema';
+COMMENT ON COLUMN tools.auth_type IS '认证方式';
+COMMENT ON COLUMN tools.auth_header_name IS '认证请求头名称';
+COMMENT ON COLUMN tools.auth_query_name IS '认证查询参数名称';
+COMMENT ON COLUMN tools.encrypted_secret IS '加密后的工具密钥';
+COMMENT ON COLUMN tools.response_path IS '响应结果提取路径';
+COMMENT ON COLUMN tools.timeout_seconds IS '请求超时时间（秒）';
+COMMENT ON COLUMN tools.search_options IS '搜索类工具附加配置';
+COMMENT ON COLUMN tools.created_at IS '工具创建时间';
+COMMENT ON COLUMN tools.updated_at IS '工具更新时间';
+
+COMMENT ON COLUMN agent_tools.id IS '智能体工具绑定主键';
+COMMENT ON COLUMN agent_tools.agent_id IS '智能体 ID';
+COMMENT ON COLUMN agent_tools.tool_id IS '工具 ID';
+COMMENT ON COLUMN agent_tools.enabled IS '是否对该智能体启用工具';
+COMMENT ON COLUMN agent_tools.config IS '智能体维度的工具配置';
+COMMENT ON COLUMN agent_tools.created_at IS '绑定创建时间';
+
+COMMENT ON COLUMN knowledge_bases.id IS '知识库主键';
+COMMENT ON COLUMN knowledge_bases.workspace_id IS '所属工作区 ID';
+COMMENT ON COLUMN knowledge_bases.name IS '知识库名称';
+COMMENT ON COLUMN knowledge_bases.description IS '知识库描述';
+COMMENT ON COLUMN knowledge_bases.created_by IS '创建人用户 ID';
+COMMENT ON COLUMN knowledge_bases.created_at IS '知识库创建时间';
+
+COMMENT ON COLUMN agent_knowledge_bases.id IS '智能体知识库关联主键';
+COMMENT ON COLUMN agent_knowledge_bases.agent_id IS '智能体 ID';
+COMMENT ON COLUMN agent_knowledge_bases.knowledge_base_id IS '知识库 ID';
+
+COMMENT ON COLUMN knowledge_documents.id IS '知识文档主键';
+COMMENT ON COLUMN knowledge_documents.knowledge_base_id IS '所属知识库 ID';
+COMMENT ON COLUMN knowledge_documents.filename IS '原始文件名';
+COMMENT ON COLUMN knowledge_documents.content_type IS '文档内容类型';
+COMMENT ON COLUMN knowledge_documents.source_type IS '文档来源类型';
+COMMENT ON COLUMN knowledge_documents.text IS '文档全文文本';
+COMMENT ON COLUMN knowledge_documents.text_preview IS '文档内容预览';
+COMMENT ON COLUMN knowledge_documents.status IS '文档处理状态';
+COMMENT ON COLUMN knowledge_documents.chunk_count IS '切分后的分块数量';
+COMMENT ON COLUMN knowledge_documents.error_message IS '处理失败错误信息';
+COMMENT ON COLUMN knowledge_documents.created_at IS '知识文档创建时间';
+COMMENT ON COLUMN knowledge_documents.updated_at IS '知识文档更新时间';
+
+COMMENT ON COLUMN knowledge_chunks.id IS '知识分块主键';
+COMMENT ON COLUMN knowledge_chunks.workspace_id IS '所属工作区 ID';
+COMMENT ON COLUMN knowledge_chunks.knowledge_base_id IS '所属知识库 ID';
+COMMENT ON COLUMN knowledge_chunks.document_id IS '所属文档 ID';
+COMMENT ON COLUMN knowledge_chunks.chunk_index IS '文档内分块序号';
+COMMENT ON COLUMN knowledge_chunks.text IS '分块文本内容';
+COMMENT ON COLUMN knowledge_chunks.vector_id IS '向量存储记录 ID';
+COMMENT ON COLUMN knowledge_chunks.parent_id IS '父级分块标识';
+COMMENT ON COLUMN knowledge_chunks.chunk_id IS '分块业务标识';
+COMMENT ON COLUMN knowledge_chunks.title IS '分块标题';
+COMMENT ON COLUMN knowledge_chunks.page IS '所在页码';
+COMMENT ON COLUMN knowledge_chunks.section IS '所属章节';
+COMMENT ON COLUMN knowledge_chunks.content_hash IS '分块内容哈希';
+COMMENT ON COLUMN knowledge_chunks.embedding_model IS '向量化模型名称';
+COMMENT ON COLUMN knowledge_chunks.embedding_dimension IS '向量维度';
+COMMENT ON COLUMN knowledge_chunks.metadata IS '分块扩展元数据';
+
+COMMENT ON COLUMN workflow_definitions.id IS '工作流定义主键';
+COMMENT ON COLUMN workflow_definitions.agent_id IS '所属智能体 ID';
+COMMENT ON COLUMN workflow_definitions.nodes IS '工作流节点定义';
+COMMENT ON COLUMN workflow_definitions.updated_at IS '工作流定义更新时间';
+
+COMMENT ON COLUMN uploads.id IS '上传对象 ID';
+COMMENT ON COLUMN uploads.workspace_id IS '所属工作区 ID';
+COMMENT ON COLUMN uploads.user_id IS '上传用户 ID';
+COMMENT ON COLUMN uploads.filename IS '原始文件名';
+COMMENT ON COLUMN uploads.content_type IS '文件内容类型';
+COMMENT ON COLUMN uploads.kind IS '上传文件类型';
+COMMENT ON COLUMN uploads.data_url IS '文件 Data URL 内容';
+COMMENT ON COLUMN uploads.text IS '解析后的文本内容';
+COMMENT ON COLUMN uploads.size IS '文件大小（字节）';
+COMMENT ON COLUMN uploads.created_at IS '上传时间';
+
+COMMENT ON COLUMN sessions.id IS '会话主键';
+COMMENT ON COLUMN sessions.workspace_id IS '所属工作区 ID';
+COMMENT ON COLUMN sessions.agent_id IS '所属智能体 ID';
+COMMENT ON COLUMN sessions.user_id IS '发起会话的用户 ID';
+COMMENT ON COLUMN sessions.title IS '会话标题';
+COMMENT ON COLUMN sessions.is_debug IS '是否为调试会话';
+COMMENT ON COLUMN sessions.created_at IS '会话创建时间';
+COMMENT ON COLUMN sessions.updated_at IS '会话更新时间';
+
+COMMENT ON COLUMN messages.id IS '消息主键';
+COMMENT ON COLUMN messages.session_id IS '所属会话 ID';
+COMMENT ON COLUMN messages.role IS '消息角色';
+COMMENT ON COLUMN messages.content IS '消息内容';
+COMMENT ON COLUMN messages.reasoning IS '模型推理文本';
+COMMENT ON COLUMN messages.reasoning_duration_ms IS '推理耗时（毫秒）';
+COMMENT ON COLUMN messages.sources IS '引用来源列表';
+COMMENT ON COLUMN messages.created_at IS '消息创建时间';
+
+COMMENT ON COLUMN runs.id IS '运行记录主键';
+COMMENT ON COLUMN runs.workspace_id IS '所属工作区 ID';
+COMMENT ON COLUMN runs.agent_id IS '所属智能体 ID';
+COMMENT ON COLUMN runs.session_id IS '关联会话 ID';
+COMMENT ON COLUMN runs.status IS '运行状态';
+COMMENT ON COLUMN runs.started_at IS '开始时间';
+COMMENT ON COLUMN runs.completed_at IS '完成时间';
+
+COMMENT ON COLUMN run_steps.id IS '运行步骤主键';
+COMMENT ON COLUMN run_steps.run_id IS '所属运行记录 ID';
+COMMENT ON COLUMN run_steps.node_id IS '工作流节点 ID';
+COMMENT ON COLUMN run_steps.node_type IS '工作流节点类型';
+COMMENT ON COLUMN run_steps.status IS '步骤状态';
+COMMENT ON COLUMN run_steps.input IS '步骤输入快照';
+COMMENT ON COLUMN run_steps.output IS '步骤输出快照';
+COMMENT ON COLUMN run_steps.created_at IS '步骤创建时间';
+
+COMMENT ON COLUMN session_memory.id IS '会话记忆主键';
+COMMENT ON COLUMN session_memory.session_id IS '所属会话 ID';
+COMMENT ON COLUMN session_memory.summary IS '会话摘要';
+COMMENT ON COLUMN session_memory.message_count IS '累计消息数';
+COMMENT ON COLUMN session_memory.updated_at IS '会话记忆更新时间';
+
+COMMENT ON COLUMN agent_memory_profiles.id IS '智能体记忆画像主键';
+COMMENT ON COLUMN agent_memory_profiles.workspace_id IS '所属工作区 ID';
+COMMENT ON COLUMN agent_memory_profiles.user_id IS '所属用户 ID';
+COMMENT ON COLUMN agent_memory_profiles.agent_id IS '所属智能体 ID';
+COMMENT ON COLUMN agent_memory_profiles.enabled IS '是否启用长期记忆';
+COMMENT ON COLUMN agent_memory_profiles.summary IS '用户记忆摘要';
+COMMENT ON COLUMN agent_memory_profiles.facts IS '结构化事实列表';
+COMMENT ON COLUMN agent_memory_profiles.preferences IS '用户偏好信息';
+COMMENT ON COLUMN agent_memory_profiles.created_at IS '记忆画像创建时间';
+COMMENT ON COLUMN agent_memory_profiles.updated_at IS '记忆画像更新时间';
+
+COMMENT ON COLUMN prompt_templates.id IS '提示词模板主键';
+COMMENT ON COLUMN prompt_templates.workspace_id IS '所属工作区 ID';
+COMMENT ON COLUMN prompt_templates.user_id IS '所属用户 ID';
+COMMENT ON COLUMN prompt_templates.title IS '模板标题';
+COMMENT ON COLUMN prompt_templates.description IS '模板描述';
+COMMENT ON COLUMN prompt_templates.content IS '模板内容';
+COMMENT ON COLUMN prompt_templates.category IS '模板分类';
+COMMENT ON COLUMN prompt_templates.tags IS '模板标签列表';
+COMMENT ON COLUMN prompt_templates.enabled IS '模板是否启用';
+COMMENT ON COLUMN prompt_templates.created_at IS '模板创建时间';
+COMMENT ON COLUMN prompt_templates.updated_at IS '模板更新时间';
+
+COMMENT ON COLUMN feedback.id IS '反馈主键';
+COMMENT ON COLUMN feedback.message_id IS '关联消息 ID';
+COMMENT ON COLUMN feedback.user_id IS '反馈用户 ID';
+COMMENT ON COLUMN feedback.rating IS '反馈评级';
+COMMENT ON COLUMN feedback.comment IS '反馈备注';
+COMMENT ON COLUMN feedback.created_at IS '反馈创建时间';
+
 CREATE OR REPLACE FUNCTION set_updated_at()
 RETURNS trigger AS $$
 BEGIN
