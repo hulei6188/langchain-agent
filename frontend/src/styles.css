@@ -4391,6 +4391,11 @@ body.dark .message-reasoning-content .code-block pre {
   background: #1f2430;
   color: #b8c0d4;
 }
+body.dark .markdown-content .code-block code,
+body.dark .message-reasoning-content .markdown-content .code-block code {
+  background: transparent;
+  color: inherit;
+}
 body.dark .message-reasoning summary:hover,
 body.dark .message-sources summary:hover,
 body.dark .feedback-actions button:hover,
