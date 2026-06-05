@@ -37,6 +37,11 @@ from core.services.user_models import (
 from core.services import web_search as web_search_service
 
 
+MAX_TOOL_CALLS_PER_RUN = 50
+MAX_TOOL_ROUNDS_PER_RUN = 16
+MAX_TOOL_WALL_TIME_SECONDS = 180
+
+
 def default_workflow() -> list[dict]:
     return [
         {"id": "start", "type": "Start", "name": "接收用户输入", "config": {}},
@@ -383,11 +388,11 @@ class WorkflowRunner:
             events = []
             web_sources = list(context.get("web_sources", []))
             search_status = dict(context.get("search_status") or {})
-            max_tool_calls = 20
-            max_tool_wall_time = 120  # seconds
+            max_tool_calls = MAX_TOOL_CALLS_PER_RUN
+            max_tool_wall_time = MAX_TOOL_WALL_TIME_SECONDS
             tool_loop_start = time.monotonic()
 
-            for _round in range(8):
+            for _round in range(MAX_TOOL_ROUNDS_PER_RUN):
                 if total_calls >= max_tool_calls:
                     break
                 if time.monotonic() - tool_loop_start > max_tool_wall_time:
@@ -544,11 +549,11 @@ class WorkflowRunner:
         events = []
         web_sources = list(context.get("web_sources", []))
         search_status = dict(context.get("search_status") or {})
-        max_tool_calls = 20
-        max_tool_wall_time = 120
+        max_tool_calls = MAX_TOOL_CALLS_PER_RUN
+        max_tool_wall_time = MAX_TOOL_WALL_TIME_SECONDS
         tool_loop_start = time.monotonic()
 
-        for _round in range(8):
+        for _round in range(MAX_TOOL_ROUNDS_PER_RUN):
             if total_calls >= max_tool_calls:
                 break
             if time.monotonic() - tool_loop_start > max_tool_wall_time:

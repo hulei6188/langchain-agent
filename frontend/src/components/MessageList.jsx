@@ -152,13 +152,19 @@ export function MarkdownContent({ content }) {
         remarkPlugins={[remarkGfm, remarkMath]}
         rehypePlugins={[rehypeKatex]}
         components={{
-          code({ inline, className, children, ...props }) {
-            const match = /language-(\w+)/.exec(className || '');
-            const code = String(children || '').replace(/\n$/, '');
-            if (inline) {
-              return <code className={className} {...props}>{children}</code>;
+          pre({ children, ...props }) {
+            const child = React.Children.toArray(children).find(React.isValidElement);
+            if (!child) {
+              return <pre {...props}>{children}</pre>;
             }
+            const className = child.props?.className || '';
+            const match = /language-([\w-]+)/.exec(className);
+            const code = React.Children.toArray(child.props?.children || '').join('').replace(/\n$/, '');
             return <CodeBlock language={match?.[1] || 'text'} code={code} />;
+          },
+          code({ className, children, ...props }) {
+            const inlineClassName = className ? `${className} inline-code` : 'inline-code';
+            return <code className={inlineClassName} {...props}>{children}</code>;
           },
           a({ children, href, ...props }) {
             return <a href={href} target="_blank" rel="noreferrer" {...props}>{children}</a>;
