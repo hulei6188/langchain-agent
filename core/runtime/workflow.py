@@ -12,6 +12,7 @@ from core.db.models import (
     AgentKnowledgeBase,
     AgentTool,
     AgentVersion,
+    Message,
     ModelConfig,
     Run,
     RunStep,
@@ -74,6 +75,7 @@ class WorkflowRunner:
         search_status = self._search_status(user_message, search_enabled)
 
         rag_config = normalize_rag({**dict(runtime.settings.get("rag") or {}), **dict(rag_options or {})})
+        memory_config = normalize_memory(runtime.settings.get("memory"))
         effective_rag_enabled = rag_config["enabled_by_default"] if rag_enabled is None else bool(rag_enabled)
 
         run = Run(workspace_id=agent.workspace_id, agent_id=agent.id, session_id=chat_session.id, status="running")
@@ -92,21 +94,26 @@ class WorkflowRunner:
         profile_memory_text = format_profile_memory(profile_memory)
         profile_memory_event = memory_used_event(profile_memory, session_summary_used=bool(memory and memory.summary))
         context: dict = {
+            "session_id": chat_session.id,
+            "run_id": run.id,
             "input": user_message,
             "sources": [],
             "tool_outputs": [],
             "draft": "",
+            "history_messages": self._session_history(chat_session.id, max_messages=int(memory_config.get("max_messages") or 12)),
+            "current_message_id": None,
             "variables": self._merge_variables(runtime.settings.get("variables", []), variables or {}),
             "memory_summary": memory.summary if memory else "",
             "profile_memory": profile_memory_text,
             "profile_memory_used": profile_memory_event,
-            "memory_enabled": normalize_memory(runtime.settings.get("memory")).get("enabled", False),
+            "memory_enabled": memory_config.get("enabled", False),
             "rag_enabled": effective_rag_enabled,
             **({"rag_enabled_request": rag_enabled} if rag_enabled is not None else {}),
             "rag_top_k": rag_config["top_k"],
             "rag_config": rag_config,
             "thinking_enabled": thinking_status["enabled"],
             "thinking_status": thinking_status,
+            "reasoning_replay_required": self.provider.requires_reasoning_replay(model=runtime.model, runtime_config=runtime.runtime_config),
             "search_enabled": search_status["enabled"],
             "search_status": search_status,
             "web_sources": search_status.get("sources", []),
@@ -170,6 +177,7 @@ class WorkflowRunner:
         thinking_enabled: bool | None = None,
         search_enabled: bool | None = None,
         attachments: list[dict] | None = None,
+        current_message_id: int | None = None,
     ):
         runtime, run, context = self._start_run(
             agent=agent,
@@ -182,6 +190,7 @@ class WorkflowRunner:
             thinking_enabled=thinking_enabled,
             search_enabled=search_enabled,
             attachments=attachments,
+            current_message_id=current_message_id,
         )
         steps: list[dict] = []
         for node in runtime.workflow:
@@ -239,6 +248,7 @@ class WorkflowRunner:
         thinking_enabled: bool | None,
         search_enabled: bool | None,
         attachments: list[dict] | None,
+        current_message_id: int | None = None,
     ) -> tuple[object, Run, dict]:
         runtime = self._runtime_agent(agent, mode, chat_session.user_id)
         upload_ids = [str(item.get("id")) for item in attachments or [] if item.get("id")]
@@ -248,6 +258,7 @@ class WorkflowRunner:
         search_status = self._search_status(user_message, search_enabled)
 
         rag_config = normalize_rag({**dict(runtime.settings.get("rag") or {}), **dict(rag_options or {})})
+        memory_config = normalize_memory(runtime.settings.get("memory"))
         effective_rag_enabled = rag_config["enabled_by_default"] if rag_enabled is None else bool(rag_enabled)
 
         run = Run(workspace_id=agent.workspace_id, agent_id=agent.id, session_id=chat_session.id, status="running")
@@ -266,21 +277,26 @@ class WorkflowRunner:
         profile_memory_text = format_profile_memory(profile_memory)
         profile_memory_event = memory_used_event(profile_memory, session_summary_used=bool(memory and memory.summary))
         context: dict = {
+            "session_id": chat_session.id,
+            "run_id": run.id,
             "input": user_message,
             "sources": [],
             "tool_outputs": [],
             "draft": "",
+            "history_messages": self._session_history(chat_session.id, max_messages=int(memory_config.get("max_messages") or 12)),
+            "current_message_id": current_message_id,
             "variables": self._merge_variables(runtime.settings.get("variables", []), variables or {}),
             "memory_summary": memory.summary if memory else "",
             "profile_memory": profile_memory_text,
             "profile_memory_used": profile_memory_event,
-            "memory_enabled": normalize_memory(runtime.settings.get("memory")).get("enabled", False),
+            "memory_enabled": memory_config.get("enabled", False),
             "rag_enabled": effective_rag_enabled,
             **({"rag_enabled_request": rag_enabled} if rag_enabled is not None else {}),
             "rag_top_k": rag_config["top_k"],
             "rag_config": rag_config,
             "thinking_enabled": thinking_status["enabled"],
             "thinking_status": thinking_status,
+            "reasoning_replay_required": self.provider.requires_reasoning_replay(model=runtime.model, runtime_config=runtime.runtime_config),
             "search_enabled": search_status["enabled"],
             "search_status": search_status,
             "web_sources": search_status.get("sources", []),
@@ -379,18 +395,32 @@ class WorkflowRunner:
                     temperature=agent.temperature,
                     runtime_config=agent.runtime_config,
                     tools=tool_schemas,
+                    thinking_enabled=self._thinking_request_value(context),
                 )
                 if response.content and not response.tool_calls:
                     return {
                         "draft": response.content,
+                        "draft_reasoning": response.reasoning_content or "",
                         "tool_outputs": [],
                         "tool_stats": {"total_calls": total_calls, "tools_used": tools_used},
                     }
                 if response.tool_calls:
-                    assistant_msg = {"role": "assistant", "content": response.content, "tool_calls": response.tool_calls}
-                    messages.append(assistant_msg)
-                    # Limit tool_calls per round to remaining budget
                     calls_this_round = response.tool_calls[:max_tool_calls - total_calls]
+                    if not calls_this_round:
+                        break
+                    assistant_msg = {"role": "assistant", "content": response.content, "tool_calls": calls_this_round}
+                    if response.reasoning_content:
+                        assistant_msg["reasoning_content"] = response.reasoning_content
+                    messages.append(assistant_msg)
+                    self._persist_intermediate_message(
+                        context,
+                        role="assistant",
+                        content=response.content or "",
+                        reasoning=response.reasoning_content or "",
+                        tool_calls=calls_this_round,
+                        meta={"node_id": node["id"], "round": _round, "kind": "tool_calls"},
+                    )
+                    # Limit tool_calls per round to remaining budget
                     for tc in calls_this_round:
                         if time.monotonic() - tool_loop_start > max_tool_wall_time:
                             break
@@ -406,14 +436,46 @@ class WorkflowRunner:
                             try:
                                 result = execute_tool(matching, {"input": tool_args})
                                 result["latency_ms"] = result.get("latency_ms", int((time.monotonic() - started) * 1000))
-                                events.append({"event": "tool_call", "data": tool_call_event(matching, result, input_preview=json.dumps(tool_args, ensure_ascii=False))})
-                                messages.append({"role": "tool", "tool_call_id": tc["id"], "content": result.get("content") or result.get("result_preview") or ""})
+                                tool_content = result.get("content") or result.get("result_preview") or ""
+                                event_data = tool_call_event(matching, result, input_preview=json.dumps(tool_args, ensure_ascii=False))
+                                events.append({"event": "tool_call", "data": event_data})
+                                messages.append({"role": "tool", "tool_call_id": tc["id"], "content": tool_content})
+                                self._persist_intermediate_message(
+                                    context,
+                                    role="tool",
+                                    content=tool_content,
+                                    tool_call_id=tc["id"],
+                                    tool_name=tool_name,
+                                    meta={**event_data, "node_id": node["id"], "round": _round, "kind": "tool_result"},
+                                )
                             except ValueError as exc:
-                                events.append({"event": "tool_call", "data": tool_call_event(matching, {"tool": tool_name, "content": "", "result_preview": "", "latency_ms": int((time.monotonic() - started) * 1000), "error": str(exc)}, status="error", input_preview=json.dumps(tool_args, ensure_ascii=False), error_code="tool_error")})
-                                messages.append({"role": "tool", "tool_call_id": tc["id"], "content": f"Error: {exc}"})
+                                error_result = {"tool": tool_name, "content": "", "result_preview": "", "latency_ms": int((time.monotonic() - started) * 1000), "error": str(exc)}
+                                event_data = tool_call_event(matching, error_result, status="error", input_preview=json.dumps(tool_args, ensure_ascii=False), error_code="tool_error")
+                                tool_content = f"Error: {exc}"
+                                events.append({"event": "tool_call", "data": event_data})
+                                messages.append({"role": "tool", "tool_call_id": tc["id"], "content": tool_content})
+                                self._persist_intermediate_message(
+                                    context,
+                                    role="tool",
+                                    content=tool_content,
+                                    tool_call_id=tc["id"],
+                                    tool_name=tool_name,
+                                    meta={**event_data, "node_id": node["id"], "round": _round, "kind": "tool_result"},
+                                )
                         else:
-                            events.append({"event": "tool_call", "data": tool_call_event(type("_", (), {"id": None, "name": tool_name, "type": "unknown"})(), {"tool": tool_name, "content": "", "result_preview": "", "latency_ms": 0}, status="error", input_preview="{}", error_code="tool_not_found")})
-                            messages.append({"role": "tool", "tool_call_id": tc["id"], "content": f"Tool '{tool_name}' not found"})
+                            unknown_tool = type("_", (), {"id": None, "name": tool_name, "type": "unknown"})()
+                            event_data = tool_call_event(unknown_tool, {"tool": tool_name, "content": "", "result_preview": "", "latency_ms": 0}, status="error", input_preview="{}", error_code="tool_not_found")
+                            tool_content = f"Tool '{tool_name}' not found"
+                            events.append({"event": "tool_call", "data": event_data})
+                            messages.append({"role": "tool", "tool_call_id": tc["id"], "content": tool_content})
+                            self._persist_intermediate_message(
+                                context,
+                                role="tool",
+                                content=tool_content,
+                                tool_call_id=tc["id"],
+                                tool_name=tool_name,
+                                meta={**event_data, "node_id": node["id"], "round": _round, "kind": "tool_result"},
+                            )
                         total_calls += 1
                         tools_used.append(tool_name)
 
@@ -427,13 +489,14 @@ class WorkflowRunner:
             )
             return {
                 "draft": final.content or "",
+                "draft_reasoning": final.reasoning_content or "",
                 "tool_outputs": [],
                 "tool_stats": {"total_calls": total_calls, "tools_used": tools_used, "max_rounds_reached": True},
                 "events": events,
             }
         if node_type == "LLM":
             if context.get("draft"):
-                return self._llm_output(agent, context, context["draft"])
+                return self._llm_output(agent, context, context["draft"], reasoning=context.get("draft_reasoning") or "")
             messages = self._llm_messages(agent, context)
             draft = self.provider.chat(
                 messages,
@@ -453,10 +516,13 @@ class WorkflowRunner:
     def _stream_llm_node(self, agent, node: dict, context: dict):
         draft = context.get("draft", "")
         if draft:
+            draft_reasoning = context.get("draft_reasoning") or ""
+            if draft_reasoning and context.get("thinking_enabled"):
+                yield {"event": "reasoning_token", "content": draft_reasoning}
             # Draft already produced by the tool-calling loop — stream as chunked text
             for index in range(0, len(draft), 24):
                 yield {"event": "token", "content": draft[index : index + 24]}
-            return self._llm_output(agent, context, draft)
+            return self._llm_output(agent, context, draft, reasoning=draft_reasoning)
         messages = self._llm_messages(agent, context)
         chunks = []
         reasoning_chunks = []
@@ -523,10 +589,68 @@ class WorkflowRunner:
         max_system_chars = 100_000  # ~50k tokens, safe for most model context windows
         if len(system_content) > max_system_chars:
             system_content = system_content[:max_system_chars] + "\n\n[上下文已截断以避免超出模型上下文窗口限制]"
-        return [
-            {"role": "system", "content": system_content},
-            {"role": "user", "content": self._user_content(context["input"], context.get("uploads", []))},
-        ]
+        messages = [{"role": "system", "content": system_content}]
+        history_messages = self._history_messages_for_llm(context)
+        messages.extend(history_messages)
+        if not self._history_contains_current_message(context):
+            messages.append({"role": "user", "content": self._user_content(context["input"], context.get("uploads", []))})
+        return messages
+
+    def _history_messages_for_llm(self, context: dict) -> list[dict]:
+        messages = []
+        current_message_id = context.get("current_message_id")
+        history = context.get("history_messages") or []
+        index = 0
+        while index < len(history):
+            item = history[index]
+            role = item.get("role")
+            if role not in {"user", "assistant", "tool"}:
+                index += 1
+                continue
+            if role == "tool":
+                index += 1
+                continue
+            content = item.get("content") or ""
+            if current_message_id and item.get("id") == current_message_id and role == "user":
+                content = self._user_content(context["input"], context.get("uploads", []))
+            tool_calls = item.get("tool_calls") or []
+            if role == "assistant" and tool_calls:
+                tool_call_ids = {call.get("id") for call in tool_calls if call.get("id")}
+                tool_messages = []
+                next_index = index + 1
+                while next_index < len(history) and history[next_index].get("role") == "tool":
+                    tool_item = history[next_index]
+                    if tool_item.get("tool_call_id") in tool_call_ids:
+                        tool_messages.append(tool_item)
+                    next_index += 1
+                if tool_call_ids and tool_call_ids.issubset({tool.get("tool_call_id") for tool in tool_messages}):
+                    assistant_message = {"role": "assistant", "content": content, "tool_calls": tool_calls}
+                    if item.get("reasoning") and (item.get("meta") or {}).get("requires_reasoning_replay"):
+                        assistant_message["reasoning_content"] = item.get("reasoning")
+                    messages.append(assistant_message)
+                    for tool_item in tool_messages:
+                        messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": tool_item.get("tool_call_id"),
+                                "content": tool_item.get("content") or "",
+                            }
+                        )
+                index = next_index
+                continue
+            if content:
+                message = {"role": role, "content": content}
+                if role == "assistant" and item.get("reasoning") and (item.get("meta") or {}).get("requires_reasoning_replay"):
+                    message["reasoning_content"] = item.get("reasoning")
+                messages.append(message)
+            index += 1
+        return messages
+
+    def _history_contains_current_message(self, context: dict) -> bool:
+        current_message_id = context.get("current_message_id")
+        if not current_message_id:
+            return False
+        return any(item.get("id") == current_message_id for item in context.get("history_messages") or [])
 
     def _llm_output(self, agent, context: dict, draft: str, *, reasoning: str = "") -> dict:
         return {
@@ -534,10 +658,12 @@ class WorkflowRunner:
             "used_memory": bool(context.get("memory_summary")),
             "used_profile_memory": bool(context.get("profile_memory")),
             "attachment_count": len(context.get("uploads", [])),
+            "history_message_count": len(context.get("history_messages") or []),
             "model": agent.model,
             "mock": self.provider.last_chat_mock,
             "thinking_enabled": bool(context.get("thinking_enabled")),
             "thinking_type": (context.get("thinking_status") or {}).get("type", "none"),
+            "reasoning_replay_required": bool(context.get("reasoning_replay_required")),
             "reasoning_chars": len(reasoning or ""),
             "search_enabled": bool(context.get("search_enabled")),
             "search_result_count": len(context.get("web_sources", [])),
@@ -784,6 +910,77 @@ class WorkflowRunner:
 
     def _session_memory(self, session_id: int) -> SessionMemory | None:
         return self.db.query(SessionMemory).filter(SessionMemory.session_id == session_id).first()
+
+    def _persist_intermediate_message(
+        self,
+        context: dict,
+        *,
+        role: str,
+        content: str,
+        reasoning: str = "",
+        tool_calls: list[dict] | None = None,
+        tool_call_id: str = "",
+        tool_name: str = "",
+        meta: dict | None = None,
+    ) -> None:
+        session_id = context.get("session_id")
+        if not session_id:
+            return
+        payload_meta = {
+            "is_intermediate": True,
+            "run_id": context.get("run_id"),
+            **(meta or {}),
+        }
+        if role == "assistant" and reasoning and context.get("reasoning_replay_required"):
+            payload_meta["requires_reasoning_replay"] = True
+        message = Message(
+            session_id=session_id,
+            role=role,
+            content=content or "",
+            reasoning=reasoning or "",
+            sources=[],
+            tool_calls=tool_calls or [],
+            tool_call_id=tool_call_id or "",
+            tool_name=tool_name or "",
+            meta=payload_meta,
+        )
+        self.db.add(message)
+        self.db.flush()
+        self.db.commit()
+
+    def _session_history(self, session_id: int, *, max_messages: int) -> list[dict]:
+        rows = (
+            self.db.query(Message)
+            .filter(Message.session_id == session_id, Message.role.in_(["user", "assistant", "tool"]))
+            .order_by(Message.id.desc())
+            .limit(max(1, min(int(max_messages or 12), 100)))
+            .all()
+        )
+        history = []
+        for message in reversed(rows):
+            content = self._trim_history_content(message.content or "")
+            if not content and message.role != "assistant":
+                continue
+            history.append(
+                {
+                    "id": message.id,
+                    "role": message.role,
+                    "content": content,
+                    "reasoning": self._trim_history_content(message.reasoning or ""),
+                    "tool_calls": message.tool_calls or [],
+                    "tool_call_id": message.tool_call_id or "",
+                    "tool_name": message.tool_name or "",
+                    "meta": message.meta or {},
+                }
+            )
+        return history
+
+    @staticmethod
+    def _trim_history_content(content: str, limit: int = 6000) -> str:
+        text = content.strip()
+        if len(text) <= limit:
+            return text
+        return text[:limit] + "\n[历史消息过长，已截断]"
 
     def _update_session_memory(self, session_id: int, user_message: str, answer: str, max_messages: int) -> None:
         memory = self._session_memory(session_id)

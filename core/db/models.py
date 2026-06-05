@@ -341,6 +341,10 @@ class Message(Base):
     reasoning: Mapped[str] = mapped_column(Text, default="")
     reasoning_duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     sources: Mapped[list] = mapped_column(JSON, default=list)
+    tool_calls: Mapped[list] = mapped_column(JSON, default=list)
+    tool_call_id: Mapped[str] = mapped_column(String(120), default="")
+    tool_name: Mapped[str] = mapped_column(String(120), default="")
+    meta: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
 
 

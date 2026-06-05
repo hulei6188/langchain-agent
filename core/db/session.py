@@ -85,6 +85,10 @@ def _run_compat_migrations() -> None:
             {
                 "reasoning": "TEXT DEFAULT ''",
                 "reasoning_duration_ms": "INTEGER",
+                "tool_calls": "JSON DEFAULT '[]'",
+                "tool_call_id": "VARCHAR(120) DEFAULT ''",
+                "tool_name": "VARCHAR(120) DEFAULT ''",
+                "meta": "JSON DEFAULT '{}'",
             },
         )
     if "agent_settings" in table_names:

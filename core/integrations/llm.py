@@ -18,6 +18,7 @@ OPENAI_COMPATIBLE_DEFAULT_BASE = DASHSCOPE_COMPATIBLE_BASE
 @dataclass
 class ChatResponse:
     content: str | None = None
+    reasoning_content: str = ""
     tool_calls: list[dict] | None = None
 
 
@@ -154,6 +155,12 @@ class OpenAICompatibleProvider:
         # only for the final answer phase.
         yield from self._post_json_stream(url, payload, api_key)
 
+    def requires_reasoning_replay(self, *, model: str | None = None, runtime_config: dict | None = None) -> bool:
+        settings = get_settings()
+        api_base = self._api_base(settings, runtime_config, purpose="chat")
+        chat_model = model or (runtime_config or {}).get("chat_model") or settings.openai_model
+        return self._is_deepseek(api_base, chat_model)
+
     def embed(self, text: str, *, runtime_config: dict | None = None) -> list[float]:
         settings = get_settings()
         api_key = self._api_key(settings, runtime_config, purpose="embedding")
@@ -216,6 +223,7 @@ class OpenAICompatibleProvider:
         choice = (data.get("choices") or [{}])[0]
         message = choice.get("message") or {}
         content = message.get("content")
+        reasoning_content = str(message.get("reasoning_content") or message.get("reasoning") or message.get("thinking") or "")
         raw_tool_calls = message.get("tool_calls") or []
         if raw_tool_calls:
             tool_calls = []
@@ -229,8 +237,8 @@ class OpenAICompatibleProvider:
                         "arguments": func.get("arguments") or "{}",
                     },
                 })
-            return ChatResponse(content=content or None, tool_calls=tool_calls)
-        return ChatResponse(content=str(content) if content else "")
+            return ChatResponse(content=content or None, reasoning_content=reasoning_content, tool_calls=tool_calls)
+        return ChatResponse(content=str(content) if content else "", reasoning_content=reasoning_content)
 
     def _api_key(self, settings, runtime_config: dict | None = None, *, purpose: str = "chat") -> str | None:
         if runtime_config and purpose == "chat" and runtime_config.get("api_key"):
@@ -291,14 +299,16 @@ class OpenAICompatibleProvider:
             ) from exc
 
     def _apply_thinking_payload(self, payload: dict, *, api_base: str, model: str, thinking_enabled: bool | None) -> None:
+        if self._is_deepseek(api_base, model):
+            enabled = bool(thinking_enabled)
+            payload["thinking"] = {"type": "enabled" if enabled else "disabled"}
+            if enabled:
+                payload["reasoning_effort"] = "high"
+            return
         if thinking_enabled is None:
             return
         if self._is_dashscope_qwen(api_base, model):
             payload["enable_thinking"] = bool(thinking_enabled)
-            return
-        if thinking_enabled and self._is_deepseek(api_base, model):
-            payload["reasoning_effort"] = "high"
-            payload["thinking"] = {"type": "enabled"}
 
     @staticmethod
     def _is_dashscope_qwen(api_base: str, model: str) -> bool:
@@ -312,8 +322,7 @@ class OpenAICompatibleProvider:
     @staticmethod
     def _is_deepseek(api_base: str, model: str) -> bool:
         normalized_base = (api_base or "").lower()
-        normalized_model = (model or "").lower()
-        return "deepseek.com" in normalized_base or normalized_model.startswith("deepseek")
+        return "api.deepseek.com" in normalized_base
 
     def _post_json_stream(self, url: str, payload: dict, api_key: str) -> Iterable[ChatStreamChunk]:
         request = urllib.request.Request(
