@@ -92,7 +92,7 @@ function formatDurationMs(durationMs) {
   if (durationMs === null || durationMs === undefined || durationMs === '') return '';
   const numeric = Number(durationMs);
   if (!Number.isFinite(numeric) || numeric < 0) return '';
-  const totalSeconds = Math.max(0, Math.floor(numeric / 1000));
+  const totalSeconds = Math.max(1, Math.ceil(numeric / 1000));
   if (totalSeconds < 60) return `${totalSeconds} 秒`;
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;
@@ -105,7 +105,7 @@ function formatThinkingDuration(startedAt, finishedAt, now, durationMs) {
   const start = toTimestamp(startedAt);
   if (!start) return '';
   const end = toTimestamp(finishedAt) || now;
-  const totalSeconds = Math.max(0, Math.floor((end - start) / 1000));
+  const totalSeconds = Math.max(1, Math.ceil(Math.max(0, end - start) / 1000));
   if (totalSeconds < 60) return `${totalSeconds} 秒`;
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;

@@ -23,7 +23,7 @@ from core.db.models import (
     Upload,
     WorkflowDefinition,
 )
-from core.integrations.llm import OpenAICompatibleProvider
+from core.integrations.llm import ChatResponse, OpenAICompatibleProvider
 from core.services.agents import get_agent_detail, normalize_memory, normalize_rag, normalize_tool_policy
 from core.services.rag import retrieve
 from core.services.memory import format_profile_memory, get_memory_profile, memory_used_event
@@ -195,6 +195,8 @@ class WorkflowRunner:
         for node in runtime.workflow:
             if node["type"] == "LLM":
                 output = yield from self._stream_llm_node(runtime, node, context)
+            elif node["type"] == "Tool":
+                output = yield from self._stream_tool_node(runtime, node, context)
             else:
                 output = self._execute_node(runtime, node, context)
             if not steps:
@@ -412,6 +414,10 @@ class WorkflowRunner:
                     calls_this_round = response.tool_calls[:max_tool_calls - total_calls]
                     if not calls_this_round:
                         break
+                    if response.reasoning_content and context.get("thinking_enabled"):
+                        reasoning_content = response.reasoning_content.strip()
+                        if reasoning_content:
+                            events.append({"event": "reasoning_token", "data": {"content": f"{reasoning_content}\n\n"}})
                     assistant_msg = {"role": "assistant", "content": response.content, "tool_calls": calls_this_round}
                     if response.reasoning_content:
                         assistant_msg["reasoning_content"] = response.reasoning_content
@@ -522,11 +528,249 @@ class WorkflowRunner:
             return {"answer": answer, "citation_count": len([*context.get("sources", []), *context.get("web_sources", [])])}
         return {}
 
+    def _stream_tool_node(self, agent, node: dict, context: dict):
+        bound_tools = self._runtime_tools(agent, node, context)
+        tool_policy = (agent.settings.get("tool_policy") or {})
+        allowed_names = set(tool_policy.get("allowed_tool_names") or [])
+        if allowed_names:
+            bound_tools = [t for t in bound_tools if t.name in allowed_names or t.type == "builtin_search"]
+        if not bound_tools:
+            return {"tool_outputs": [], "tool_stats": {"total_calls": 0, "tools_used": []}}
+
+        tool_schemas = [tool_schema_for_llm(t) for t in bound_tools]
+        messages = self._llm_messages(agent, context)
+        total_calls = 0
+        tools_used: list[str] = []
+        events = []
+        web_sources = list(context.get("web_sources", []))
+        search_status = dict(context.get("search_status") or {})
+        max_tool_calls = 20
+        max_tool_wall_time = 120
+        tool_loop_start = time.monotonic()
+
+        for _round in range(8):
+            if total_calls >= max_tool_calls:
+                break
+            if time.monotonic() - tool_loop_start > max_tool_wall_time:
+                break
+            response = yield from self._stream_chat_response(
+                agent,
+                messages,
+                context,
+                tools=tool_schemas,
+            )
+            reasoning_streamed = bool(response.reasoning_content and context.get("thinking_enabled"))
+            if response.content and not response.tool_calls:
+                return {
+                    "draft": response.content,
+                    "draft_reasoning": response.reasoning_content or "",
+                    "draft_reasoning_streamed": reasoning_streamed,
+                    "web_sources": web_sources,
+                    "search_status": search_status,
+                    "tool_outputs": [],
+                    "tool_stats": {"total_calls": total_calls, "tools_used": tools_used},
+                    "events": events,
+                }
+            if response.tool_calls:
+                calls_this_round = response.tool_calls[:max_tool_calls - total_calls]
+                if not calls_this_round:
+                    break
+                assistant_msg = {"role": "assistant", "content": response.content, "tool_calls": calls_this_round}
+                if response.reasoning_content:
+                    assistant_msg["reasoning_content"] = response.reasoning_content
+                messages.append(assistant_msg)
+                self._persist_intermediate_message(
+                    context,
+                    role="assistant",
+                    content=response.content or "",
+                    reasoning=response.reasoning_content or "",
+                    tool_calls=calls_this_round,
+                    meta={"node_id": node["id"], "round": _round, "kind": "tool_calls"},
+                )
+                for tc in calls_this_round:
+                    if time.monotonic() - tool_loop_start > max_tool_wall_time:
+                        break
+                    web_sources, search_status, tool_name = self._execute_stream_tool_call(
+                        tc,
+                        bound_tools,
+                        messages,
+                        events,
+                        web_sources,
+                        search_status,
+                        context,
+                        node,
+                        _round,
+                    )
+                    total_calls += 1
+                    tools_used.append(tool_name)
+            else:
+                break
+
+        final = yield from self._stream_chat_response(agent, messages, context)
+        return {
+            "draft": final.content or "",
+            "draft_reasoning": final.reasoning_content or "",
+            "draft_reasoning_streamed": bool(final.reasoning_content and context.get("thinking_enabled")),
+            "web_sources": web_sources,
+            "search_status": search_status,
+            "tool_outputs": [],
+            "tool_stats": {"total_calls": total_calls, "tools_used": tools_used, "max_rounds_reached": True},
+            "events": events,
+        }
+
+    def _stream_chat_response(self, agent, messages: list[dict], context: dict, *, tools: list[dict] | None = None):
+        content_chunks: list[str] = []
+        reasoning_chunks: list[str] = []
+        tool_call_builders: dict[int, dict] = {}
+        final_tool_calls: list[dict] = []
+        for chunk in self.provider.chat_stream_events(
+            messages,
+            model=agent.model,
+            temperature=agent.temperature,
+            runtime_config=agent.runtime_config,
+            tools=tools,
+            thinking_enabled=self._thinking_request_value(context),
+        ):
+            if chunk.type == "reasoning":
+                if not context.get("thinking_enabled"):
+                    continue
+                reasoning_chunks.append(chunk.content)
+                yield {"event": "reasoning_token", "content": chunk.content}
+            elif chunk.type == "content":
+                content_chunks.append(chunk.content)
+            elif chunk.type == "tool_call_delta":
+                self._merge_stream_tool_call_deltas(tool_call_builders, chunk.tool_calls or [])
+            elif chunk.type == "tool_calls":
+                final_tool_calls = chunk.tool_calls or []
+        if not final_tool_calls:
+            final_tool_calls = self._finalize_stream_tool_calls(tool_call_builders)
+        return ChatResponse(
+            content="".join(content_chunks) or None,
+            reasoning_content="".join(reasoning_chunks),
+            tool_calls=final_tool_calls or None,
+        )
+
+    def _merge_stream_tool_call_deltas(self, builders: dict[int, dict], deltas: list[dict]) -> None:
+        for delta in deltas:
+            if not isinstance(delta, dict):
+                continue
+            try:
+                index = int(delta.get("index")) if delta.get("index") is not None else len(builders)
+            except (TypeError, ValueError):
+                index = len(builders)
+            call = builders.setdefault(index, {"id": "", "type": "function", "function": {"name": "", "arguments": ""}})
+            if delta.get("id"):
+                call["id"] = str(delta.get("id"))
+            if delta.get("type"):
+                call["type"] = str(delta.get("type"))
+            func = delta.get("function") or {}
+            if not isinstance(func, dict):
+                continue
+            name_part = func.get("name")
+            if name_part:
+                name_part = str(name_part)
+                current_name = call["function"].get("name") or ""
+                if not current_name or name_part.startswith(current_name):
+                    call["function"]["name"] = name_part
+                elif not current_name.endswith(name_part):
+                    call["function"]["name"] = current_name + name_part
+            if func.get("arguments") is not None:
+                call["function"]["arguments"] = (call["function"].get("arguments") or "") + str(func.get("arguments"))
+
+    def _finalize_stream_tool_calls(self, builders: dict[int, dict]) -> list[dict]:
+        calls = []
+        for index in sorted(builders):
+            call = builders[index]
+            function = call.get("function") or {}
+            name = function.get("name") or ""
+            if not name:
+                continue
+            calls.append(
+                {
+                    "id": call.get("id") or f"call_{index}",
+                    "type": call.get("type") or "function",
+                    "function": {
+                        "name": name,
+                        "arguments": function.get("arguments") or "{}",
+                    },
+                }
+            )
+        return calls
+
+    def _execute_stream_tool_call(
+        self,
+        tc: dict,
+        bound_tools: list[Tool],
+        messages: list[dict],
+        events: list[dict],
+        web_sources: list[dict],
+        search_status: dict,
+        context: dict,
+        node: dict,
+        round_index: int,
+    ) -> tuple[list[dict], dict, str]:
+        func = tc["function"]
+        tool_name = func["name"]
+        try:
+            tool_args = json.loads(func.get("arguments") or "{}")
+        except json.JSONDecodeError:
+            tool_args = {"input": func.get("arguments") or ""}
+        matching = next((t for t in bound_tools if t.name == tool_name), None)
+        started = time.monotonic()
+        if matching:
+            try:
+                result = execute_tool(matching, {"input": tool_args})
+                result["latency_ms"] = result.get("latency_ms", int((time.monotonic() - started) * 1000))
+                tool_content = result.get("content") or result.get("result_preview") or ""
+                event_data = tool_call_event(matching, result, input_preview=json.dumps(tool_args, ensure_ascii=False))
+                events.append({"event": "tool_call", "data": event_data})
+                if matching.type == "builtin_search":
+                    web_sources, search_status = self._merge_web_search_tool_result(web_sources, search_status, result)
+                    events.append({"event": "search_status", "data": self._search_status_event(search_status)})
+                messages.append({"role": "tool", "tool_call_id": tc["id"], "content": tool_content})
+                self._persist_intermediate_message(
+                    context,
+                    role="tool",
+                    content=tool_content,
+                    tool_call_id=tc["id"],
+                    tool_name=tool_name,
+                    meta={**event_data, "node_id": node["id"], "round": round_index, "kind": "tool_result"},
+                )
+            except ValueError as exc:
+                error_result = {"tool": tool_name, "content": "", "result_preview": "", "latency_ms": int((time.monotonic() - started) * 1000), "error": str(exc)}
+                event_data = tool_call_event(matching, error_result, status="error", input_preview=json.dumps(tool_args, ensure_ascii=False), error_code="tool_error")
+                tool_content = f"Error: {exc}"
+                events.append({"event": "tool_call", "data": event_data})
+                messages.append({"role": "tool", "tool_call_id": tc["id"], "content": tool_content})
+                self._persist_intermediate_message(
+                    context,
+                    role="tool",
+                    content=tool_content,
+                    tool_call_id=tc["id"],
+                    tool_name=tool_name,
+                    meta={**event_data, "node_id": node["id"], "round": round_index, "kind": "tool_result"},
+                )
+        else:
+            unknown_tool = type("_", (), {"id": None, "name": tool_name, "type": "unknown"})()
+            event_data = tool_call_event(unknown_tool, {"tool": tool_name, "content": "", "result_preview": "", "latency_ms": 0}, status="error", input_preview="{}", error_code="tool_not_found")
+            tool_content = f"Tool '{tool_name}' not found"
+            events.append({"event": "tool_call", "data": event_data})
+            messages.append({"role": "tool", "tool_call_id": tc["id"], "content": tool_content})
+            self._persist_intermediate_message(
+                context,
+                role="tool",
+                content=tool_content,
+                tool_call_id=tc["id"],
+                tool_name=tool_name,
+                meta={**event_data, "node_id": node["id"], "round": round_index, "kind": "tool_result"},
+            )
+        return web_sources, search_status, tool_name
+
     def _stream_llm_node(self, agent, node: dict, context: dict):
         draft = context.get("draft", "")
         if draft:
             draft_reasoning = context.get("draft_reasoning") or ""
-            if draft_reasoning and context.get("thinking_enabled"):
+            if draft_reasoning and context.get("thinking_enabled") and not context.get("draft_reasoning_streamed"):
                 yield {"event": "reasoning_token", "content": draft_reasoning}
             # Draft already produced by the tool-calling loop — stream as chunked text
             for index in range(0, len(draft), 24):
@@ -977,18 +1221,20 @@ class WorkflowRunner:
         session_id = context.get("session_id")
         if not session_id:
             return
+        visible_reasoning = reasoning if context.get("thinking_enabled") else ""
         payload_meta = {
             "is_intermediate": True,
             "run_id": context.get("run_id"),
+            "thinking_enabled": bool(context.get("thinking_enabled")),
             **(meta or {}),
         }
-        if role == "assistant" and reasoning and context.get("reasoning_replay_required"):
+        if role == "assistant" and visible_reasoning and context.get("reasoning_replay_required"):
             payload_meta["requires_reasoning_replay"] = True
         message = Message(
             session_id=session_id,
             role=role,
             content=content or "",
-            reasoning=reasoning or "",
+            reasoning=visible_reasoning or "",
             sources=[],
             tool_calls=tool_calls or [],
             tool_call_id=tool_call_id or "",

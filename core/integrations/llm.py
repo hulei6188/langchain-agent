@@ -226,17 +226,7 @@ class OpenAICompatibleProvider:
         reasoning_content = str(message.get("reasoning_content") or message.get("reasoning") or message.get("thinking") or "")
         raw_tool_calls = message.get("tool_calls") or []
         if raw_tool_calls:
-            tool_calls = []
-            for tc in raw_tool_calls:
-                func = tc.get("function") or {}
-                tool_calls.append({
-                    "id": tc.get("id") or "",
-                    "type": tc.get("type") or "function",
-                    "function": {
-                        "name": func.get("name") or "",
-                        "arguments": func.get("arguments") or "{}",
-                    },
-                })
+            tool_calls = self._normalize_tool_calls(raw_tool_calls)
             return ChatResponse(content=content or None, reasoning_content=reasoning_content, tool_calls=tool_calls)
         return ChatResponse(content=str(content) if content else "", reasoning_content=reasoning_content)
 
@@ -375,6 +365,8 @@ class OpenAICompatibleProvider:
             chunks.extend(self._typed_value_chunks(delta.get("thinking"), "reasoning"))
             chunks.extend(self._typed_value_chunks(delta.get("content"), "content"))
             chunks.extend(self._typed_value_chunks(delta.get("text"), "content"))
+            if delta.get("tool_calls"):
+                chunks.append(ChatStreamChunk(type="tool_call_delta", tool_calls=delta.get("tool_calls") or []))
             if chunks:
                 return chunks
         message = first.get("message") or {}
@@ -383,10 +375,26 @@ class OpenAICompatibleProvider:
             chunks.extend(self._typed_value_chunks(message.get("reasoning"), "reasoning"))
             chunks.extend(self._typed_value_chunks(message.get("thinking"), "reasoning"))
             chunks.extend(self._typed_value_chunks(message.get("content"), "content"))
+            if message.get("tool_calls"):
+                chunks.append(ChatStreamChunk(type="tool_calls", tool_calls=self._normalize_tool_calls(message.get("tool_calls") or [])))
             if chunks:
                 return chunks
         text = first.get("text")
         return [ChatStreamChunk(type="content", content=text)] if isinstance(text, str) else []
+
+    def _normalize_tool_calls(self, raw_tool_calls: list[dict]) -> list[dict]:
+        tool_calls = []
+        for index, tc in enumerate(raw_tool_calls):
+            func = tc.get("function") or {}
+            tool_calls.append({
+                "id": tc.get("id") or f"call_{index}",
+                "type": tc.get("type") or "function",
+                "function": {
+                    "name": func.get("name") or "",
+                    "arguments": func.get("arguments") or "{}",
+                },
+            })
+        return tool_calls
 
     def _typed_value_chunks(self, value, default_type: str) -> list[ChatStreamChunk]:
         if not value:

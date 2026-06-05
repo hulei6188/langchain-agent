@@ -1398,7 +1398,7 @@ def get_session(session_id: int, membership: WorkspaceMember = Depends(get_curre
         raise HTTPException(status_code=404, detail="Session not found")
     require_session_access(session, membership)
     messages = db.query(Message).filter(Message.session_id == session.id).order_by(Message.id.asc()).all()
-    return {"session": session_payload(session, db), "messages": [message_payload(message) for message in messages if visible_chat_message(message)]}
+    return {"session": session_payload(session, db), "messages": chat_message_payloads(messages)}
 
 
 @app.patch("/api/sessions/{session_id}")
@@ -1481,7 +1481,17 @@ def stream_chat_events(db: Session, agent: Agent, user_id: int, request: ChatReq
             elif event["event"] == "step":
                 step = event["step"]
                 for runtime_event in step.get("events", []):
-                    yield sse_event(runtime_event.get("event", "tool_call"), runtime_event.get("data", {}))
+                    runtime_event_name = runtime_event.get("event", "tool_call")
+                    runtime_event_data = runtime_event.get("data", {}) or {}
+                    if runtime_event_name == "reasoning_token":
+                        content = runtime_event_data.get("content", "")
+                        if content:
+                            if reasoning_started_at is None:
+                                reasoning_started_at = time.perf_counter()
+                            reasoning += content
+                        yield sse_event("reasoning_token", {"content": content})
+                        continue
+                    yield sse_event(runtime_event_name, runtime_event_data)
                 yield sse_event("run_step", step)
             elif event["event"] == "complete":
                 run = event["run"]
@@ -1509,6 +1519,7 @@ def stream_chat_events(db: Session, agent: Agent, user_id: int, request: ChatReq
             sources=sources,
             meta={
                 **({"used_tools": True} if used_tools else {}),
+                **({"reasoning_includes_intermediate": True} if used_tools and reasoning else {}),
                 **({"requires_reasoning_replay": True} if used_tools and requires_reasoning_replay else {}),
             },
         )
@@ -1612,6 +1623,33 @@ def session_payload(session: ChatSession, db: Session) -> dict:
         "created_at": session.created_at.isoformat() if session.created_at else None,
         "updated_at": session.updated_at.isoformat() if session.updated_at else None,
     }
+
+
+def chat_message_payloads(messages: list[Message]) -> list[dict]:
+    payloads: list[dict] = []
+    pending_reasoning: list[str] = []
+    for message in messages:
+        meta = message.meta or {}
+        if message.role == "assistant" and meta.get("is_intermediate"):
+            if message.reasoning:
+                pending_reasoning.append(message.reasoning)
+            continue
+        if not visible_chat_message(message):
+            continue
+        if message.role == "user":
+            pending_reasoning = []
+        payload = message_payload(message)
+        if message.role == "assistant" and pending_reasoning:
+            payload_meta = payload.get("meta") or {}
+            if not payload_meta.get("reasoning_includes_intermediate"):
+                payload["reasoning"] = merge_reasoning_parts([*pending_reasoning, payload.get("reasoning") or ""])
+            pending_reasoning = []
+        payloads.append(payload)
+    return payloads
+
+
+def merge_reasoning_parts(parts: list[str]) -> str:
+    return "\n\n".join(part.strip() for part in parts if part and part.strip())
 
 
 def message_payload(message: Message) -> dict:
