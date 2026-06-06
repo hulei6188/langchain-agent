@@ -2000,6 +2000,65 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
 .tool-row-actions button.model-delete-button {
   color: #b42318;
 }
+.mcp-tool-group-row {
+  grid-template-columns: minmax(260px, 1fr) minmax(260px, auto) minmax(160px, auto);
+}
+.mcp-subtool-list {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 8px;
+  margin-top: 6px;
+  padding-top: 12px;
+  border-top: 1px solid #edf0f5;
+}
+.mcp-subtool-row {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) minmax(160px, 240px) minmax(260px, auto);
+  gap: 12px;
+  align-items: center;
+  padding: 10px 0;
+}
+.mcp-subtool-row + .mcp-subtool-row {
+  border-top: 1px solid #edf0f5;
+}
+.mcp-subtool-main,
+.mcp-subtool-main strong,
+.mcp-subtool-main small,
+.mcp-subtool-remote {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mcp-subtool-main strong {
+  display: block;
+  color: #111827;
+  font-size: 13px;
+}
+.mcp-subtool-main small {
+  display: block;
+  margin-top: 3px;
+  color: #667085;
+  font-size: 12px;
+}
+.mcp-subtool-main code {
+  margin-right: 6px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: #f3f4f6;
+  color: #4b5563;
+  font-size: 11px;
+}
+.mcp-subtool-remote {
+  color: #667085;
+  font-size: 12px;
+}
+.mcp-subtool-actions {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+}
 .tool-test-box textarea {
   min-height: 70px;
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
@@ -3158,13 +3217,18 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
 .markdown-content h5 { font-size: 16px; line-height: 1.5; }
 .markdown-content ul,
 .markdown-content ol { padding-left: 20px; }
-.markdown-content table {
-  display: block;
+.markdown-table-wrapper {
+  justify-self: start;
+  width: fit-content;
   max-width: 100%;
   overflow-x: auto;
-  border-collapse: collapse;
   border: 1px solid #e4e7ec;
   border-radius: 8px;
+}
+.markdown-content table {
+  border-collapse: collapse;
+  width: max-content;
+  min-width: 100%;
 }
 .markdown-content pre {
   min-width: 0;
@@ -4350,6 +4414,7 @@ body.dark .code-header button {
   color: #f3f4f7;
 }
 body.dark .markdown-content table,
+body.dark .markdown-table-wrapper,
 body.dark .markdown-content th,
 body.dark .markdown-content td,
 body.dark .message-attachment-image img {
@@ -4834,8 +4899,12 @@ body.dark .panel-actions .primary-model-action {
   .model-admin-row,
   .user-model-row { grid-template-columns: 1fr; }
   .tool-row-meta,
-  .tool-row-actions {
+  .tool-row-actions,
+  .mcp-subtool-actions {
     justify-content: flex-start;
+  }
+  .mcp-subtool-row {
+    grid-template-columns: 1fr;
   }
   .model-admin-actions,
   .user-model-actions {
@@ -6223,6 +6292,48 @@ body.dark .coze-accordion-item {
   background: #fcfcfe;
   box-shadow: 0 4px 12px rgba(77, 67, 230, 0.04);
 }
+.coze-bound-card.is-expanded {
+  border-color: #4d43e6;
+  background: #fcfcfe;
+}
+.coze-bound-group {
+  margin-bottom: 8px;
+}
+.coze-bound-subtools {
+  display: grid;
+  gap: 6px;
+  margin: -2px 0 8px 38px;
+  padding-left: 12px;
+  border-left: 1px solid #dfe4ef;
+}
+.coze-bound-subtool {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+  padding: 6px 0;
+}
+.coze-bound-subtool > div {
+  min-width: 0;
+}
+.coze-bound-subtool strong,
+.coze-bound-subtool span {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.coze-bound-subtool strong {
+  color: #111827;
+  font-size: 12px;
+}
+.coze-bound-subtool span {
+  margin-top: 2px;
+  color: #667085;
+  font-size: 11px;
+}
 
 .coze-bound-card-info {
   display: flex;
@@ -6429,6 +6540,34 @@ body.dark .coze-accordion-item {
   color: #94a3b8;
   border-color: #dfe4ef;
   cursor: default;
+}
+.coze-modal-subtools {
+  display: grid;
+  gap: 6px;
+  margin: -2px 0 4px 28px;
+  padding-left: 12px;
+  border-left: 1px solid #dfe4ef;
+}
+.coze-modal-subtool {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  padding: 6px 0;
+}
+.coze-modal-subtool strong,
+.coze-modal-subtool span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.coze-modal-subtool strong {
+  color: #111827;
+  font-size: 12px;
+}
+.coze-modal-subtool span {
+  color: #667085;
+  font-size: 11px;
 }
 
 /* ==========================================\
@@ -6751,7 +6890,8 @@ body.dark .segmented-switch button.active {
 }
 
 body.dark .coze-accordion-header:hover,
-body.dark .coze-bound-card:hover {
+body.dark .coze-bound-card:hover,
+body.dark .coze-bound-card.is-expanded {
   background: #242938;
 }
 
@@ -6786,6 +6926,8 @@ body.dark .tool-form,
 body.dark .tool-type-switch,
 body.dark .tool-edit-secret-note,
 body.dark .tool-list-row,
+body.dark .mcp-subtool-list,
+body.dark .mcp-subtool-row + .mcp-subtool-row,
 body.dark .tool-row-meta span,
 body.dark .tool-row-actions button,
 body.dark .tool-test-result,
@@ -6833,6 +6975,29 @@ body.dark .tool-row-actions button:hover:not(:disabled) {
   border-color: #536078;
   background: #242938;
   color: #f3f4f7;
+}
+body.dark .coze-bound-subtools,
+body.dark .coze-modal-subtools {
+  border-color: #303544;
+}
+body.dark .coze-bound-subtool strong,
+body.dark .coze-modal-subtool strong {
+  color: #f3f4f7;
+}
+body.dark .coze-bound-subtool span,
+body.dark .coze-modal-subtool span {
+  color: #9aa3b6;
+}
+body.dark .mcp-subtool-main strong {
+  color: #f3f4f7;
+}
+body.dark .mcp-subtool-main small,
+body.dark .mcp-subtool-remote {
+  color: #9aa3b6;
+}
+body.dark .mcp-subtool-main code {
+  background: #1f2430;
+  color: #c5cad7;
 }
 
 body.dark .resource-tabs button,

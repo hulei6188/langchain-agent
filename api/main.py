@@ -27,6 +27,7 @@ from api.schemas import (
     KnowledgeDocumentBatchCreateRequest,
     KnowledgeDocumentCreateRequest,
     LoginRequest,
+    MCPToolDiscoverRequest,
     MemoryProfileUpdateRequest,
     ModelConfigRequest,
     ModelConfigUpdateRequest,
@@ -128,6 +129,7 @@ from core.services.prompt_templates import (
 from core.services.tools import (
     create_tool,
     delete_tool,
+    discover_mcp_tools,
     get_accessible_tool,
     list_available_tools,
     test_tool,
@@ -166,7 +168,35 @@ PUBLIC_CHAT_ERRORS = (
 )
 
 
+def _version_tuple(value: str) -> tuple[int, ...]:
+    parts: list[int] = []
+    for token in str(value or "").split("."):
+        match = re.match(r"(\d+)", token)
+        if not match:
+            break
+        parts.append(int(match.group(1)))
+    return tuple(parts or [0])
+
+
+def _validate_runtime_dependencies() -> None:
+    import fastapi as fastapi_pkg
+    import starlette as starlette_pkg
+
+    starlette_version = getattr(starlette_pkg, "__version__", "0")
+    if not ((0, 40, 0) <= _version_tuple(starlette_version) < (0, 42, 0)):
+        raise RuntimeError(
+            "Incompatible dependency set detected: "
+            f"fastapi {getattr(fastapi_pkg, '__version__', 'unknown')} requires "
+            f"starlette>=0.40.0,<0.42.0, but found starlette {starlette_version}. "
+            "This usually happens when MCP-related dependencies upgrade Starlette transitively. "
+            "Reinstall with the same interpreter used to start the server, for example: "
+            "`python -m pip install -r requirements.txt` and then "
+            "`python -m uvicorn api.main:app --host 127.0.0.1 --port 8000 --reload`."
+        )
+
+
 settings = get_settings()
+_validate_runtime_dependencies()
 app = FastAPI(title=settings.app_name, version=settings.app_version)
 logger = logging.getLogger(__name__)
 startup_error: str | None = None
@@ -554,6 +584,29 @@ def create_tool_endpoint(request: ToolRequest, membership: WorkspaceMember = Dep
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"tool": tool_payload(tool)}
+
+
+@app.post("/api/tools/mcp/discover")
+def discover_mcp_tools_endpoint(
+    request: MCPToolDiscoverRequest,
+    membership: WorkspaceMember = Depends(get_current_membership),
+    db: Session = Depends(get_db),
+):
+    existing_tool = None
+    if request.tool_id:
+        existing_tool = get_accessible_tool(
+            db,
+            workspace_id=membership.workspace_id,
+            user_id=membership.user_id,
+            tool_id=request.tool_id,
+        )
+        if not existing_tool:
+            raise HTTPException(status_code=404, detail="Tool not found")
+    try:
+        items = discover_mcp_tools(request.model_dump(), existing_tool=existing_tool)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"items": items}
 
 
 @app.patch("/api/tools/{tool_id}")

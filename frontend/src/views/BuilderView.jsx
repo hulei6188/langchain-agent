@@ -1,4 +1,4 @@
-import React, { useRef, useState, useEffect } from 'react';
+import React, { useMemo, useRef, useState, useEffect } from 'react';
 import {
   ChevronLeft,
   Plus,
@@ -47,6 +47,10 @@ import {
   formatDateTime,
   toggleKb,
   toggleTool,
+  buildToolDisplayGroups,
+  toolEntrySearchText,
+  addToolIds,
+  removeToolIds,
   handleAttachmentInput,
   handleAttachmentPaste,
   handleAttachmentDrop,
@@ -57,7 +61,7 @@ import {
 
 // Simple tool type utilities
 function toolType(tool) {
-  return tool?.type || (tool?.name === 'builtin_search' ? 'builtin_search' : 'http');
+  return tool?.type || (tool?.mcp ? 'mcp' : tool?.name === 'builtin_search' ? 'builtin_search' : 'http');
 }
 
 function toolHasSecret(tool) {
@@ -212,6 +216,18 @@ export function BuilderView(props) {
   // Search filter states
   const [toolsSearch, setToolsSearch] = useState('');
   const [kbSearch, setKbSearch] = useState('');
+  const [expandedToolGroups, setExpandedToolGroups] = useState({});
+  const boundTools = useMemo(
+    () => tools.filter((tool) => agentForm.tool_ids.includes(tool.id)),
+    [tools, agentForm.tool_ids]
+  );
+  const boundToolEntries = useMemo(() => buildToolDisplayGroups(boundTools), [boundTools]);
+  const toolSelectionEntries = useMemo(() => buildToolDisplayGroups(tools), [tools]);
+  const filteredToolSelectionEntries = useMemo(() => {
+    const query = toolsSearch.trim().toLowerCase();
+    if (!query) return toolSelectionEntries;
+    return toolSelectionEntries.filter((entry) => toolEntrySearchText(entry).includes(query));
+  }, [toolSelectionEntries, toolsSearch]);
 
   const toggleSection = (key) => {
     setExpandedSections((prev) => ({ ...prev, [key]: !prev[key] }));
@@ -455,7 +471,7 @@ export function BuilderView(props) {
             <div className="coze-accordion-header" onClick={() => toggleSection('tools')}>
               <div className="coze-header-left">
                 <ChevronRight size={14} className="coze-caret-icon" />
-                <span>工具 <span className="coze-header-count">({agentForm.tool_ids.length})</span></span>
+                <span>工具 <span className="coze-header-count">({boundToolEntries.length})</span></span>
               </div>
               <button 
                 type="button" 
@@ -466,28 +482,91 @@ export function BuilderView(props) {
               </button>
             </div>
             <div className="coze-accordion-body">
-              {tools.filter(t => agentForm.tool_ids.includes(t.id)).map((tool) => (
-                <div className="coze-bound-card" key={tool.id}>
-                  <div className="coze-bound-card-info" style={{ minWidth: 0, flex: 1 }}>
-                    <span className="coze-bound-card-icon">
-                      {toolType(tool) === 'builtin_search' ? <Search size={14} /> : <Wand2 size={14} />}
-                    </span>
-                    <div style={{ minWidth: 0, flex: 1 }}>
-                      <div className="coze-bound-card-title">{tool.label}</div>
-                      <div className="coze-bound-card-meta">{tool.description}</div>
+              {boundToolEntries.map((entry) => {
+                if (entry.kind === 'mcp_group') {
+                  const expanded = Boolean(expandedToolGroups[entry.key]);
+                  return (
+                    <div key={entry.id} className="coze-bound-group">
+                      <div
+                        className={`coze-bound-card ${expanded ? 'is-expanded' : ''}`}
+                        role="button"
+                        tabIndex={0}
+                        onClick={() => setExpandedToolGroups((items) => ({ ...items, [entry.key]: !items[entry.key] }))}
+                        onKeyDown={(event) => {
+                          if (event.key === 'Enter' || event.key === ' ') {
+                            event.preventDefault();
+                            setExpandedToolGroups((items) => ({ ...items, [entry.key]: !items[entry.key] }));
+                          }
+                        }}
+                      >
+                        <div className="coze-bound-card-info" style={{ minWidth: 0, flex: 1 }}>
+                          <span className="coze-bound-card-icon">
+                            <ServerCog size={14} />
+                          </span>
+                          <div style={{ minWidth: 0, flex: 1 }}>
+                            <div className="coze-bound-card-title">{entry.title}</div>
+                            <div className="coze-bound-card-meta">{entry.description}</div>
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          className="coze-bound-card-remove"
+                          title="解绑 MCP 工具组"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            removeToolIds(entry.toolIds, agentForm, setAgentForm);
+                          }}
+                        >
+                          ✕
+                        </button>
+                      </div>
+                      {expanded && (
+                        <div className="coze-bound-subtools">
+                          {entry.tools.map((tool) => (
+                            <div className="coze-bound-subtool" key={tool.id}>
+                              <div>
+                                <strong>{tool.label || tool.name}</strong>
+                                <span>{tool.mcp?.tool_name || tool.name}</span>
+                              </div>
+                              <button
+                                type="button"
+                                className="coze-bound-card-remove"
+                                title="解绑小工具"
+                                onClick={() => toggleTool(tool.id, agentForm, setAgentForm)}
+                              >
+                                ✕
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      )}
                     </div>
+                  );
+                }
+                const tool = entry.tool;
+                return (
+                  <div className="coze-bound-card" key={tool.id}>
+                    <div className="coze-bound-card-info" style={{ minWidth: 0, flex: 1 }}>
+                      <span className="coze-bound-card-icon">
+                        {toolType(tool) === 'builtin_search' ? <Search size={14} /> : toolType(tool) === 'mcp' ? <ServerCog size={14} /> : <Wand2 size={14} />}
+                      </span>
+                      <div style={{ minWidth: 0, flex: 1 }}>
+                        <div className="coze-bound-card-title">{tool.label}</div>
+                        <div className="coze-bound-card-meta">{tool.description}</div>
+                      </div>
+                    </div>
+                    <button 
+                      type="button" 
+                      className="coze-bound-card-remove" 
+                      title="解绑工具"
+                      onClick={(e) => { e.stopPropagation(); toggleTool(tool.id, agentForm, setAgentForm); }}
+                    >
+                      ✕
+                    </button>
                   </div>
-                  <button 
-                    type="button" 
-                    className="coze-bound-card-remove" 
-                    title="解绑工具"
-                    onClick={(e) => { e.stopPropagation(); toggleTool(tool.id, agentForm, setAgentForm); }}
-                  >
-                    ✕
-                  </button>
-                </div>
-              ))}
-              {agentForm.tool_ids.length === 0 && (
+                );
+              })}
+              {boundToolEntries.length === 0 && (
                 <p className="muted" style={{ fontSize: '12px', textAlign: 'center', margin: '10px 0 0' }}>
                   暂未绑定任何工具，点击“+ 添加”引入能力。
                 </p>
@@ -718,18 +797,63 @@ export function BuilderView(props) {
                     />
                   </div>
                   <div className="coze-modal-list">
-                    {tools
-                      .filter(t => 
-                        t.label.toLowerCase().includes(toolsSearch.toLowerCase()) || 
-                        t.description.toLowerCase().includes(toolsSearch.toLowerCase())
-                      )
-                      .map((tool) => {
+                    {filteredToolSelectionEntries.map((entry) => {
+                        if (entry.kind === 'mcp_group') {
+                          const expanded = Boolean(expandedToolGroups[entry.key]);
+                          const allAdded = entry.toolIds.every((id) => agentForm.tool_ids.includes(id));
+                          const partiallyAdded = !allAdded && entry.toolIds.some((id) => agentForm.tool_ids.includes(id));
+                          return (
+                            <div className="coze-modal-group" key={entry.id}>
+                              <div
+                                className="coze-modal-row"
+                                role="button"
+                                tabIndex={0}
+                                onClick={() => setExpandedToolGroups((items) => ({ ...items, [entry.key]: !items[entry.key] }))}
+                                onKeyDown={(event) => {
+                                  if (event.key === 'Enter' || event.key === ' ') {
+                                    event.preventDefault();
+                                    setExpandedToolGroups((items) => ({ ...items, [entry.key]: !items[entry.key] }));
+                                  }
+                                }}
+                              >
+                                <div className="coze-modal-row-info">
+                                  <span style={{ fontSize: '16px', marginRight: '8px' }}>🧩</span>
+                                  <strong className="coze-modal-row-title">{entry.title}</strong>
+                                  <div className="coze-modal-row-desc">{entry.description}</div>
+                                </div>
+                                <button
+                                  type="button"
+                                  className={`coze-modal-row-btn ${allAdded ? 'added' : ''}`}
+                                  disabled={allAdded}
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    if (allAdded) return;
+                                    addToolIds(entry.toolIds, agentForm, setAgentForm);
+                                  }}
+                                >
+                                  {allAdded ? '已添加' : partiallyAdded ? '补全' : '添加'}
+                                </button>
+                              </div>
+                              {expanded && (
+                                <div className="coze-modal-subtools">
+                                  {entry.tools.map((tool) => (
+                                    <div className="coze-modal-subtool" key={tool.id}>
+                                      <strong>{tool.label || tool.name}</strong>
+                                      <span>{tool.description || tool.mcp?.tool_name || tool.name}</span>
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        }
+                        const tool = entry.tool;
                         const isAdded = agentForm.tool_ids.includes(tool.id);
                         return (
                           <div className="coze-modal-row" key={tool.id}>
                             <div className="coze-modal-row-info">
                               <span style={{ fontSize: '16px', marginRight: '8px' }}>
-                                {toolType(tool) === 'builtin_search' ? '🔍' : '🛠️'}
+                                {toolType(tool) === 'builtin_search' ? '🔍' : toolType(tool) === 'mcp' ? '🧩' : '🛠️'}
                               </span>
                               <strong className="coze-modal-row-title">{tool.label}</strong>
                               <div className="coze-modal-row-desc">{tool.description}</div>
@@ -749,7 +873,7 @@ export function BuilderView(props) {
                         );
                       })
                     }
-                    {tools.length === 0 && <p className="muted" style={{ textAlign: 'center' }}>无可用工具。</p>}
+                    {filteredToolSelectionEntries.length === 0 && <p className="muted" style={{ textAlign: 'center' }}>无可用工具。</p>}
                   </div>
                 </div>
               </div>

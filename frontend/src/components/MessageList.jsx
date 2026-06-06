@@ -152,6 +152,13 @@ export function MarkdownContent({ content }) {
         remarkPlugins={[remarkGfm, remarkMath]}
         rehypePlugins={[rehypeKatex]}
         components={{
+          table({ children, node, ...props }) {
+            return (
+              <div className="markdown-table-wrapper">
+                <table {...props}>{children}</table>
+              </div>
+            );
+          },
           pre({ children, ...props }) {
             const child = React.Children.toArray(children).find(React.isValidElement);
             if (!child) {

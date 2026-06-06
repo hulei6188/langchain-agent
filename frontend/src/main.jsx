@@ -117,6 +117,7 @@ import {
   modelCapabilityWarning,
   toggleKb,
   toggleTool,
+  buildToolDisplayGroups,
   initVariableValues,
   castVariables,
   fileToBase64,
@@ -170,8 +171,10 @@ function App() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [toastMsg, setToastMsg] = useState('');
+  const [toastTone, setToastTone] = useState('success');
 
-  function notify(msg) {
+  function notify(msg, tone = 'success') {
+    setToastTone(tone);
     setToastMsg(msg);
     setTimeout(() => {
       setToastMsg((current) => current === msg ? '' : current);
@@ -675,11 +678,31 @@ function App() {
   }
 
   async function createToolConfig(payload) {
-    await api('/api/tools', { token, method: 'POST', body: payload });
+    if (Array.isArray(payload)) {
+      const created = await Promise.all(payload.map((item) => api('/api/tools', { token, method: 'POST', body: item })));
+      await refreshTools();
+      return created.map((item) => item.tool).filter(Boolean);
+    }
+    const data = await api('/api/tools', { token, method: 'POST', body: payload });
     await refreshTools();
+    return data.tool;
+  }
+
+  async function discoverMcpTools(payload) {
+    return api('/api/tools/mcp/discover', { token, method: 'POST', body: payload });
   }
 
   async function updateToolConfig(toolId, patch) {
+    if (Array.isArray(toolId)) {
+      const updated = await Promise.all(
+        toolId.map((item) => api(`/api/tools/${item.id}`, { token, method: 'PATCH', body: item.patch }))
+      );
+      await refreshTools();
+      if (activeAgentId) {
+        await loadAgent(activeAgentId);
+      }
+      return updated.map((item) => item.tool).filter(Boolean);
+    }
     await api(`/api/tools/${toolId}`, { token, method: 'PATCH', body: patch });
     await refreshTools();
     if (activeAgentId) {
@@ -688,6 +711,14 @@ function App() {
   }
 
   async function deleteToolConfig(toolId) {
+    if (Array.isArray(toolId)) {
+      await Promise.all(toolId.map((id) => api(`/api/tools/${id}`, { token, method: 'DELETE' })));
+      await refreshTools();
+      if (activeAgentId) {
+        await loadAgent(activeAgentId);
+      }
+      return;
+    }
     await api(`/api/tools/${toolId}`, { token, method: 'DELETE' });
     await refreshTools();
     if (activeAgentId) {
@@ -1491,6 +1522,7 @@ function App() {
     createModelConfig,
     createPromptTemplate,
     createToolConfig,
+    discoverMcpTools,
     createUserModelConfig,
     deleteAgent,
     deleteDocument,
@@ -1628,7 +1660,7 @@ function App() {
           tone={confirmDialog.tone}
         />
       )}
-      {toastMsg && <div className="toast success">{toastMsg}</div>}
+      {toastMsg && <div className={`toast ${toastTone}`}>{toastMsg}</div>}
     </>
   );
 }
@@ -1661,6 +1693,7 @@ function HomeView(props) {
     createModelConfig,
     createPromptTemplate,
     createToolConfig,
+    discoverMcpTools,
     createUserModelConfig,
     deleteAgent,
     deleteDocument,
@@ -2130,8 +2163,10 @@ function HomeView(props) {
         {activeNav === 'tools' && (
           <ToolsHome
             createToolConfig={createToolConfig}
+            discoverMcpTools={discoverMcpTools}
             deleteToolConfig={deleteToolConfig}
             isDarkTheme={isDarkTheme}
+            notify={notify}
             openBuilder={openBuilder}
             requestDeleteConfirm={requestDeleteConfirm}
             setProfileError={setProfileError}
@@ -3389,20 +3424,22 @@ function UserModelsHome({ adminModels, canManage, createModelConfig, deleteModel
   );
 }
 
-function ToolsHome({ createToolConfig, deleteToolConfig, isDarkTheme, openBuilder, requestDeleteConfirm, setProfileError, testToolConfig, tools, updateToolConfig }) {
+function ToolsHome({ createToolConfig, discoverMcpTools, deleteToolConfig, isDarkTheme, notify, openBuilder, requestDeleteConfirm, setProfileError, testToolConfig, tools, updateToolConfig }) {
   return (
     <div className="content-page">
       <header className="page-heading">
         <div>
           <h1>工具</h1>
-          <p>管理可绑定到智能体的内置搜索和 HTTP 工具。密钥只在保存时提交，保存后仅显示 has_secret 状态。</p>
+          <p>管理可绑定到智能体的内置搜索、HTTP 工具和 MCP 工具。密钥只在保存时提交，保存后仅显示 has_secret 状态。</p>
         </div>
         <button className="primary" type="button" onClick={openBuilder}><Bot size={16} />打开 Builder</button>
       </header>
       <ToolsPanel
         createToolConfig={createToolConfig}
+        discoverMcpTools={discoverMcpTools}
         deleteToolConfig={deleteToolConfig}
         isDarkTheme={isDarkTheme}
+        notify={notify}
         requestDeleteConfirm={requestDeleteConfirm}
         setProfileError={setProfileError}
         testToolConfig={testToolConfig}
@@ -3762,15 +3799,36 @@ const BUILTIN_SEARCH_PRESET = {
   response_path: '$',
 };
 
+const MCP_TOOL_PRESET = {
+  ...HTTP_TOOL_PRESET,
+  type: 'mcp',
+  name: 'mcp_tool',
+  label: 'MCP Tool',
+  description: 'Calls a remote MCP tool over Streamable HTTP.',
+  method: 'POST',
+  url: 'http://127.0.0.1:8001/mcp',
+  headers_schema: JSON.stringify({}, null, 2),
+  query_schema: JSON.stringify({}, null, 2),
+  body_schema: JSON.stringify({}, null, 2),
+  response_path: '$',
+  mcp_transport: 'streamable_http',
+  mcp_tool_name: '',
+  mcp_input_schema: JSON.stringify({ type: 'object', properties: {} }, null, 2),
+  server_label: '',
+};
+
 function createToolForm(type = 'http') {
-  return { ...(type === 'builtin_search' ? BUILTIN_SEARCH_PRESET : HTTP_TOOL_PRESET) };
+  if (type === 'builtin_search') return { ...BUILTIN_SEARCH_PRESET };
+  if (type === 'mcp') return { ...MCP_TOOL_PRESET };
+  return { ...HTTP_TOOL_PRESET };
 }
 
 function formFromTool(tool, overrides = {}) {
   const type = toolType(tool);
+  const mcp = tool?.mcp || {};
   return {
-    ...createToolForm(type === 'builtin_search' ? 'builtin_search' : 'http'),
-    type: type === 'builtin_search' ? 'builtin_search' : 'http',
+    ...createToolForm(type),
+    type,
     name: tool?.name || '',
     label: tool?.label || '',
     description: tool?.description || '',
@@ -3786,6 +3844,10 @@ function formFromTool(tool, overrides = {}) {
     auth_secret: '',
     response_path: tool?.response_path || '$',
     timeout_seconds: String(tool?.timeout_seconds || 10),
+    mcp_transport: mcp.transport || 'streamable_http',
+    mcp_tool_name: mcp.tool_name || '',
+    mcp_input_schema: JSON.stringify(mcp.input_schema || { type: 'object', properties: {} }, null, 2),
+    server_label: tool?.server_label || '',
     ...overrides,
   };
 }
@@ -3937,7 +3999,7 @@ function ParamTableEditor({ isDarkTheme = false, label, params, onChange }) {
   );
 }
 
-function ToolsPanel({ createToolConfig, deleteToolConfig, isDarkTheme = false, requestDeleteConfirm, setProfileError, testToolConfig, tools, updateToolConfig }) {
+function ToolsPanel({ createToolConfig, discoverMcpTools, deleteToolConfig, isDarkTheme = false, notify, requestDeleteConfirm, setProfileError, testToolConfig, tools, updateToolConfig }) {
   const [form, setForm] = useState(createToolForm);
   const [formOpen, setFormOpen] = useState(false);
   const [editingTool, setEditingTool] = useState(null);
@@ -3949,6 +4011,10 @@ function ToolsPanel({ createToolConfig, deleteToolConfig, isDarkTheme = false, r
   const [testBodyById, setTestBodyById] = useState({});
   const [testResults, setTestResults] = useState({});
   const [secretDialogTool, setSecretDialogTool] = useState(null);
+  const [editingMcpGroup, setEditingMcpGroup] = useState(null);
+  const [discoveringMcp, setDiscoveringMcp] = useState(false);
+  const [mcpDiscoveries, setMcpDiscoveries] = useState([]);
+  const [expandedMcpGroups, setExpandedMcpGroups] = useState({});
   
   // States for visual parameter editor
   const [headersParams, setHeadersParams] = useState([]);
@@ -3956,10 +4022,14 @@ function ToolsPanel({ createToolConfig, deleteToolConfig, isDarkTheme = false, r
   const [bodyParams, setBodyParams] = useState([]);
 
   const isHttpForm = form.type === 'http';
+  const isMcpForm = form.type === 'mcp';
+  const isEditingMcpGroup = Boolean(editingMcpGroup);
+  const isCreatingMcpGroup = isMcpForm && !editingTool && !isEditingMcpGroup;
   const needsBodySchema = isHttpForm && !['GET', 'DELETE'].includes(String(form.method || '').toUpperCase());
-  const needsAuthSecret = isHttpForm && form.auth_type !== 'none';
-  const needsAuthHeader = isHttpForm && ['bearer', 'header'].includes(form.auth_type);
-  const needsAuthQuery = isHttpForm && form.auth_type === 'query';
+  const needsAuthSecret = (isHttpForm || isMcpForm) && form.auth_type !== 'none';
+  const needsAuthHeader = (isHttpForm || isMcpForm) && ['bearer', 'header'].includes(form.auth_type);
+  const needsAuthQuery = (isHttpForm || isMcpForm) && form.auth_type === 'query';
+  const toolDisplayEntries = useMemo(() => buildToolDisplayGroups(tools), [tools]);
   const toolTheme = isDarkTheme ? {
     rowBg: '#121620',
     rowBorder: '#303544',
@@ -3989,6 +4059,7 @@ function ToolsPanel({ createToolConfig, deleteToolConfig, isDarkTheme = false, r
     typeSearch: { background: '#17233e', color: '#9fc0ff', border: '1px solid #364f91' },
     typeBuiltin: { background: '#2b2141', color: '#d9b8ff', border: '1px solid #59407a' },
     typeHttp: { background: '#10281f', color: '#7ee0aa', border: '1px solid #2d7255' },
+    typeMcp: { background: '#2a1a0f', color: '#ffbe82', border: '1px solid #8f5b2d' },
     emptyBg: '#121620',
     emptyBorder: '#303544',
   } : {
@@ -4020,6 +4091,7 @@ function ToolsPanel({ createToolConfig, deleteToolConfig, isDarkTheme = false, r
     typeSearch: { background: '#e0f2fe', color: '#0369a1', border: '1px solid #bae6fd' },
     typeBuiltin: { background: '#f3e8ff', color: '#6b21a8', border: '1px solid #e9d5ff' },
     typeHttp: { background: '#dcfce7', color: '#15803d', border: '1px solid #bbf7d0' },
+    typeMcp: { background: '#fff7ed', color: '#c2410c', border: '1px solid #fed7aa' },
     emptyBg: '#f9fafb',
     emptyBorder: '#e5e7eb',
   };
@@ -4053,6 +4125,7 @@ function ToolsPanel({ createToolConfig, deleteToolConfig, isDarkTheme = false, r
     setHeadersParams(schemaToParams(preset.headers_schema));
     setQueryParams(schemaToParams(preset.query_schema));
     setBodyParams(schemaToParams(preset.body_schema));
+    setMcpDiscoveries([]);
   }
 
   function updateToolForm(patch) {
@@ -4083,7 +4156,9 @@ function ToolsPanel({ createToolConfig, deleteToolConfig, isDarkTheme = false, r
     setHeadersParams(schemaToParams(defaultForm.headers_schema));
     setQueryParams(schemaToParams(defaultForm.query_schema));
     setBodyParams(schemaToParams(defaultForm.body_schema));
+    setMcpDiscoveries([]);
     setEditingTool(null);
+    setEditingMcpGroup(null);
     setNotice('');
     setProfileError('');
     setFormOpen(true);
@@ -4095,7 +4170,29 @@ function ToolsPanel({ createToolConfig, deleteToolConfig, isDarkTheme = false, r
     setHeadersParams(schemaToParams(editForm.headers_schema));
     setQueryParams(schemaToParams(editForm.query_schema));
     setBodyParams(schemaToParams(editForm.body_schema));
+    setMcpDiscoveries([]);
     setEditingTool(tool);
+    setEditingMcpGroup(null);
+    setNotice('');
+    setProfileError('');
+    setFormOpen(true);
+  }
+
+  function openEditMcpGroup(entry) {
+    const firstTool = entry.tools[0];
+    const editForm = formFromTool(firstTool, {
+      enabled: entry.enabled,
+      label: entry.title,
+      description: '',
+      server_label: firstTool?.server_label || '',
+    });
+    setForm(editForm);
+    setHeadersParams(schemaToParams(editForm.headers_schema));
+    setQueryParams(schemaToParams(editForm.query_schema));
+    setBodyParams(schemaToParams(editForm.body_schema));
+    setMcpDiscoveries([]);
+    setEditingTool(null);
+    setEditingMcpGroup(entry);
     setNotice('');
     setProfileError('');
     setFormOpen(true);
@@ -4107,7 +4204,9 @@ function ToolsPanel({ createToolConfig, deleteToolConfig, isDarkTheme = false, r
     setHeadersParams(schemaToParams(copyForm.headers_schema));
     setQueryParams(schemaToParams(copyForm.query_schema));
     setBodyParams(schemaToParams(copyForm.body_schema));
+    setMcpDiscoveries([]);
     setEditingTool(null);
+    setEditingMcpGroup(null);
     setNotice('');
     setProfileError('');
     setFormOpen(true);
@@ -4117,6 +4216,15 @@ function ToolsPanel({ createToolConfig, deleteToolConfig, isDarkTheme = false, r
     if (saving) return;
     setFormOpen(false);
     setEditingTool(null);
+    setEditingMcpGroup(null);
+    setMcpDiscoveries([]);
+  }
+
+  function showToolError(value) {
+    const message = errorMessage(value);
+    setProfileError(message);
+    setNotice('');
+    if (notify) notify(message, 'error');
   }
 
   async function submitTool(event) {
@@ -4125,21 +4233,67 @@ function ToolsPanel({ createToolConfig, deleteToolConfig, isDarkTheme = false, r
     setNotice('');
     setProfileError('');
     try {
-      const payload = toolFormPayload(form, { includeSecret: !editingTool });
-      if (editingTool?.id) {
+      let successMessage = editingTool ? '工具已更新。' : '工具已保存，密钥不会在页面或接口响应中回显。';
+      if (isEditingMcpGroup) {
+        await updateMcpGroupConfig(editingMcpGroup);
+        successMessage = `已更新「${editingMcpGroup.title}」下 ${editingMcpGroup.tools.length} 个 MCP 小工具。`;
+      } else if (editingTool?.id) {
+        const payload = toolFormPayload(form, { includeSecret: false });
         await updateToolConfig(editingTool.id, payload);
+      } else if (form.type === 'mcp') {
+        const discoveries = mcpDiscoveries.length > 0 ? mcpDiscoveries : await fetchRemoteMcpItems();
+        setMcpDiscoveries(discoveries);
+        if (!discoveries.length) {
+          throw new Error('MCP 服务器已连接，但没有返回可用工具。');
+        }
+        const { payloads, skippedCount } = buildMcpDiscoveryPayloads(form, discoveries, tools);
+        if (!payloads.length) {
+          setNotice('该 MCP 服务下的工具已全部存在，无需重复添加。');
+          if (notify) notify('MCP 工具已存在。');
+          return;
+        }
+        await createToolConfig(payloads);
+        successMessage = `已保存 ${payloads.length} 个 MCP 工具${skippedCount ? `，跳过 ${skippedCount} 个已存在工具` : ''}。`;
       } else {
+        const payload = toolFormPayload(form, { includeSecret: true });
         await createToolConfig(payload);
       }
       setForm(createToolForm(form.type));
       setEditingTool(null);
+      setEditingMcpGroup(null);
       setFormOpen(false);
-      setNotice(editingTool ? '工具已更新。' : '工具已保存，密钥不会在页面或接口响应中回显。');
+      setNotice(successMessage);
+      if (notify) notify((editingTool || isEditingMcpGroup) ? '工具保存成功。' : '工具创建成功。');
     } catch (err) {
-      setProfileError(errorMessage(err));
+      showToolError(err);
     } finally {
       setSaving(false);
     }
+  }
+
+  function mcpGroupConfigPatch(tool) {
+    const timeout = Number(form.timeout_seconds);
+    const authType = form.auth_type || 'none';
+    return {
+      url: String(form.url || '').trim(),
+      server_label: String(form.server_label || '').trim(),
+      auth: {
+        type: authType,
+        header_name: ['bearer', 'header'].includes(authType) ? form.auth_header_name || 'Authorization' : null,
+        query_name: authType === 'query' ? form.auth_query_name || null : null,
+      },
+      timeout_seconds: Number.isFinite(timeout) ? Math.min(30, Math.max(1, timeout)) : 10,
+      enabled: Boolean(form.enabled),
+      mcp: {
+        transport: tool?.mcp?.transport || 'streamable_http',
+        tool_name: tool?.mcp?.tool_name || tool?.name || '',
+        input_schema: tool?.mcp?.input_schema || { type: 'object', properties: {} },
+      },
+    };
+  }
+
+  async function updateMcpGroupConfig(entry) {
+    await updateToolConfig(entry.tools.map((tool) => ({ id: tool.id, patch: mcpGroupConfigPatch(tool) })));
   }
 
   async function patchTool(tool, patch) {
@@ -4149,15 +4303,57 @@ function ToolsPanel({ createToolConfig, deleteToolConfig, isDarkTheme = false, r
     try {
       await updateToolConfig(tool.id, patch);
     } catch (err) {
-      setProfileError(errorMessage(err));
+      showToolError(err);
     } finally {
       setSaving(false);
     }
   }
 
+  async function patchMcpGroup(entry, patchForTool, successMessage) {
+    setSaving(true);
+    setNotice('');
+    setProfileError('');
+    try {
+      await updateToolConfig(entry.tools.map((tool) => ({
+        id: tool.id,
+        patch: typeof patchForTool === 'function' ? patchForTool(tool) : patchForTool,
+      })));
+      if (successMessage) setNotice(successMessage);
+    } catch (err) {
+      showToolError(err);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function toggleMcpGroupEnabled(entry) {
+    const nextEnabled = !entry.allEnabled;
+    await patchMcpGroup(
+      entry,
+      { enabled: nextEnabled },
+      `已${nextEnabled ? '启用' : '禁用'}「${entry.title}」下 ${entry.tools.length} 个 MCP 小工具。`
+    );
+  }
+
   async function replaceToolSecret(tool, nextSecret) {
     if (!String(nextSecret || '').trim()) {
-      setProfileError('Secret cannot be empty');
+      showToolError('Secret cannot be empty');
+      return;
+    }
+    if (tool?.kind === 'mcp_group') {
+      await patchMcpGroup(
+        tool,
+        (item) => ({
+          auth: {
+            type: item.auth?.type || item.auth_type || 'bearer',
+            header_name: item.auth?.header_name || item.auth_header_name || 'Authorization',
+            query_name: item.auth?.query_name || item.auth_query_name || null,
+            secret: String(nextSecret).trim(),
+          },
+        }),
+        `已替换「${tool.title}」下 ${tool.tools.length} 个 MCP 小工具的密钥。`
+      );
+      setSecretDialogTool(null);
       return;
     }
     await patchTool(tool, {
@@ -4170,6 +4366,70 @@ function ToolsPanel({ createToolConfig, deleteToolConfig, isDarkTheme = false, r
     });
     setSecretDialogTool(null);
     setNotice('工具密钥已替换，页面仅保留 has_secret 状态。');
+  }
+
+  function applyMcpDiscovery(item) {
+    const nextMcp = item?.mcp || {};
+    updateToolForm({
+      name: item?.name || form.name,
+      label: item?.label || form.label,
+      description: item?.description || form.description,
+      mcp_tool_name: nextMcp.tool_name || item?.name || form.mcp_tool_name,
+      mcp_input_schema: JSON.stringify(nextMcp.input_schema || { type: 'object', properties: {} }, null, 2),
+      server_label: form.server_label || item?.server_label,
+    });
+  }
+
+  async function fetchRemoteMcpItems() {
+    const auth = {
+      type: form.auth_type || 'none',
+      header_name: ['bearer', 'header'].includes(form.auth_type) ? form.auth_header_name || 'Authorization' : null,
+      query_name: form.auth_type === 'query' ? form.auth_query_name || null : null,
+    };
+    if (needsAuthSecret && String(form.auth_secret || '').trim()) {
+      auth.secret = String(form.auth_secret).trim();
+    }
+    const data = await discoverMcpTools({
+      tool_id: editingTool?.id || null,
+      server_label: String(form.server_label || '').trim(),
+      url: String(form.url || '').trim(),
+      auth,
+      timeout_seconds: Math.min(30, Math.max(1, Number(form.timeout_seconds) || 10)),
+    });
+    return data.items || [];
+  }
+
+  async function discoverRemoteMcpTools() {
+    if (!form.url.trim()) {
+      showToolError('请先填写 MCP 服务器 URL');
+      return;
+    }
+    setDiscoveringMcp(true);
+    setNotice('');
+    setProfileError('');
+    try {
+      const items = await fetchRemoteMcpItems();
+      setMcpDiscoveries(items);
+      if (items.length > 0) {
+        if (editingTool) {
+          applyMcpDiscovery(items[0]);
+          setNotice(`已读取 ${items.length} 个 MCP 工具定义。`);
+        } else {
+          const serverLabel = form.server_label || items[0]?.server_label;
+          updateToolForm({
+            server_label: serverLabel,
+            label: form.label === MCP_TOOL_PRESET.label && serverLabel ? serverLabel : form.label,
+          });
+          setNotice(`已读取 ${items.length} 个 MCP 工具定义，保存时将默认添加全部。`);
+        }
+      } else {
+        setNotice('MCP 服务器已连接，但没有返回可用工具。');
+      }
+    } catch (err) {
+      showToolError(err);
+    } finally {
+      setDiscoveringMcp(false);
+    }
   }
 
   function openToolTest(tool) {
@@ -4198,7 +4458,28 @@ function ToolsPanel({ createToolConfig, deleteToolConfig, isDarkTheme = false, r
     try {
       await deleteToolConfig(tool.id);
     } catch (err) {
-      setProfileError(errorMessage(err));
+      showToolError(err);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function deleteMcpGroup(entry) {
+    const confirmed = await requestDeleteConfirm({
+      title: '删除 MCP 工具组',
+      message: `删除「${entry.title}」下 ${entry.tools.length} 个 MCP 小工具？`,
+      detail: '如果已有智能体绑定其中任一工具，后端会按约束拒绝删除。',
+      confirmLabel: '删除全部',
+    });
+    if (!confirmed) return;
+    setSaving(true);
+    setNotice('');
+    setProfileError('');
+    try {
+      await deleteToolConfig(entry.toolIds);
+      setNotice(`已删除「${entry.title}」下 ${entry.tools.length} 个 MCP 小工具。`);
+    } catch (err) {
+      showToolError(err);
     } finally {
       setSaving(false);
     }
@@ -4216,7 +4497,7 @@ function ToolsPanel({ createToolConfig, deleteToolConfig, isDarkTheme = false, r
       const result = await testToolConfig(tool.id, payload);
       setTestResults((items) => ({ ...items, [tool.id]: result }));
     } catch (err) {
-      setProfileError(errorMessage(err));
+      showToolError(err);
     } finally {
       setTestingId(null);
     }
@@ -4227,10 +4508,10 @@ function ToolsPanel({ createToolConfig, deleteToolConfig, isDarkTheme = false, r
       <div className="panel-title-row">
         <div>
           <h3>工具</h3>
-          <p>HTTP 工具按 Day2 契约提交 method、url、schema、auth、response_path 和 timeout_seconds；内置搜索使用 builtin_search 类型。</p>
+          <p>HTTP 工具按 Day2 契约提交 method、url、schema、auth、response_path 和 timeout_seconds；MCP 工具通过 Streamable HTTP 连接远端 MCP Server。</p>
         </div>
         <div className="panel-actions">
-          <span className="soft-pill">{tools.length} 个工具</span>
+          <span className="soft-pill">{toolDisplayEntries.length} 个工具项</span>
           <button className="primary-model-action" type="button" onClick={() => openToolForm('http')}><Plus size={15} />新增工具</button>
         </div>
       </div>
@@ -4242,23 +4523,33 @@ function ToolsPanel({ createToolConfig, deleteToolConfig, isDarkTheme = false, r
               <X size={16} />
             </button>
             <header className="model-dialog-heading">
-              <h3>{editingTool ? '编辑工具' : '新增工具'}</h3>
-              <p>{editingTool ? '修改工具基础配置、Schema、超时和启用状态。已保存的密钥不会回显，需要单独替换。' : '配置可绑定到智能体的 HTTP 工具或内置联网搜索工具。密钥只提交一次，保存后不回显。'}</p>
+              <h3>{isEditingMcpGroup ? '编辑 MCP 工具组' : editingTool ? '编辑工具' : '新增工具'}</h3>
+              <p>{isEditingMcpGroup ? '修改该 MCP 服务下所有小工具共享的 URL、超时、鉴权和启用状态。' : editingTool ? '修改工具基础配置、Schema、超时和启用状态。已保存的密钥不会回显，需要单独替换。' : '配置可绑定到智能体的 HTTP、MCP 或内置联网搜索工具。密钥只提交一次，保存后不回显。'}</p>
             </header>
             <form className="tool-form dialog-form" onSubmit={submitTool}>
               <div className="tool-type-switch">
-                <button type="button" disabled={!!editingTool} className={form.type === 'http' ? 'active' : ''} onClick={() => switchType('http')}>HTTP</button>
-                <button type="button" disabled={!!editingTool} className={form.type === 'builtin_search' ? 'active' : ''} onClick={() => switchType('builtin_search')}>builtin_search</button>
+                <button type="button" disabled={!!editingTool || isEditingMcpGroup} className={form.type === 'http' ? 'active' : ''} onClick={() => switchType('http')}>HTTP</button>
+                <button type="button" disabled={!!editingTool || isEditingMcpGroup} className={form.type === 'mcp' ? 'active' : ''} onClick={() => switchType('mcp')}>MCP</button>
+                <button type="button" disabled={!!editingTool || isEditingMcpGroup} className={form.type === 'builtin_search' ? 'active' : ''} onClick={() => switchType('builtin_search')}>builtin_search</button>
               </div>
               <div className="tool-form-grid">
-                <label className="field-stack">
-                  <span>name</span>
-                  <input value={form.name} onChange={(event) => updateToolForm({ name: event.target.value })} placeholder="weather_lookup" autoFocus />
-                </label>
-                <label className="field-stack">
-                  <span>label</span>
-                  <input value={form.label} onChange={(event) => updateToolForm({ label: event.target.value })} placeholder="Weather lookup" />
-                </label>
+                {isMcpForm ? (
+                  <label className="field-stack">
+                    <span>server_label</span>
+                    <input value={form.server_label} onChange={(event) => updateToolForm({ server_label: event.target.value })} placeholder="Amap Maps 高德地图" autoFocus />
+                  </label>
+                ) : (
+                  <>
+                    <label className="field-stack">
+                      <span>name</span>
+                      <input value={form.name} onChange={(event) => updateToolForm({ name: event.target.value })} placeholder="weather_lookup" autoFocus />
+                    </label>
+                    <label className="field-stack">
+                      <span>label</span>
+                      <input value={form.label} onChange={(event) => updateToolForm({ label: event.target.value })} placeholder="Weather lookup" />
+                    </label>
+                  </>
+                )}
                 {isHttpForm && (
                   <label className="field-stack">
                     <span>method</span>
@@ -4267,10 +4558,10 @@ function ToolsPanel({ createToolConfig, deleteToolConfig, isDarkTheme = false, r
                     </select>
                   </label>
                 )}
-                {isHttpForm && (
+                {(isHttpForm || isMcpForm) && (
                   <label className="field-stack tool-url-field">
                     <span>url</span>
-                    <input value={form.url} onChange={(event) => updateToolForm({ url: event.target.value })} placeholder="https://api.example.com/weather" />
+                    <input value={form.url} onChange={(event) => updateToolForm({ url: event.target.value })} placeholder={isMcpForm ? 'http://127.0.0.1:8001/mcp' : 'https://api.example.com/weather'} />
                   </label>
                 )}
                 {isHttpForm && (
@@ -4279,52 +4570,109 @@ function ToolsPanel({ createToolConfig, deleteToolConfig, isDarkTheme = false, r
                     <input value={form.response_path} onChange={(event) => updateToolForm({ response_path: event.target.value })} placeholder="$" />
                   </label>
                 )}
-                {isHttpForm && (
+                {(isHttpForm || isMcpForm) && (
                   <label className="field-stack">
                     <span>timeout_seconds</span>
                     <input type="number" min="1" max="30" value={form.timeout_seconds} onChange={(event) => updateToolForm({ timeout_seconds: event.target.value })} />
                   </label>
                 )}
-                <label className="field-stack tool-description-field">
-                  <span>description</span>
-                  <textarea value={form.description} onChange={(event) => updateToolForm({ description: event.target.value })} placeholder="工具能力说明" />
-                </label>
-              </div>
-              {/* 可视化参数结构编辑器 */}
-              <div className="coze-param-editor-container" style={{ gridColumn: 'span 2', display: 'flex', flexDirection: 'column', gap: '12px', marginTop: '8px' }}>
-                {isHttpForm && (
-                  <ParamTableEditor 
-                    isDarkTheme={isDarkTheme}
-                    label="Headers 参数结构定义 (headers_schema)" 
-                    params={headersParams} 
-                    onChange={(next) => {
-                      setHeadersParams(next);
-                      updateToolForm({ headers_schema: paramsToSchema(next) });
-                    }} 
-                  />
+                {isMcpForm && editingTool && !isEditingMcpGroup && (
+                  <label className="field-stack">
+                    <span>mcp.tool_name</span>
+                    <input value={form.mcp_tool_name} onChange={(event) => updateToolForm({ mcp_tool_name: event.target.value })} placeholder="get_weather" />
+                  </label>
                 )}
-                <ParamTableEditor 
-                  isDarkTheme={isDarkTheme}
-                  label={isHttpForm ? "Query 请求参数定义 (query_schema)" : "联网搜索参数定义 (search_query_schema)"} 
-                  params={queryParams} 
-                  onChange={(next) => {
-                    setQueryParams(next);
-                    updateToolForm({ query_schema: paramsToSchema(next) });
-                  }} 
-                />
-                {needsBodySchema && (
-                  <ParamTableEditor 
-                    isDarkTheme={isDarkTheme}
-                    label="Body 请求体定义 (body_schema)" 
-                    params={bodyParams} 
-                    onChange={(next) => {
-                      setBodyParams(next);
-                      updateToolForm({ body_schema: paramsToSchema(next) });
-                    }} 
-                  />
+                {!isEditingMcpGroup && !isMcpForm && (
+                  <label className="field-stack tool-description-field">
+                    <span>description</span>
+                    <textarea value={form.description} onChange={(event) => updateToolForm({ description: event.target.value })} placeholder="工具能力说明" />
+                  </label>
                 )}
               </div>
-              {isHttpForm && (
+              {!isMcpForm && (
+                <div className="coze-param-editor-container" style={{ gridColumn: 'span 2', display: 'flex', flexDirection: 'column', gap: '12px', marginTop: '8px' }}>
+                  {isHttpForm && (
+                    <ParamTableEditor 
+                      isDarkTheme={isDarkTheme}
+                      label="Headers 参数结构定义 (headers_schema)" 
+                      params={headersParams} 
+                      onChange={(next) => {
+                        setHeadersParams(next);
+                        updateToolForm({ headers_schema: paramsToSchema(next) });
+                      }} 
+                    />
+                  )}
+                  <ParamTableEditor 
+                    isDarkTheme={isDarkTheme}
+                    label={isHttpForm ? "Query 请求参数定义 (query_schema)" : "联网搜索参数定义 (search_query_schema)"} 
+                    params={queryParams} 
+                    onChange={(next) => {
+                      setQueryParams(next);
+                      updateToolForm({ query_schema: paramsToSchema(next) });
+                    }} 
+                  />
+                  {needsBodySchema && (
+                    <ParamTableEditor 
+                      isDarkTheme={isDarkTheme}
+                      label="Body 请求体定义 (body_schema)" 
+                      params={bodyParams} 
+                      onChange={(next) => {
+                        setBodyParams(next);
+                        updateToolForm({ body_schema: paramsToSchema(next) });
+                      }} 
+                    />
+                  )}
+                </div>
+              )}
+              {isMcpForm && !isEditingMcpGroup && (
+                <div className="coze-param-editor-container" style={{ gridColumn: 'span 2', display: 'grid', gap: '12px', marginTop: '8px' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
+                    <strong style={{ fontSize: '13px' }}>MCP 工具定义</strong>
+                    <button type="button" onClick={() => discoverRemoteMcpTools()} disabled={discoveringMcp || !form.url.trim()} style={toolAccentButtonStyle}>
+                      <Sparkles size={13} />
+                      {discoveringMcp ? '读取中...' : '读取远端工具'}
+                    </button>
+                  </div>
+                  {mcpDiscoveries.length > 0 && (
+                    <div style={{ display: 'grid', gap: '8px' }}>
+                      {mcpDiscoveries.map((item, index) => (
+                        <div
+                          key={`${item.name || item.label}-${index}`}
+                          role={editingTool ? 'button' : undefined}
+                          tabIndex={editingTool ? 0 : undefined}
+                          onClick={editingTool ? () => applyMcpDiscovery(item) : undefined}
+                          onKeyDown={editingTool ? (event) => {
+                            if (event.key === 'Enter' || event.key === ' ') {
+                              event.preventDefault();
+                              applyMcpDiscovery(item);
+                            }
+                          } : undefined}
+                          style={{
+                            ...toolButtonStyle,
+                            justifyContent: 'space-between',
+                            textAlign: 'left',
+                            cursor: editingTool ? 'pointer' : 'default',
+                            background: editingTool ? toolButtonStyle.background : toolTheme.rowBg,
+                          }}
+                        >
+                          <span style={{ display: 'grid', gap: '2px' }}>
+                            <strong>{item.label || item.name}</strong>
+                            <small style={{ color: toolTheme.text }}>{item.description || '无描述'}</small>
+                          </span>
+                          <span style={{ color: toolTheme.accentText }}>{editingTool ? '使用' : '将保存'}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  {editingTool && (
+                    <label className="field-stack">
+                      <span>mcp.input_schema</span>
+                      <textarea value={form.mcp_input_schema} onChange={(event) => updateToolForm({ mcp_input_schema: event.target.value })} placeholder='{"type":"object","properties":{}}' />
+                    </label>
+                  )}
+                </div>
+              )}
+              {(isHttpForm || isMcpForm) && (
                 <div className="tool-auth-grid">
                   <label className="field-stack">
                     <span>auth.type</span>
@@ -4347,7 +4695,7 @@ function ToolsPanel({ createToolConfig, deleteToolConfig, isDarkTheme = false, r
                       <input value={form.auth_query_name} onChange={(event) => updateToolForm({ auth_query_name: event.target.value })} placeholder="api_key" />
                     </label>
                   )}
-                  {!editingTool && needsAuthSecret && (
+                  {!editingTool && !isEditingMcpGroup && needsAuthSecret && (
                     <label className="field-stack">
                       <span>auth.secret</span>
                        <input type="password" value={form.auth_secret} onChange={(event) => updateToolForm({ auth_secret: event.target.value })} placeholder="只提交一次，不回显" autoComplete="off" />
@@ -4359,6 +4707,12 @@ function ToolsPanel({ createToolConfig, deleteToolConfig, isDarkTheme = false, r
                       <span>需要换密钥时，在列表里点击“替换 Secret”。</span>
                     </div>
                   )}
+                  {isEditingMcpGroup && needsAuthSecret && (
+                    <div className="tool-edit-secret-note">
+                      <strong>密钥不在编辑表单中回显</strong>
+                      <span>需要换密钥时，在 MCP 父项点击“更新密钥”。</span>
+                    </div>
+                  )}
                 </div>
               )}
               <div className="model-checks">
@@ -4366,11 +4720,14 @@ function ToolsPanel({ createToolConfig, deleteToolConfig, isDarkTheme = false, r
                 {isHttpForm && (
                   <span className="tool-security-note">HTTP 工具必须使用 https://，后端负责阻断 localhost、私网和 metadata 地址。</span>
                 )}
+                {isMcpForm && (
+                  <span className="tool-security-note">MCP 仅支持 Streamable HTTP；`http://` 仅允许本机 localhost，公网地址请使用 `https://`。</span>
+                )}
               </div>
               <footer className="dialog-actions">
                 <button type="button" onClick={closeToolForm} disabled={saving}>取消</button>
-                <button className="primary-model-action" type="submit" disabled={saving || !form.name.trim() || !form.label.trim() || (form.type === 'http' && !form.url.trim())}>
-                  <Plus size={15} />{saving ? '保存中...' : editingTool ? '保存修改' : '保存工具'}
+                <button className="primary-model-action" type="submit" disabled={saving || (!isEditingMcpGroup && !isMcpForm && (!form.name.trim() || !form.label.trim())) || ((form.type === 'http' || form.type === 'mcp') && !form.url.trim()) || (form.type === 'mcp' && editingTool && !form.mcp_tool_name.trim())}>
+                  <Plus size={15} />{saving ? '保存中...' : isEditingMcpGroup ? '保存 MCP 工具组' : editingTool ? '保存修改' : isCreatingMcpGroup ? '保存全部 MCP 工具' : '保存工具'}
                 </button>
               </footer>
             </form>
@@ -4381,9 +4738,202 @@ function ToolsPanel({ createToolConfig, deleteToolConfig, isDarkTheme = false, r
       {notice && <p className="model-row-warning">{notice}</p>}
 
       <div className="tool-list" style={{ gap: '12px' }}>
-        {tools.map((tool) => {
+        {toolDisplayEntries.map((entry) => {
+          if (entry.kind === 'mcp_group') {
+            const expanded = Boolean(expandedMcpGroups[entry.key]);
+            return (
+              <article
+                className="tool-list-row mcp-tool-group-row"
+                key={entry.id}
+                style={{
+                  transition: 'all 0.2s ease',
+                  border: `1px solid ${toolTheme.rowBorder}`,
+                  borderRadius: '12px',
+                  padding: '16px',
+                  background: toolTheme.rowBg,
+                  boxShadow: toolTheme.rowShadow,
+                  cursor: 'pointer',
+                }}
+                onClick={() => setExpandedMcpGroups((items) => ({ ...items, [entry.key]: !items[entry.key] }))}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.borderColor = toolTheme.rowHoverBorder;
+                  e.currentTarget.style.boxShadow = toolTheme.rowHoverShadow;
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.borderColor = toolTheme.rowBorder;
+                  e.currentTarget.style.boxShadow = toolTheme.rowShadow;
+                }}
+              >
+                <div className="tool-row-main" style={{ display: 'flex', gap: '14px', alignItems: 'center', minWidth: 0, flex: 1 }}>
+                  <span
+                    className="tool-kind mcp"
+                    style={{
+                      ...toolTheme.typeMcp,
+                      padding: '4px 10px',
+                      borderRadius: '20px',
+                      fontSize: '11px',
+                      fontWeight: 'bold',
+                      textTransform: 'uppercase',
+                      letterSpacing: '0.05em',
+                    }}
+                  >
+                    MCP
+                  </span>
+                  <div style={{ minWidth: 0, flex: 1 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <strong style={{ fontSize: '14px', fontWeight: 700, color: toolTheme.title }}>{entry.title}</strong>
+                      <span
+                        style={{
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: '4px',
+                          padding: '2px 8px',
+                          borderRadius: '12px',
+                          fontSize: '11px',
+                          background: entry.enabled ? toolTheme.successBg : toolTheme.codeBg,
+                          color: entry.enabled ? toolTheme.successText : toolTheme.muted,
+                          fontWeight: 600,
+                        }}
+                      >
+                        <span style={{ width: '6px', height: '6px', borderRadius: '50%', background: entry.enabled ? toolTheme.successText : toolTheme.muted }} />
+                        {entry.enabled ? '已启用' : '已禁用'}
+                      </span>
+                    </div>
+                    <small style={{ display: 'block', marginTop: '4px', fontSize: '12px', color: toolTheme.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={entry.url}>
+                      <code style={{ background: toolTheme.codeBg, padding: '2px 6px', borderRadius: '4px', marginRight: '6px', fontSize: '11px', fontFamily: 'monospace', color: toolTheme.codeText }}>
+                        MCP Server
+                      </code>
+                      {entry.description}
+                    </small>
+                  </div>
+                </div>
+
+                <div className="tool-row-meta" style={{ display: 'flex', gap: '12px', alignItems: 'center', color: toolTheme.text, fontSize: '12px' }}>
+                  <span style={{ background: toolTheme.methodBg, padding: '3px 8px', borderRadius: '6px', fontWeight: 'bold', color: toolTheme.methodText }}>
+                    MCP
+                  </span>
+                  <span style={{ color: toolTheme.muted }}>|</span>
+                  <span>{entry.tools.length} 个小工具</span>
+                  <span style={{ color: toolTheme.muted }}>|</span>
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', color: entry.hasSecret ? toolTheme.warnText : toolTheme.text }}>
+                    <KeyRound size={12} />
+                    {entry.hasSecret ? '已配密钥' : '免鉴权'}
+                  </span>
+                </div>
+
+                <div className="tool-row-actions" style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                  {entry.tools.every((tool) => isUserTool(tool)) && (
+                    <>
+                      <button
+                        type="button"
+                        disabled={saving}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          openEditMcpGroup(entry);
+                        }}
+                        style={toolButtonStyle}
+                      >
+                        <SquarePen size={13} />
+                        编辑
+                      </button>
+                      <button
+                        type="button"
+                        disabled={saving}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          toggleMcpGroupEnabled(entry);
+                        }}
+                        style={{
+                          ...toolButtonStyle,
+                          color: entry.allEnabled ? toolTheme.warnText : toolTheme.successText,
+                        }}
+                      >
+                        <Shield size={13} />
+                        {entry.allEnabled ? '禁用' : '启用'}
+                      </button>
+                      <button
+                        type="button"
+                        disabled={saving}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          setSecretDialogTool(entry);
+                        }}
+                        style={toolButtonStyle}
+                      >
+                        <KeyRound size={13} />
+                        更新密钥
+                      </button>
+                      <button
+                        className="model-delete-button"
+                        type="button"
+                        disabled={saving}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          deleteMcpGroup(entry);
+                        }}
+                        style={{
+                          ...toolButtonStyle,
+                          background: toolTheme.dangerBg,
+                          border: `1px solid ${toolTheme.dangerBorder}`,
+                          color: toolTheme.dangerText,
+                        }}
+                      >
+                        <Trash2 size={13} />
+                        删除
+                      </button>
+                    </>
+                  )}
+                  <button
+                    type="button"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      setExpandedMcpGroups((items) => ({ ...items, [entry.key]: !items[entry.key] }));
+                    }}
+                    style={toolAccentButtonStyle}
+                  >
+                    <ChevronRight size={13} style={{ transform: expanded ? 'rotate(90deg)' : 'none', transition: 'transform 0.2s ease' }} />
+                    {expanded ? '收起小工具' : '查看小工具'}
+                  </button>
+                </div>
+
+                {expanded && (
+                  <div className="mcp-subtool-list" onClick={(event) => event.stopPropagation()}>
+                    {entry.tools.map((tool) => {
+                      const enabled = tool.enabled !== false;
+                      return (
+                        <div className="mcp-subtool-row" key={tool.id}>
+                          <div className="mcp-subtool-main">
+                            <strong>{tool.label || tool.name}</strong>
+                            <small title={tool.description}>
+                              <code>{tool.name}</code>
+                              {tool.description || '暂无详细说明'}
+                            </small>
+                          </div>
+                          <span className="mcp-subtool-remote" title={tool.url || ''}>{tool.mcp?.tool_name || 'remote tool'}</span>
+                          <div className="mcp-subtool-actions">
+                            <button type="button" disabled={testingId === tool.id} onClick={() => openToolTest(tool)} style={toolAccentButtonStyle}>
+                              <Sparkles size={13} />
+                              {testingId === tool.id ? '测试中...' : '测试'}
+                            </button>
+                            {!isUserTool(tool) && (
+                              <button type="button" disabled={saving} onClick={() => openCopyTool(tool)} style={toolAccentButtonStyle}>
+                                <Layers size={13} />
+                                复制为自定义
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </article>
+            );
+          }
+          const tool = entry.tool;
           const type = toolType(tool);
           const isHttp = type === 'http';
+          const isMcp = type === 'mcp';
           const isSearch = type === 'builtin_search';
           const isBuiltin = type === 'builtin';
 
@@ -4391,6 +4941,7 @@ function ToolsPanel({ createToolConfig, deleteToolConfig, isDarkTheme = false, r
           if (isSearch) typeStyle = toolTheme.typeSearch;
           else if (isBuiltin) typeStyle = toolTheme.typeBuiltin;
           else if (isHttp) typeStyle = toolTheme.typeHttp;
+          else if (isMcp) typeStyle = toolTheme.typeMcp;
 
           const enabled = tool.enabled !== false;
           
@@ -4461,10 +5012,16 @@ function ToolsPanel({ createToolConfig, deleteToolConfig, isDarkTheme = false, r
 
               <div className="tool-row-meta" style={{ display: 'flex', gap: '12px', alignItems: 'center', color: toolTheme.text, fontSize: '12px' }}>
                 <span style={{ background: toolTheme.methodBg, padding: '3px 8px', borderRadius: '6px', fontWeight: 'bold', color: toolTheme.methodText }}>
-                  {tool.method || 'GET'}
+                  {isMcp ? 'MCP' : (tool.method || 'GET')}
                 </span>
                 <span style={{ color: toolTheme.muted }}>|</span>
                 <span>超时 {tool.timeout_seconds || 10}s</span>
+                {isMcp && (
+                  <>
+                    <span style={{ color: toolTheme.muted }}>|</span>
+                    <span title={tool.url || ''}>{tool.mcp?.tool_name || 'remote tool'}</span>
+                  </>
+                )}
                 <span style={{ color: toolTheme.muted }}>|</span>
                 <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', color: toolHasSecret(tool) ? toolTheme.warnText : toolTheme.text }}>
                   <KeyRound size={12} />
@@ -4505,7 +5062,7 @@ function ToolsPanel({ createToolConfig, deleteToolConfig, isDarkTheme = false, r
                       <Shield size={13} />
                       {enabled ? '禁用' : '启用'}
                     </button>
-                    {isHttp && (
+                    {(isHttp || isMcp) && (
                       <button 
                         type="button" 
                         disabled={saving} 
@@ -4547,9 +5104,9 @@ function ToolsPanel({ createToolConfig, deleteToolConfig, isDarkTheme = false, r
             </article>
           );
         })}
-        {tools.length === 0 && (
+        {toolDisplayEntries.length === 0 && (
           <p className="muted" style={{ padding: '24px', textAlign: 'center', background: toolTheme.emptyBg, borderRadius: '12px', border: `1px dashed ${toolTheme.emptyBorder}`, color: toolTheme.text }}>
-            当前没有可用工具。保存 builtin_search 或 HTTP 工具后即可在 Builder 中绑定。
+            当前没有可用工具。保存 builtin_search、HTTP 或 MCP 工具后即可在 Builder 中绑定。
           </p>
         )}
       </div>
@@ -4588,10 +5145,10 @@ function ToolsPanel({ createToolConfig, deleteToolConfig, isDarkTheme = false, r
           label="Secret"
           message={`替换「${secretDialogTool.label || secretDialogTool.name}」的密钥。新密钥只提交一次，保存后不回显。`}
           onCancel={() => !saving && setSecretDialogTool(null)}
-          onSubmit={(value) => replaceToolSecret(secretDialogTool, value).catch((err) => setProfileError(errorMessage(err)))}
+          onSubmit={(value) => replaceToolSecret(secretDialogTool, value).catch((err) => showToolError(err))}
           saving={saving}
           submitLabel="替换 Secret"
-          title="替换工具 Secret"
+          title={secretDialogTool.kind === 'mcp_group' ? '替换 MCP 工具组 Secret' : '替换工具 Secret'}
         />
       )}
     </section>
@@ -5601,7 +6158,8 @@ function modelFormPayload(form) {
 function toolFormPayload(form, { includeSecret = false } = {}) {
   const timeout = Number(form.timeout_seconds);
   const isHttp = form.type === 'http';
-  const authType = isHttp ? form.auth_type || 'none' : 'none';
+  const isMcp = form.type === 'mcp';
+  const authType = (isHttp || isMcp) ? form.auth_type || 'none' : 'none';
   const auth = {
     type: authType,
     header_name: ['bearer', 'header'].includes(authType) ? form.auth_header_name || 'Authorization' : null,
@@ -5613,20 +6171,84 @@ function toolFormPayload(form, { includeSecret = false } = {}) {
   const method = String(form.method || 'GET').toUpperCase();
   const hasBodySchema = isHttp && !['GET', 'DELETE'].includes(method);
   return {
-    type: isHttp ? 'http' : form.type,
+    type: isHttp ? 'http' : isMcp ? 'mcp' : form.type,
     name: String(form.name || '').trim(),
     label: String(form.label || '').trim(),
     description: String(form.description || '').trim(),
+    server_label: String(form.server_label || '').trim(),
     enabled: Boolean(form.enabled),
-    method,
-    url: isHttp ? String(form.url || '').trim() : '',
+    method: isHttp ? method : isMcp ? 'POST' : method,
+    url: (isHttp || isMcp) ? String(form.url || '').trim() : '',
     headers_schema: isHttp ? parseJsonField(form.headers_schema, 'headers_schema') : {},
-    query_schema: parseJsonField(form.query_schema, 'query_schema'),
+    query_schema: isHttp || form.type === 'builtin_search' ? parseJsonField(form.query_schema, 'query_schema') : {},
     body_schema: hasBodySchema ? parseJsonField(form.body_schema, 'body_schema') : {},
     auth,
     response_path: isHttp ? String(form.response_path || '$').trim() || '$' : '$',
-    timeout_seconds: isHttp && Number.isFinite(timeout) ? Math.min(30, Math.max(1, timeout)) : 10,
+    timeout_seconds: (isHttp || isMcp) && Number.isFinite(timeout) ? Math.min(30, Math.max(1, timeout)) : 10,
+    mcp: isMcp ? {
+      transport: String(form.mcp_transport || 'streamable_http').trim() || 'streamable_http',
+      tool_name: String(form.mcp_tool_name || '').trim(),
+      input_schema: parseJsonField(form.mcp_input_schema || '{}', 'mcp.input_schema'),
+    } : {},
   };
+}
+
+function uniqueToolName(name, usedNames) {
+  const raw = String(name || 'mcp_tool').trim().replace(/[^0-9A-Za-z_]+/g, '_').replace(/^_+|_+$/g, '') || 'mcp_tool';
+  const base = raw.slice(0, 120) || 'mcp_tool';
+  if (!usedNames.has(base)) {
+    usedNames.add(base);
+    return base;
+  }
+  for (let index = 2; index < 10000; index += 1) {
+    const suffix = `_${index}`;
+    const candidate = `${base.slice(0, Math.max(1, 120 - suffix.length))}${suffix}`;
+    if (!usedNames.has(candidate)) {
+      usedNames.add(candidate);
+      return candidate;
+    }
+  }
+  throw new Error('无法生成唯一的 MCP 工具名称');
+}
+
+function formWithMcpDiscovery(form, item, name) {
+  const nextMcp = item?.mcp || {};
+  return {
+    ...form,
+    type: 'mcp',
+    name: name || item?.name || form.name,
+    label: item?.label || item?.name || form.label,
+    description: item?.description || form.description,
+    mcp_tool_name: nextMcp.tool_name || item?.label || item?.name || form.mcp_tool_name,
+    mcp_input_schema: JSON.stringify(nextMcp.input_schema || { type: 'object', properties: {} }, null, 2),
+    server_label: form.server_label || item?.server_label,
+  };
+}
+
+function buildMcpDiscoveryPayloads(form, discoveries, existingTools = []) {
+  const usedNames = new Set(existingTools.map((tool) => tool?.name).filter(Boolean));
+  const existingRemoteKeys = new Set(
+    existingTools
+      .filter((tool) => toolType(tool) === 'mcp')
+      .map((tool) => `${String(tool?.url || '').trim()}\n${String(tool?.mcp?.tool_name || '').trim()}`)
+  );
+  const url = String(form.url || '').trim();
+  const payloads = [];
+  let skippedCount = 0;
+
+  for (const item of discoveries || []) {
+    const remoteName = String(item?.mcp?.tool_name || item?.label || item?.name || '').trim();
+    if (!remoteName) continue;
+    const remoteKey = `${url}\n${remoteName}`;
+    if (existingRemoteKeys.has(remoteKey)) {
+      skippedCount += 1;
+      continue;
+    }
+    const name = uniqueToolName(item?.name || remoteName, usedNames);
+    payloads.push(toolFormPayload(formWithMcpDiscovery(form, item, name), { includeSecret: true }));
+  }
+
+  return { payloads, skippedCount };
 }
 
 function parseJsonField(value, label) {
@@ -5645,7 +6267,7 @@ function parseOptionalJsonField(value, label) {
 }
 
 function toolType(tool) {
-  return tool?.type || (tool?.name === 'builtin_search' ? 'builtin_search' : 'http');
+  return tool?.type || (tool?.mcp ? 'mcp' : tool?.name === 'builtin_search' ? 'builtin_search' : 'http');
 }
 
 function toolHasSecret(tool) {
@@ -5654,7 +6276,40 @@ function toolHasSecret(tool) {
 
 function defaultToolTestInput(tool) {
   if (toolType(tool) === 'builtin_search') return '{\n  "query": "Lingshu Agent"\n}';
+  if (toolType(tool) === 'mcp') {
+    return JSON.stringify(sampleInputFromSchema(tool?.mcp?.input_schema), null, 2);
+  }
   return '{\n  "city": "Hangzhou"\n}';
+}
+
+function sampleInputFromSchema(schema) {
+  const normalized = schema && typeof schema === 'object' ? schema : {};
+  const properties = normalized.properties && typeof normalized.properties === 'object' ? normalized.properties : {};
+  const sample = {};
+  Object.entries(properties).forEach(([key, spec]) => {
+    sample[key] = sampleValueForSchema(spec, key);
+  });
+  return sample;
+}
+
+function sampleValueForSchema(spec, key = '') {
+  if (!spec || typeof spec !== 'object') return '';
+  if (Array.isArray(spec.enum) && spec.enum.length > 0) return spec.enum[0];
+  const type = Array.isArray(spec.type) ? spec.type.find((item) => item !== 'null') : spec.type;
+  const hint = `${key} ${spec.description || ''}`.toLowerCase();
+  if (type === 'number') return Number.isFinite(spec.minimum) ? spec.minimum : 1.23;
+  if (type === 'integer') return Number.isFinite(spec.minimum) ? spec.minimum : 1;
+  if (type === 'boolean') return true;
+  if (type === 'array') return [sampleValueForSchema(spec.items, `${key}_item`)];
+  if (type === 'object') return sampleInputFromSchema(spec);
+  if (/(origin|destination|location|lnglat|lonlat|coordinate|coord|经度|纬度|坐标)/i.test(hint)) return '116.397428,39.90923';
+  if (/(city|adcode|citycode|行政区|城市编码)/i.test(hint)) return '310000';
+  if (/(keyword|keywords|query|关键字)/i.test(hint)) return '咖啡';
+  if (/(address|addr|地址)/i.test(hint)) return '北京市朝阳区阜通东大街6号';
+  if (/\bip\b/i.test(hint)) return '8.8.8.8';
+  if (/(phone|mobile|tel|电话)/i.test(hint)) return '13800138000';
+  if (spec.format === 'uri' || spec.format === 'url') return 'https://example.com';
+  return 'example';
 }
 
 function debugEventSummary(event) {

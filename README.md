@@ -255,8 +255,8 @@ MILVUS_URI=http://localhost:19530
 
 ```powershell
 Copy-Item .env.example .env          # 编辑 .env，填写 DASHSCOPE_API_KEY
-pip install -r requirements.txt
-uvicorn api.main:app --host 127.0.0.1 --port 8000 --reload
+python -m pip install -r requirements.txt
+python -m uvicorn api.main:app --host 127.0.0.1 --port 8000 --reload
 ```
 
 ### 前端

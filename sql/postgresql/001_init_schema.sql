@@ -162,10 +162,11 @@ CREATE TABLE IF NOT EXISTS tools (
     id BIGSERIAL PRIMARY KEY,
     workspace_id BIGINT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
     user_id BIGINT NULL REFERENCES users(id) ON DELETE CASCADE,
-    type VARCHAR(40) NOT NULL DEFAULT 'builtin' CHECK (type IN ('builtin', 'builtin_search', 'http')),
+    type VARCHAR(40) NOT NULL DEFAULT 'builtin' CHECK (type IN ('builtin', 'builtin_search', 'http', 'mcp')),
     name VARCHAR(120) NOT NULL CHECK (name ~ '^[a-z][a-z0-9_]*$'),
     label VARCHAR(160) NOT NULL,
     description TEXT NOT NULL DEFAULT '',
+    server_label VARCHAR(160) NOT NULL DEFAULT '',
     schema JSONB NOT NULL DEFAULT '{}'::jsonb,
     enabled BOOLEAN NOT NULL DEFAULT TRUE,
     method VARCHAR(10) NULL CHECK (method IS NULL OR method IN ('GET', 'POST', 'PUT', 'PATCH', 'DELETE')),
@@ -173,7 +174,7 @@ CREATE TABLE IF NOT EXISTS tools (
     headers_schema JSONB NOT NULL DEFAULT '{}'::jsonb,
     query_schema JSONB NOT NULL DEFAULT '{}'::jsonb,
     body_schema JSONB NOT NULL DEFAULT '{}'::jsonb,
-    auth_type VARCHAR(40) NOT NULL DEFAULT 'none' CHECK (auth_type IN ('none', 'bearer', 'api_key_header', 'api_key_query')),
+    auth_type VARCHAR(40) NOT NULL DEFAULT 'none' CHECK (auth_type IN ('none', 'bearer', 'header', 'query')),
     auth_header_name VARCHAR(120) NULL,
     auth_query_name VARCHAR(120) NULL,
     encrypted_secret TEXT NULL,
@@ -513,6 +514,7 @@ COMMENT ON COLUMN tools.type IS '工具类型';
 COMMENT ON COLUMN tools.name IS '工具唯一代码名';
 COMMENT ON COLUMN tools.label IS '工具展示名称';
 COMMENT ON COLUMN tools.description IS '工具描述';
+COMMENT ON COLUMN tools.server_label IS 'MCP 服务展示名称或分组标签';
 COMMENT ON COLUMN tools.schema IS '工具输入参数 Schema';
 COMMENT ON COLUMN tools.enabled IS '工具是否启用';
 COMMENT ON COLUMN tools.method IS 'HTTP 请求方法';
