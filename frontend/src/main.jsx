@@ -1352,7 +1352,7 @@ function App() {
         return next;
       });
     }
-    if (['rag_status', 'tool_call', 'memory_used', 'search_status'].includes(event)) {
+    if (['rag_status', 'tool_call', 'tool_call_start', 'tool_call_result', 'memory_used', 'thinking_status', 'search_status'].includes(event)) {
       setToolDebugEvents((items) => [
         ...items,
         {
@@ -1361,7 +1361,7 @@ function App() {
           ...data,
         },
       ].slice(-30));
-      if (event === 'tool_call' || event === 'search_status') {
+      if (['tool_call', 'tool_call_start', 'tool_call_result', 'search_status'].includes(event)) {
         setMessages((items) => {
           const next = [...items];
           const last = next[next.length - 1];
@@ -6388,6 +6388,23 @@ function appendToolTimelineItem(message, eventData, eventType = 'tool_call') {
   const item = formatToolTimelineLabel(eventData, eventType);
   if (!item) return message;
   const timeline = Array.isArray(message?.reasoningTimeline) ? [...message.reasoningTimeline] : [];
+  const toolCallId = item.toolCallId || '';
+  if (toolCallId) {
+    const existingIndex = timeline.findIndex((entry) => entry?.toolCallId === toolCallId);
+    if (existingIndex >= 0) {
+      const existing = timeline[existingIndex];
+      timeline[existingIndex] = {
+        ...existing,
+        ...item,
+        id: existing.id || item.id,
+        inputLabel: item.inputLabel || existing.inputLabel || '参数',
+        inputPreview: item.inputPreview || existing.inputPreview || '',
+        rawInput: item.rawInput || existing.rawInput || '',
+        rawResult: item.rawResult || existing.rawResult || '',
+      };
+      return { ...message, reasoningTimeline: timeline };
+    }
+  }
   if (item.type === 'search') {
     const lastSearchIndex = [...timeline].reverse().findIndex((entry) => entry?.type === 'search');
     if (lastSearchIndex >= 0) {
@@ -6414,6 +6431,7 @@ function formatToolTimelineLabel(eventData = {}, eventType = 'tool_call') {
       id: `search-${Date.now()}`,
       type: 'search',
       status,
+      toolCallId: eventData.tool_call_id || eventData.call_id || '',
       title,
       meta: [provider, query].filter(Boolean).join(' · '),
       latency: formatTimelineLatency(eventData.latency_ms),
@@ -6424,15 +6442,30 @@ function formatToolTimelineLabel(eventData = {}, eventType = 'tool_call') {
   const toolName = eventData.tool_name || eventData.tool || eventData.name || eventData.tool_id || 'tool';
   const toolType = eventData.tool_type || eventData.type || 'tool';
   const isSearchTool = toolType === 'builtin_search' || toolName === 'web_search';
-  const status = eventData.status === 'error' || eventData.error_code ? 'error' : eventData.status === 'running' ? 'running' : 'success';
+  const isStart = eventType === 'tool_call_start' || eventData.type === 'tool_call_start';
+  const status = eventData.status === 'error' || eventData.error_code ? 'error' : isStart || eventData.status === 'running' ? 'running' : 'success';
+  const toolCallId = eventData.tool_call_id || eventData.call_id || '';
+  const rawInput = eventData.input_preview || '';
+  const rawResult = eventData.result_preview || eventData.error || eventData.error_code || '';
+  const inputSummary = summarizeToolInput(rawInput);
+  const title = status === 'running'
+    ? `正在调用 ${toolName}`
+    : isSearchTool
+      ? '调用联网搜索'
+      : `调用 ${toolName}`;
   return {
-    id: `${isSearchTool ? 'search' : 'tool'}-${Date.now()}-${toolName}`,
+    id: `${isSearchTool ? 'search' : 'tool'}-${toolCallId || Date.now()}-${toolName}`,
     type: isSearchTool ? 'search' : 'tool',
     status,
-    title: isSearchTool ? '调用联网搜索' : `调用 ${toolName}`,
+    toolCallId,
+    title,
     meta: [toolType, status === 'error' ? '失败' : status === 'running' ? '运行中' : '完成'].filter(Boolean).join(' · '),
     latency: formatTimelineLatency(eventData.latency_ms),
-    summary: compactTimelineText(eventData.result_preview || eventData.error || eventData.error_code || eventData.input_preview || ''),
+    inputLabel: inputSummary.label,
+    inputPreview: inputSummary.text,
+    summary: summarizeToolResult(rawResult, { status, toolType, toolName }),
+    rawInput,
+    rawResult,
   };
 }
 
@@ -6462,8 +6495,133 @@ function compactTimelineText(value, limit = 180) {
   return compact.length > limit ? `${compact.slice(0, limit)}...` : compact;
 }
 
+function summarizeToolInput(rawInput) {
+  const data = parseJsonPreview(rawInput);
+  if (data && typeof data === 'object' && !Array.isArray(data)) {
+    const query = findFirstString(data, ['query', 'q', 'keyword', 'keywords', 'search', 'text', 'input']);
+    const count = findFirstScalar(data, ['count', 'limit', 'top_k', 'max_results', 'num_results']);
+    if (query) {
+      return {
+        label: '查询',
+        text: compactTimelineText([query, count ? `数量 ${count}` : ''].filter(Boolean).join(' · '), 120),
+      };
+    }
+    const keys = Object.keys(data).filter((key) => data[key] !== undefined && data[key] !== null && data[key] !== '');
+    if (keys.length) {
+      const preview = keys.length <= 3
+        ? keys.map((key) => `${key}: ${compactParamValue(data[key])}`).join(' · ')
+        : `已传入 ${keys.length} 个参数：${keys.slice(0, 3).join('、')}`;
+      return { label: '参数', text: compactTimelineText(preview, 140) };
+    }
+  }
+  const text = looksLikeJsonText(rawInput) ? '已传入结构化参数。' : compactTimelineText(rawInput || '', 120);
+  return { label: '参数', text };
+}
+
+function summarizeToolResult(rawResult, context = {}) {
+  if (context.status === 'running') return '';
+  if (context.status === 'error') {
+    return rawResult ? `调用失败：${compactTimelineText(rawResult, 140)}` : '调用失败。';
+  }
+  const data = parseJsonPreview(rawResult);
+  const items = collectResultItems(data);
+  if (items.length) return summarizeResultItems(items, rawResult);
+  const fallbackSearchCount = countJsonField(rawResult, 'snippet') || countJsonField(rawResult, 'title');
+  if (fallbackSearchCount) {
+    const dates = extractDateSignals(rawResult);
+    return compactTimelineText([
+      `搜索到约 ${fallbackSearchCount} 条结果`,
+      dates.length ? `结果中出现 ${dates.slice(0, 3).join('、')} 等日期` : '',
+    ].filter(Boolean).join('；'), 180);
+  }
+  if (data && typeof data === 'object') {
+    if (!Array.isArray(data)) {
+      const error = findFirstString(data, ['error', 'message', 'detail']);
+      if (error) return compactTimelineText(error, 160);
+      const keys = Object.keys(data).filter(Boolean);
+      if (keys.length) return `工具返回 ${keys.length} 个字段：${keys.slice(0, 4).join('、')}`;
+    }
+    if (Array.isArray(data)) return `工具返回 ${data.length} 条结构化结果。`;
+  }
+  if (looksLikeJsonText(rawResult)) return '工具返回了结构化结果，原始内容可展开查看。';
+  return compactTimelineText(rawResult || '', 160);
+}
+
+function summarizeResultItems(items, rawResult) {
+  const names = items
+    .slice(0, 3)
+    .map((item) => item?.title || item?.name || item?.hostname || item?.source || item?.url || '')
+    .filter(Boolean);
+  const dates = extractDateSignals(rawResult || JSON.stringify(items));
+  return compactTimelineText([
+    `搜索到 ${items.length} 条结果`,
+    names.length ? `包括 ${names.join('、')}` : '',
+    dates.length ? `结果中出现 ${dates.slice(0, 3).join('、')} 等日期` : '',
+  ].filter(Boolean).join('；'), 180);
+}
+
+function parseJsonPreview(value) {
+  if (!value || typeof value !== 'string') return value || null;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+}
+
+function looksLikeJsonText(value) {
+  const text = String(value || '').trim();
+  return text.startsWith('{') || text.startsWith('[');
+}
+
+function collectResultItems(data) {
+  if (!data) return [];
+  if (Array.isArray(data)) return data.filter((item) => item && typeof item === 'object');
+  if (typeof data !== 'object') return [];
+  for (const key of ['pages', 'items', 'results', 'data', 'documents']) {
+    const value = data[key];
+    if (Array.isArray(value)) return value.filter((item) => item && typeof item === 'object');
+  }
+  return [];
+}
+
+function findFirstString(data, keys) {
+  for (const key of keys) {
+    const value = data?.[key];
+    if (typeof value === 'string' && value.trim()) return value.trim();
+  }
+  return '';
+}
+
+function findFirstScalar(data, keys) {
+  for (const key of keys) {
+    const value = data?.[key];
+    if (typeof value === 'string' || typeof value === 'number') return value;
+  }
+  return '';
+}
+
+function compactParamValue(value) {
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') return compactTimelineText(String(value), 50);
+  if (Array.isArray(value)) return `${value.length} 项`;
+  if (value && typeof value === 'object') return '对象';
+  return '';
+}
+
+function countJsonField(value, fieldName) {
+  if (!value || typeof value !== 'string') return 0;
+  const escaped = fieldName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return (value.match(new RegExp(`"${escaped}"\\s*:`, 'g')) || []).length;
+}
+
+function extractDateSignals(value) {
+  const text = typeof value === 'string' ? value : JSON.stringify(value || '');
+  const matches = text.match(/20\d{2}年\d{1,2}月\d{1,2}日|20\d{2}[-/.]\d{1,2}(?:[-/.]\d{1,2})?|20\d{2}年\d{1,2}月?/g) || [];
+  return [...new Set(matches)].slice(0, 5);
+}
+
 function debugEventSummary(event) {
-  if (event.event === 'tool_call') {
+  if (['tool_call', 'tool_call_start', 'tool_call_result'].includes(event.event)) {
     const status = event.status || 'unknown';
     const name = event.tool_name || event.tool_id || 'tool';
     return `${name} · ${event.tool_type || 'tool'} · ${status} · ${event.latency_ms ?? '-'}ms`;

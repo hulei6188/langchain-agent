@@ -157,6 +157,8 @@ function MessageReasoning({ content, timeline = [], toolCalls = [], pending, sta
 
 function ReasoningTimelineItem({ item }) {
   if (item.type === 'tool' || item.type === 'search') {
+    const rawInput = item.rawInput || item.inputRaw || '';
+    const rawResult = item.rawResult || item.resultRaw || '';
     const icon = item.type === 'search'
       ? <Search size={15} />
       : item.status === 'error'
@@ -176,7 +178,14 @@ function ReasoningTimelineItem({ item }) {
             {item.meta && <span>{item.meta}</span>}
             {item.latency && <span>{item.latency}</span>}
           </div>
-          {item.summary && <p>{item.summary}</p>}
+          {item.inputPreview && <p className="reasoning-tool-input"><span>{item.inputLabel || '参数'}：</span>{item.inputPreview}</p>}
+          {item.summary && <p className="reasoning-tool-summary"><span>结果摘要：</span>{item.summary}</p>}
+          {(rawInput || rawResult) && (
+            <div className="reasoning-tool-raw-list">
+              <ToolRawDetails label="查看原始参数" value={rawInput} />
+              <ToolRawDetails label="查看原始结果" value={rawResult} />
+            </div>
+          )}
         </div>
       </li>
     );
@@ -192,15 +201,35 @@ function ReasoningTimelineItem({ item }) {
   );
 }
 
+function ToolRawDetails({ label, value }) {
+  if (!value) return null;
+  return (
+    <details className="reasoning-tool-raw">
+      <summary>{label}</summary>
+      <pre><code>{formatRawToolValue(value)}</code></pre>
+    </details>
+  );
+}
+
+function formatRawToolValue(value) {
+  if (typeof value !== 'string') return JSON.stringify(value || '', null, 2);
+  try {
+    return JSON.stringify(JSON.parse(value), null, 2);
+  } catch {
+    return value;
+  }
+}
+
 function reasoningTimelineItems(content, timeline, toolCalls, pending) {
   const source = Array.isArray(timeline) && timeline.length > 0 ? timeline : [{ type: 'reasoning', content }];
   const items = [];
   source.forEach((item, index) => {
     if (!item) return;
     if (item.type === 'reasoning') {
-      splitReasoningSteps(item.content).forEach((step, stepIndex) => {
-        items.push({ type: 'reasoning', content: step, id: item.id ? `${item.id}-${stepIndex}` : `reasoning-${index}-${stepIndex}` });
-      });
+      const block = normalizeReasoningBlock(item.content);
+      if (block) {
+        items.push({ type: 'reasoning', content: block, id: item.id || `reasoning-${index}` });
+      }
       return;
     }
     items.push({ ...item, id: item.id || `${item.type}-${index}` });
@@ -231,50 +260,12 @@ function reasoningTimelineItems(content, timeline, toolCalls, pending) {
 }
 
 export function splitReasoningSteps(text) {
-  const normalized = String(text || '').replace(/\r\n/g, '\n').trim();
-  if (!normalized) return [];
-  const blocks = normalized
-    .split(/\n{2,}/)
-    .map((block) => block.trim())
-    .filter(Boolean);
-  const steps = [];
-  blocks.forEach((block) => {
-    const lines = block.split('\n').map((line) => line.trim()).filter(Boolean);
-    const structuredLines = lines.filter((line) => /^([-*•]|\d+[.)]|[一二三四五六七八九十]+[、.])\s*/.test(line));
-    const candidates = lines.length > 1 && structuredLines.length >= Math.ceil(lines.length * 0.6)
-      ? lines.map(stripReasoningBullet)
-      : [lines.join(' ')];
-    candidates.forEach((candidate) => {
-      splitLongReasoningStep(candidate).forEach((step) => {
-        if (step) steps.push(step);
-      });
-    });
-  });
-  return steps;
+  const normalized = normalizeReasoningBlock(text);
+  return normalized ? [normalized] : [];
 }
 
-function stripReasoningBullet(value) {
-  return String(value || '').replace(/^([-*•]|\d+[.)]|[一二三四五六七八九十]+[、.])\s*/, '').trim();
-}
-
-function splitLongReasoningStep(value) {
-  const text = String(value || '').trim();
-  if (!text) return [];
-  if (text.length <= 360) return [text];
-  const sentences = text.split(/(?<=[。！？.!?])\s+/).filter(Boolean);
-  if (sentences.length <= 1) return [text];
-  const groups = [];
-  let current = '';
-  sentences.forEach((sentence) => {
-    if ((current + sentence).length > 300 && current) {
-      groups.push(current.trim());
-      current = sentence;
-    } else {
-      current = current ? `${current} ${sentence}` : sentence;
-    }
-  });
-  if (current.trim()) groups.push(current.trim());
-  return groups;
+function normalizeReasoningBlock(value) {
+  return String(value || '').replace(/\r\n/g, '\n').trim();
 }
 
 function compactText(value, limit = 160) {
