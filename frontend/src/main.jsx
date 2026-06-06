@@ -3827,6 +3827,7 @@ const MCP_TOOL_PRESET = {
   query_schema: JSON.stringify({}, null, 2),
   body_schema: JSON.stringify({}, null, 2),
   response_path: '$',
+  timeout_seconds: '30',
   mcp_transport: 'streamable_http',
   mcp_tool_name: '',
   mcp_input_schema: JSON.stringify({ type: 'object', properties: {} }, null, 2),
@@ -3859,7 +3860,7 @@ function formFromTool(tool, overrides = {}) {
     auth_query_name: tool?.auth?.query_name || tool?.auth_query_name || '',
     auth_secret: '',
     response_path: tool?.response_path || '$',
-    timeout_seconds: String(tool?.timeout_seconds || 10),
+    timeout_seconds: String(tool?.timeout_seconds || (tool?.type === 'mcp' ? 30 : 10)),
     mcp_transport: mcp.transport || 'streamable_http',
     mcp_tool_name: mcp.tool_name || '',
     mcp_input_schema: JSON.stringify(mcp.input_schema || { type: 'object', properties: {} }, null, 2),
@@ -4298,7 +4299,7 @@ function ToolsPanel({ createToolConfig, discoverMcpTools, deleteToolConfig, isDa
         header_name: ['bearer', 'header'].includes(authType) ? form.auth_header_name || 'Authorization' : null,
         query_name: authType === 'query' ? form.auth_query_name || null : null,
       },
-      timeout_seconds: Number.isFinite(timeout) ? Math.min(30, Math.max(1, timeout)) : 10,
+      timeout_seconds: clampToolTimeout('mcp', timeout),
       enabled: Boolean(form.enabled),
       mcp: {
         transport: mcpTransportValue(form.mcp_transport, form.url),
@@ -4412,7 +4413,7 @@ function ToolsPanel({ createToolConfig, discoverMcpTools, deleteToolConfig, isDa
       transport: mcpTransportValue(form.mcp_transport, form.url),
       url: String(form.url || '').trim(),
       auth,
-      timeout_seconds: Math.min(30, Math.max(1, Number(form.timeout_seconds) || 10)),
+      timeout_seconds: clampToolTimeout('mcp', Number(form.timeout_seconds)),
     });
     return data.items || [];
   }
@@ -4613,7 +4614,8 @@ function ToolsPanel({ createToolConfig, discoverMcpTools, deleteToolConfig, isDa
                 {(isHttpForm || isMcpForm) && (
                   <label className="field-stack">
                     <span>timeout_seconds</span>
-                    <input type="number" min="1" max="30" value={form.timeout_seconds} onChange={(event) => updateToolForm({ timeout_seconds: event.target.value })} />
+                    <input type="number" min="1" max={toolTimeoutMax(isMcpForm ? 'mcp' : 'http')} value={form.timeout_seconds} onChange={(event) => updateToolForm({ timeout_seconds: event.target.value })} />
+                    {isMcpForm && <small>MCP 工具默认 30s，慢速网页解析可调高到 120s。</small>}
                   </label>
                 )}
                 {isMcpForm && editingTool && !isEditingMcpGroup && (
@@ -5055,7 +5057,7 @@ function ToolsPanel({ createToolConfig, discoverMcpTools, deleteToolConfig, isDa
                   {isMcp ? 'MCP' : (tool.method || 'GET')}
                 </span>
                 <span style={{ color: toolTheme.muted }}>|</span>
-                <span>超时 {tool.timeout_seconds || 10}s</span>
+                <span>超时 {tool.timeout_seconds || (isMcp ? 30 : 10)}s</span>
                 {isMcp && (
                   <>
                     <span style={{ color: toolTheme.muted }}>|</span>
@@ -5200,6 +5202,7 @@ function ToolTestResult({ result }) {
     <div className={result.ok ? 'tool-test-result ok' : 'tool-test-result'}>
       <strong>{result.ok ? '测试成功' : '测试失败'}</strong>
       <span>{result.tool_type || 'tool'} · {result.status_code || '-'} · {result.latency_ms ?? '-'}ms · {result.content_type || '-'}</span>
+      {!result.ok && result.hint && <small className="tool-test-hint">{result.hint}</small>}
       <pre>{result.result_preview || result.error || result.message || JSON.stringify(result, null, 2)}</pre>
     </div>
   );
@@ -6224,13 +6227,28 @@ function toolFormPayload(form, { includeSecret = false } = {}) {
     body_schema: hasBodySchema ? parseJsonField(form.body_schema, 'body_schema') : {},
     auth,
     response_path: isHttp ? String(form.response_path || '$').trim() || '$' : '$',
-    timeout_seconds: (isHttp || isMcp) && Number.isFinite(timeout) ? Math.min(30, Math.max(1, timeout)) : 10,
+    timeout_seconds: (isHttp || isMcp) ? clampToolTimeout(isMcp ? 'mcp' : 'http', timeout) : 10,
     mcp: isMcp ? {
       transport: mcpTransportValue(form.mcp_transport, form.url),
       tool_name: String(form.mcp_tool_name || '').trim(),
       input_schema: parseJsonField(form.mcp_input_schema || '{}', 'mcp.input_schema'),
     } : {},
   };
+}
+
+function toolTimeoutMax(type) {
+  return type === 'mcp' ? 120 : 30;
+}
+
+function toolTimeoutDefault(type) {
+  return type === 'mcp' ? 30 : 10;
+}
+
+function clampToolTimeout(type, value) {
+  const numeric = Number(value);
+  const fallback = toolTimeoutDefault(type);
+  const max = toolTimeoutMax(type);
+  return Number.isFinite(numeric) ? Math.min(max, Math.max(1, numeric)) : fallback;
 }
 
 function mcpTransportValue(value, url = '') {

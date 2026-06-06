@@ -5,6 +5,7 @@ import inspect
 import json
 import urllib.parse
 from collections.abc import Sequence
+from datetime import timedelta
 from typing import Any
 
 import httpx
@@ -45,6 +46,7 @@ def call_mcp_tool(
     transport: str = "streamable_http",
     timeout_seconds: int = 15,
 ) -> dict:
+    timeout_seconds = _normalize_timeout(timeout_seconds)
     return asyncio.run(
         _call_mcp_tool(
             server_url,
@@ -59,6 +61,7 @@ def call_mcp_tool(
 
 async def _discover_mcp_tools(server_url: str, *, headers: dict[str, str], transport: str, timeout_seconds: int) -> list[dict]:
     _require_sdk(transport)
+    timeout_seconds = _normalize_timeout(timeout_seconds)
     await _ensure_server_reachable(server_url, timeout_seconds=timeout_seconds)
     try:
         async with _session(server_url, headers=headers, transport=transport, timeout_seconds=timeout_seconds) as session:
@@ -90,10 +93,15 @@ async def _call_mcp_tool(
     timeout_seconds: int,
 ) -> dict:
     _require_sdk(transport)
+    timeout_seconds = _normalize_timeout(timeout_seconds)
     await _ensure_server_reachable(server_url, timeout_seconds=timeout_seconds)
     try:
         async with _session(server_url, headers=headers, transport=transport, timeout_seconds=timeout_seconds) as session:
-            result = await session.call_tool(tool_name, arguments=arguments)
+            result = await session.call_tool(
+                tool_name,
+                arguments=arguments,
+                read_timeout_seconds=timedelta(seconds=timeout_seconds),
+            )
     except MCPClientError:
         raise
     except BaseException as exc:
@@ -132,6 +140,14 @@ def _require_sdk(transport: str = "streamable_http") -> None:
         return
     if streamable_http_client is None:
         raise MCPClientError("MCP Streamable HTTP client is not available. Update the 'mcp' package in the backend environment.")
+
+
+def _normalize_timeout(timeout_seconds: int | float | None) -> int:
+    try:
+        timeout = int(timeout_seconds or 15)
+    except (TypeError, ValueError):
+        timeout = 15
+    return max(1, timeout)
 
 
 def _jsonable(value):
@@ -267,16 +283,23 @@ def _raise_mcp_client_error(exc: BaseException) -> None:
 def _describe_mcp_exception(exc: BaseException) -> str:
     messages = _collect_exception_messages(exc)
     lowered = [message.lower() for message in messages]
+    walked = list(_walk_exception_graph(exc))
     if any("all connection attempts failed" in message for message in lowered) or any(
-        isinstance(item, httpx.ConnectError) for item in _walk_exception_graph(exc)
+        isinstance(item, httpx.ConnectError) for item in walked
     ):
         return "Unable to connect to the MCP server"
-    if any("timed out" in message or "timeout" in message for message in lowered):
+    if any("timed out" in message or "timeout" in message for message in lowered) or any(
+        isinstance(item, (httpx.TimeoutException, TimeoutError, asyncio.TimeoutError)) for item in walked
+    ):
         return "MCP server request timed out"
     if any("unexpected content type" in message for message in lowered):
         return "MCP server returned an unexpected response content type. Confirm the MCP transport matches the endpoint, for example sse for /sse or streamable_http for /mcp."
+    if any("connection closed" in message or "brokenresourceerror" in message for message in lowered) or any(
+        item.__class__.__name__ in {"BrokenResourceError", "ClosedResourceError", "EndOfStream"} for item in walked
+    ):
+        return "MCP server connection closed before the tool returned. This is often caused by the configured timeout being too short."
     if isinstance(exc, asyncio.CancelledError) or any("cancelled via cancel scope" in message for message in lowered):
-        return "Unable to connect to the MCP server"
+        return "MCP server request timed out"
     for message in messages:
         if message and not message.startswith("unhandled errors in a taskgroup"):
             return message

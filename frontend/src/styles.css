@@ -2090,6 +2090,11 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
   color: inherit;
   font-size: 12px;
 }
+.tool-test-result .tool-test-hint {
+  color: inherit;
+  font-size: 12px;
+  line-height: 1.55;
+}
 .tool-test-result pre {
   max-height: 150px;
   margin: 0;

@@ -148,7 +148,7 @@ class ToolRequest(BaseModel):
     body_schema: dict = {}
     auth: dict = {}
     response_path: str = "$"
-    timeout_seconds: int = Field(default=10, ge=1, le=30)
+    timeout_seconds: int | None = Field(default=None, ge=1, le=120)
     search_options: dict = {}
     mcp: dict = {}
 
@@ -167,7 +167,7 @@ class ToolUpdateRequest(BaseModel):
     body_schema: dict | None = None
     auth: dict | None = None
     response_path: str | None = None
-    timeout_seconds: int | None = Field(default=None, ge=1, le=30)
+    timeout_seconds: int | None = Field(default=None, ge=1, le=120)
     search_options: dict | None = None
     mcp: dict | None = None
 
@@ -178,7 +178,7 @@ class MCPToolDiscoverRequest(BaseModel):
     transport: str = Field(default="", max_length=40)
     url: str = Field(min_length=1, max_length=1000)
     auth: dict = {}
-    timeout_seconds: int = Field(default=10, ge=1, le=30)
+    timeout_seconds: int = Field(default=30, ge=1, le=120)
 
 
 class ToolTestRequest(BaseModel):

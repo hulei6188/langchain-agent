@@ -37,6 +37,10 @@ TOOL_TYPES = {"builtin", "builtin_search", "http", "mcp"}
 HTTP_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE"}
 AUTH_TYPES = {"none", "bearer", "header", "query"}
 MCP_TRANSPORTS = {"streamable_http", "sse"}
+DEFAULT_HTTP_TIMEOUT_SECONDS = 10
+MAX_HTTP_TIMEOUT_SECONDS = 30
+DEFAULT_MCP_TIMEOUT_SECONDS = 30
+MAX_MCP_TIMEOUT_SECONDS = 120
 CLOUD_METADATA_HOSTS = {"169.254.169.254", "metadata.google.internal"}
 MCP_HTTPS_HOST_ALLOWLIST = {"dashscope.aliyuncs.com"}
 
@@ -456,9 +460,7 @@ def discover_mcp_tools(payload: dict, *, existing_tool: Tool | None = None) -> l
     auth_type = str(auth.get("type", "none")).strip() or "none"
     if auth_type not in AUTH_TYPES:
         raise ValueError("Unsupported auth type")
-    timeout = int(data.get("timeout_seconds", 10))
-    if timeout < 1 or timeout > 30:
-        raise ValueError("Timeout must be between 1 and 30 seconds")
+    timeout = _timeout_seconds(data.get("timeout_seconds"), default=DEFAULT_MCP_TIMEOUT_SECONDS, maximum=MAX_MCP_TIMEOUT_SECONDS, label="MCP timeout")
     secret = str(auth.get("secret") or "").strip()
     if not secret and existing_tool and existing_tool.encrypted_secret and auth_type != "none":
         secret = decrypt_api_key(existing_tool.encrypted_secret)
@@ -510,13 +512,16 @@ def test_tool(tool: Tool, *, input_data: dict | None = None, body=None) -> dict:
             "result_json": output.get("result_json"),
         }
     except ValueError as exc:
+        message = str(exc)
+        error_code = _error_code(message)
         return {
             "ok": False,
             "tool_id": tool.id,
             "tool_type": tool.type,
             "latency_ms": int((time.monotonic() - started) * 1000),
-            "error_code": _error_code(str(exc)),
-            "message": str(exc),
+            "error_code": error_code,
+            "message": message,
+            **({"hint": _tool_timeout_hint(tool)} if error_code in {"timeout", "mcp_timeout"} else {}),
         }
 
 
@@ -599,9 +604,12 @@ def _tool_fields(payload: dict, *, partial: bool = False, existing: Tool | None 
         if auth.get("clear_secret"):
             result["clear_secret"] = True
         result["response_path"] = str(data.get("response_path", existing.response_path if existing else "$")).strip() or "$"
-        timeout = int(data.get("timeout_seconds", existing.timeout_seconds if existing else 10))
-        if timeout < 1 or timeout > 30:
-            raise ValueError("Timeout must be between 1 and 30 seconds")
+        timeout = _timeout_seconds(
+            data.get("timeout_seconds", existing.timeout_seconds if existing else DEFAULT_HTTP_TIMEOUT_SECONDS),
+            default=DEFAULT_HTTP_TIMEOUT_SECONDS,
+            maximum=MAX_HTTP_TIMEOUT_SECONDS,
+            label="HTTP timeout",
+        )
         result["timeout_seconds"] = timeout
         result["schema"] = {}
     elif tool_type == "mcp":
@@ -623,9 +631,12 @@ def _tool_fields(payload: dict, *, partial: bool = False, existing: Tool | None 
             result["secret"] = secret
         if auth.get("clear_secret"):
             result["clear_secret"] = True
-        timeout = int(data.get("timeout_seconds", existing.timeout_seconds if existing else 10))
-        if timeout < 1 or timeout > 30:
-            raise ValueError("Timeout must be between 1 and 30 seconds")
+        timeout = _timeout_seconds(
+            data.get("timeout_seconds", existing.timeout_seconds if existing else DEFAULT_MCP_TIMEOUT_SECONDS),
+            default=DEFAULT_MCP_TIMEOUT_SECONDS,
+            maximum=MAX_MCP_TIMEOUT_SECONDS,
+            label="MCP timeout",
+        )
         result["timeout_seconds"] = timeout
         existing_mcp = _tool_mcp_config(existing)
         mcp = _auth_value(data.get("mcp")) if "mcp" in data else {}
@@ -655,7 +666,7 @@ def _tool_fields(payload: dict, *, partial: bool = False, existing: Tool | None 
         result.setdefault("auth_header_name", "Authorization")
         result.setdefault("auth_query_name", "")
         result.setdefault("response_path", "$")
-        result.setdefault("timeout_seconds", 10)
+        result.setdefault("timeout_seconds", DEFAULT_HTTP_TIMEOUT_SECONDS)
         result.setdefault("schema", {})
     return result
 
@@ -717,7 +728,10 @@ def _execute_mcp_tool(tool: Tool, context: dict) -> dict:
             timeout_seconds=tool.timeout_seconds,
         )
     except MCPClientError as exc:
-        raise ValueError(f"MCP tool request failed: {_preview(str(exc), 300)}") from exc
+        detail = _preview(str(exc), 300)
+        if "timed out" in detail.lower() or "timeout" in detail.lower() or "connection closed before the tool returned" in detail.lower():
+            raise ValueError(f"MCP tool request timed out after {tool.timeout_seconds}s: {detail}") from exc
+        raise ValueError(f"MCP tool request failed: {detail}") from exc
     return {
         "tool": tool.name,
         "tool_type": "mcp",
@@ -1559,6 +1573,16 @@ def _auth_value(value) -> dict:
     return value if isinstance(value, dict) else {}
 
 
+def _timeout_seconds(value, *, default: int, maximum: int, label: str) -> int:
+    try:
+        timeout = int(value if value is not None else default)
+    except (TypeError, ValueError):
+        timeout = default
+    if timeout < 1 or timeout > maximum:
+        raise ValueError(f"{label} must be between 1 and {maximum} seconds")
+    return timeout
+
+
 def _dict_value(value) -> dict:
     return value if isinstance(value, dict) else {}
 
@@ -1796,6 +1820,8 @@ def _tool_parameters_schema(tool: Tool) -> dict:
 
 
 def _error_code(message: str) -> str:
+    if "MCP" in message and ("timed out" in message or "timeout" in message or "connection closed before the tool returned" in message):
+        return "mcp_timeout"
     if "HTTPS" in message:
         return "https_required"
     if "blocked" in message:
@@ -1803,3 +1829,12 @@ def _error_code(message: str) -> str:
     if "Timeout" in message or "timeout" in message:
         return "timeout"
     return "tool_error"
+
+
+def _tool_timeout_hint(tool: Tool) -> str:
+    if tool.type == "mcp":
+        current = int(tool.timeout_seconds or DEFAULT_MCP_TIMEOUT_SECONDS)
+        suggested = min(MAX_MCP_TIMEOUT_SECONDS, max(DEFAULT_MCP_TIMEOUT_SECONDS, current * 2))
+        return f"该 MCP 工具可能执行较慢。当前超时为 {current}s，建议将 timeout_seconds 调整到 {suggested}s 后重试；阿里云百炼 WebParser 等网页解析工具常见耗时超过 10s。"
+    current = int(tool.timeout_seconds or DEFAULT_HTTP_TIMEOUT_SECONDS)
+    return f"当前超时为 {current}s。请检查目标服务响应时间，或适当调高 timeout_seconds。"
