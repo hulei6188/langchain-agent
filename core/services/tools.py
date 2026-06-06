@@ -36,6 +36,7 @@ MAX_RESPONSE_BYTES = 1024 * 1024
 TOOL_TYPES = {"builtin", "builtin_search", "http", "mcp"}
 HTTP_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE"}
 AUTH_TYPES = {"none", "bearer", "header", "query"}
+MCP_TRANSPORTS = {"streamable_http", "sse"}
 CLOUD_METADATA_HOSTS = {"169.254.169.254", "metadata.google.internal"}
 MCP_HTTPS_HOST_ALLOWLIST = {"dashscope.aliyuncs.com"}
 
@@ -449,6 +450,8 @@ def discover_mcp_tools(payload: dict, *, existing_tool: Tool | None = None) -> l
     data = {key: value for key, value in payload.items() if value is not None}
     url = str(data.get("url", "")).strip()
     _validate_safe_mcp_url(url)
+    existing_mcp = _tool_mcp_config(existing_tool)
+    transport = _mcp_transport_value(data.get("transport"), url=url, existing=existing_mcp.get("transport"))
     auth = _auth_value(data.get("auth"))
     auth_type = str(auth.get("type", "none")).strip() or "none"
     if auth_type not in AUTH_TYPES:
@@ -467,7 +470,7 @@ def discover_mcp_tools(payload: dict, *, existing_tool: Tool | None = None) -> l
         secret=secret,
     )
     try:
-        remote_tools = discover_mcp_tools_client(target_url, headers=headers, timeout_seconds=timeout)
+        remote_tools = discover_mcp_tools_client(target_url, headers=headers, transport=transport, timeout_seconds=timeout)
     except MCPClientError as exc:
         raise ValueError(f"MCP tool discovery failed: {_preview(str(exc), 300)}") from exc
     server_label = str(data.get("server_label") or "").strip() or urllib.parse.urlparse(url).netloc
@@ -483,7 +486,7 @@ def discover_mcp_tools(payload: dict, *, existing_tool: Tool | None = None) -> l
                 "description": str(remote.get("description") or "").strip(),
                 "server_label": server_label,
                 "mcp": {
-                    "transport": "streamable_http",
+                    "transport": transport,
                     "tool_name": remote_name,
                     "input_schema": _mcp_input_schema_value(remote.get("input_schema")),
                 },
@@ -628,9 +631,7 @@ def _tool_fields(payload: dict, *, partial: bool = False, existing: Tool | None 
         mcp = _auth_value(data.get("mcp")) if "mcp" in data else {}
         if "server_label" not in result:
             result["server_label"] = str(data.get("server_label", existing.server_label if existing else "")).strip()
-        transport = str(mcp.get("transport", existing_mcp.get("transport", "streamable_http"))).strip().lower() or "streamable_http"
-        if transport != "streamable_http":
-            raise ValueError("Unsupported MCP transport")
+        transport = _mcp_transport_value(mcp.get("transport"), url=str(result.get("url") or data.get("url") or (existing.url if existing else "")), existing=existing_mcp.get("transport"))
         remote_tool_name = str(mcp.get("tool_name", existing_mcp.get("tool_name", data.get("name", "")))).strip()
         if not remote_tool_name:
             raise ValueError("MCP tool_name is required")
@@ -712,6 +713,7 @@ def _execute_mcp_tool(tool: Tool, context: dict) -> dict:
             remote_tool_name,
             arguments=arguments,
             headers=headers,
+            transport=str(mcp.get("transport") or "streamable_http"),
             timeout_seconds=tool.timeout_seconds,
         )
     except MCPClientError as exc:
@@ -1575,10 +1577,26 @@ def _tool_mcp_config(tool: Tool | None) -> dict:
     if not isinstance(mcp, dict):
         return {}
     return {
-        "transport": str(mcp.get("transport") or "streamable_http").strip() or "streamable_http",
+        "transport": str(mcp.get("transport") or "streamable_http").strip().lower() or "streamable_http",
         "tool_name": str(mcp.get("tool_name") or "").strip(),
         "input_schema": _mcp_input_schema_value(mcp.get("input_schema")),
     }
+
+
+def _mcp_transport_value(value, *, url: str = "", existing: str | None = None) -> str:
+    raw = str(value or "").strip().lower()
+    if raw in {"streamable-http", "streamablehttp"}:
+        raw = "streamable_http"
+    if not raw:
+        existing_value = str(existing or "").strip().lower()
+        if existing_value in MCP_TRANSPORTS:
+            raw = existing_value
+        else:
+            path = urllib.parse.urlparse(str(url or "")).path.lower().rstrip("/")
+            raw = "sse" if path.endswith("/sse") or path == "sse" else "streamable_http"
+    if raw not in MCP_TRANSPORTS:
+        raise ValueError("Unsupported MCP transport")
+    return raw
 
 
 def _validate_mcp_input(schema, arguments: dict, *, path: str = "") -> None:

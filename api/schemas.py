@@ -175,6 +175,7 @@ class ToolUpdateRequest(BaseModel):
 class MCPToolDiscoverRequest(BaseModel):
     tool_id: int | None = None
     server_label: str = Field(default="", max_length=160)
+    transport: str = Field(default="", max_length=40)
     url: str = Field(min_length=1, max_length=1000)
     auth: dict = {}
     timeout_seconds: int = Field(default=10, ge=1, le=30)

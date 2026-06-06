@@ -11,12 +11,14 @@ import httpx
 
 try:
     from mcp import ClientSession
+    from mcp.client.sse import sse_client
     try:
         from mcp.client.streamable_http import streamable_http_client
     except Exception:
         from mcp.client.streamable_http import streamablehttp_client as streamable_http_client
 except Exception:  # pragma: no cover - optional dependency at runtime
     ClientSession = None
+    sse_client = None
     streamable_http_client = None
 
 
@@ -28,9 +30,10 @@ def discover_mcp_tools(
     server_url: str,
     *,
     headers: dict[str, str] | None = None,
+    transport: str = "streamable_http",
     timeout_seconds: int = 15,
 ) -> list[dict]:
-    return asyncio.run(_discover_mcp_tools(server_url, headers=headers or {}, timeout_seconds=timeout_seconds))
+    return asyncio.run(_discover_mcp_tools(server_url, headers=headers or {}, transport=transport, timeout_seconds=timeout_seconds))
 
 
 def call_mcp_tool(
@@ -39,6 +42,7 @@ def call_mcp_tool(
     arguments: dict[str, Any] | None = None,
     *,
     headers: dict[str, str] | None = None,
+    transport: str = "streamable_http",
     timeout_seconds: int = 15,
 ) -> dict:
     return asyncio.run(
@@ -47,16 +51,17 @@ def call_mcp_tool(
             tool_name,
             arguments=arguments or {},
             headers=headers or {},
+            transport=transport,
             timeout_seconds=timeout_seconds,
         )
     )
 
 
-async def _discover_mcp_tools(server_url: str, *, headers: dict[str, str], timeout_seconds: int) -> list[dict]:
-    _require_sdk()
+async def _discover_mcp_tools(server_url: str, *, headers: dict[str, str], transport: str, timeout_seconds: int) -> list[dict]:
+    _require_sdk(transport)
     await _ensure_server_reachable(server_url, timeout_seconds=timeout_seconds)
     try:
-        async with _session(server_url, headers=headers, timeout_seconds=timeout_seconds) as session:
+        async with _session(server_url, headers=headers, transport=transport, timeout_seconds=timeout_seconds) as session:
             result = await session.list_tools()
     except MCPClientError:
         raise
@@ -81,12 +86,13 @@ async def _call_mcp_tool(
     *,
     arguments: dict[str, Any],
     headers: dict[str, str],
+    transport: str,
     timeout_seconds: int,
 ) -> dict:
-    _require_sdk()
+    _require_sdk(transport)
     await _ensure_server_reachable(server_url, timeout_seconds=timeout_seconds)
     try:
-        async with _session(server_url, headers=headers, timeout_seconds=timeout_seconds) as session:
+        async with _session(server_url, headers=headers, transport=transport, timeout_seconds=timeout_seconds) as session:
             result = await session.call_tool(tool_name, arguments=arguments)
     except MCPClientError:
         raise
@@ -117,9 +123,15 @@ async def _call_mcp_tool(
     }
 
 
-def _require_sdk() -> None:
-    if ClientSession is None or streamable_http_client is None:
+def _require_sdk(transport: str = "streamable_http") -> None:
+    if ClientSession is None:
         raise MCPClientError("MCP Python SDK is not installed. Add the 'mcp' package to the backend environment.")
+    if transport == "sse":
+        if sse_client is None:
+            raise MCPClientError("MCP SSE client is not available. Update the 'mcp' package in the backend environment.")
+        return
+    if streamable_http_client is None:
+        raise MCPClientError("MCP Streamable HTTP client is not available. Update the 'mcp' package in the backend environment.")
 
 
 def _jsonable(value):
@@ -160,9 +172,10 @@ def _content_text(block) -> str:
 
 
 class _SessionContext:
-    def __init__(self, server_url: str, *, headers: dict[str, str], timeout_seconds: int) -> None:
+    def __init__(self, server_url: str, *, headers: dict[str, str], transport: str, timeout_seconds: int) -> None:
         self.server_url = server_url
         self.headers = headers
+        self.transport = transport
         self.timeout_seconds = timeout_seconds
         self._http_client: httpx.AsyncClient | None = None
         self._transport_cm = None
@@ -170,7 +183,14 @@ class _SessionContext:
 
     async def __aenter__(self):
         try:
-            if _transport_supports_http_client():
+            if self.transport == "sse":
+                self._transport_cm = sse_client(
+                    self.server_url,
+                    headers=self.headers or None,
+                    timeout=self.timeout_seconds,
+                    sse_read_timeout=self.timeout_seconds,
+                )
+            elif _transport_supports_http_client():
                 self._http_client = httpx.AsyncClient(
                     headers=self.headers or None,
                     follow_redirects=True,
@@ -183,7 +203,8 @@ class _SessionContext:
                     headers=self.headers or None,
                     timeout=self.timeout_seconds,
                 )
-            read_stream, write_stream, _ = await self._transport_cm.__aenter__()
+            streams = await self._transport_cm.__aenter__()
+            read_stream, write_stream = streams[0], streams[1]
             self._session_cm = ClientSession(read_stream, write_stream)
             session = await self._session_cm.__aenter__()
             await session.initialize()
@@ -222,8 +243,9 @@ class _SessionContext:
         self._http_client = None
 
 
-def _session(server_url: str, *, headers: dict[str, str], timeout_seconds: int) -> _SessionContext:
-    return _SessionContext(server_url, headers=headers, timeout_seconds=timeout_seconds)
+def _session(server_url: str, *, headers: dict[str, str], transport: str, timeout_seconds: int) -> _SessionContext:
+    normalized_transport = str(transport or "streamable_http").strip().lower() or "streamable_http"
+    return _SessionContext(server_url, headers=headers, transport=normalized_transport, timeout_seconds=timeout_seconds)
 
 
 def _transport_supports_http_client() -> bool:
@@ -251,6 +273,8 @@ def _describe_mcp_exception(exc: BaseException) -> str:
         return "Unable to connect to the MCP server"
     if any("timed out" in message or "timeout" in message for message in lowered):
         return "MCP server request timed out"
+    if any("unexpected content type" in message for message in lowered):
+        return "MCP server returned an unexpected response content type. Confirm the MCP transport matches the endpoint, for example sse for /sse or streamable_http for /mcp."
     if isinstance(exc, asyncio.CancelledError) or any("cancelled via cancel scope" in message for message in lowered):
         return "Unable to connect to the MCP server"
     for message in messages:

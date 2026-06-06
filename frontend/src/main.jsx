@@ -1453,7 +1453,8 @@ function App() {
   }
 
   function openBuilder(agentId = activeAgentId) {
-    if (agentId && agentId !== activeAgentId) setActiveAgentId(agentId);
+    const nextAgentId = typeof agentId === 'string' || typeof agentId === 'number' ? agentId : activeAgentId;
+    if (nextAgentId && nextAgentId !== activeAgentId) setActiveAgentId(nextAgentId);
     setView('builder');
     setActiveNav('agents');
   }
@@ -3432,7 +3433,7 @@ function ToolsHome({ createToolConfig, discoverMcpTools, deleteToolConfig, isDar
           <h1>工具</h1>
           <p>管理可绑定到智能体的内置搜索、HTTP 工具和 MCP 工具。密钥只在保存时提交，保存后仅显示 has_secret 状态。</p>
         </div>
-        <button className="primary" type="button" onClick={openBuilder}><Bot size={16} />打开 Builder</button>
+        <button className="primary" type="button" onClick={() => openBuilder()}><Bot size={16} />打开 Builder</button>
       </header>
       <ToolsPanel
         createToolConfig={createToolConfig}
@@ -4285,7 +4286,7 @@ function ToolsPanel({ createToolConfig, discoverMcpTools, deleteToolConfig, isDa
       timeout_seconds: Number.isFinite(timeout) ? Math.min(30, Math.max(1, timeout)) : 10,
       enabled: Boolean(form.enabled),
       mcp: {
-        transport: tool?.mcp?.transport || 'streamable_http',
+        transport: mcpTransportValue(form.mcp_transport, form.url),
         tool_name: tool?.mcp?.tool_name || tool?.name || '',
         input_schema: tool?.mcp?.input_schema || { type: 'object', properties: {} },
       },
@@ -4374,6 +4375,7 @@ function ToolsPanel({ createToolConfig, discoverMcpTools, deleteToolConfig, isDa
       name: item?.name || form.name,
       label: item?.label || form.label,
       description: item?.description || form.description,
+      mcp_transport: nextMcp.transport || form.mcp_transport,
       mcp_tool_name: nextMcp.tool_name || item?.name || form.mcp_tool_name,
       mcp_input_schema: JSON.stringify(nextMcp.input_schema || { type: 'object', properties: {} }, null, 2),
       server_label: form.server_label || item?.server_label,
@@ -4392,6 +4394,7 @@ function ToolsPanel({ createToolConfig, discoverMcpTools, deleteToolConfig, isDa
     const data = await discoverMcpTools({
       tool_id: editingTool?.id || null,
       server_label: String(form.server_label || '').trim(),
+      transport: mcpTransportValue(form.mcp_transport, form.url),
       url: String(form.url || '').trim(),
       auth,
       timeout_seconds: Math.min(30, Math.max(1, Number(form.timeout_seconds) || 10)),
@@ -4416,8 +4419,10 @@ function ToolsPanel({ createToolConfig, discoverMcpTools, deleteToolConfig, isDa
           setNotice(`已读取 ${items.length} 个 MCP 工具定义。`);
         } else {
           const serverLabel = form.server_label || items[0]?.server_label;
+          const transport = items[0]?.mcp?.transport || mcpTransportValue(form.mcp_transport, form.url);
           updateToolForm({
             server_label: serverLabel,
+            mcp_transport: transport,
             label: form.label === MCP_TOOL_PRESET.label && serverLabel ? serverLabel : form.label,
           });
           setNotice(`已读取 ${items.length} 个 MCP 工具定义，保存时将默认添加全部。`);
@@ -4508,7 +4513,7 @@ function ToolsPanel({ createToolConfig, discoverMcpTools, deleteToolConfig, isDa
       <div className="panel-title-row">
         <div>
           <h3>工具</h3>
-          <p>HTTP 工具按 Day2 契约提交 method、url、schema、auth、response_path 和 timeout_seconds；MCP 工具通过 Streamable HTTP 连接远端 MCP Server。</p>
+          <p>HTTP 工具按 Day2 契约提交 method、url、schema、auth、response_path 和 timeout_seconds；MCP 工具可通过 Streamable HTTP 或 SSE 连接远端 MCP Server。</p>
         </div>
         <div className="panel-actions">
           <span className="soft-pill">{toolDisplayEntries.length} 个工具项</span>
@@ -4561,7 +4566,27 @@ function ToolsPanel({ createToolConfig, discoverMcpTools, deleteToolConfig, isDa
                 {(isHttpForm || isMcpForm) && (
                   <label className="field-stack tool-url-field">
                     <span>url</span>
-                    <input value={form.url} onChange={(event) => updateToolForm({ url: event.target.value })} placeholder={isMcpForm ? 'http://127.0.0.1:8001/mcp' : 'https://api.example.com/weather'} />
+                    <input
+                      value={form.url}
+                      onChange={(event) => {
+                        const nextUrl = event.target.value;
+                        const inferredTransport = mcpTransportValue('', nextUrl);
+                        updateToolForm({
+                          url: nextUrl,
+                          ...(isMcpForm && inferredTransport === 'sse' ? { mcp_transport: inferredTransport } : {}),
+                        });
+                      }}
+                      placeholder={isMcpForm ? 'https://dashscope.aliyuncs.com/api/v1/mcps/WebParser/sse' : 'https://api.example.com/weather'}
+                    />
+                  </label>
+                )}
+                {isMcpForm && (
+                  <label className="field-stack">
+                    <span>mcp.transport</span>
+                    <select value={mcpTransportValue(form.mcp_transport, form.url)} onChange={(event) => updateToolForm({ mcp_transport: event.target.value })}>
+                      <option value="streamable_http">streamable_http</option>
+                      <option value="sse">sse</option>
+                    </select>
                   </label>
                 )}
                 {isHttpForm && (
@@ -4721,7 +4746,7 @@ function ToolsPanel({ createToolConfig, discoverMcpTools, deleteToolConfig, isDa
                   <span className="tool-security-note">HTTP 工具必须使用 https://，后端负责阻断 localhost、私网和 metadata 地址。</span>
                 )}
                 {isMcpForm && (
-                  <span className="tool-security-note">MCP 仅支持 Streamable HTTP；`http://` 仅允许本机 localhost，公网地址请使用 `https://`。</span>
+                  <span className="tool-security-note">MCP 支持 Streamable HTTP 和 SSE；`http://` 仅允许本机 localhost，公网地址请使用 `https://`。</span>
                 )}
               </div>
               <footer className="dialog-actions">
@@ -6186,11 +6211,25 @@ function toolFormPayload(form, { includeSecret = false } = {}) {
     response_path: isHttp ? String(form.response_path || '$').trim() || '$' : '$',
     timeout_seconds: (isHttp || isMcp) && Number.isFinite(timeout) ? Math.min(30, Math.max(1, timeout)) : 10,
     mcp: isMcp ? {
-      transport: String(form.mcp_transport || 'streamable_http').trim() || 'streamable_http',
+      transport: mcpTransportValue(form.mcp_transport, form.url),
       tool_name: String(form.mcp_tool_name || '').trim(),
       input_schema: parseJsonField(form.mcp_input_schema || '{}', 'mcp.input_schema'),
     } : {},
   };
+}
+
+function mcpTransportValue(value, url = '') {
+  const raw = String(value || '').trim().toLowerCase();
+  if (raw === 'sse' || raw === 'streamable_http') return raw;
+  if (raw === 'streamable-http' || raw === 'streamablehttp') return 'streamable_http';
+  const path = (() => {
+    try {
+      return new URL(String(url || ''), window.location.origin).pathname.toLowerCase().replace(/\/+$/, '');
+    } catch {
+      return String(url || '').split('?')[0].split('#')[0].toLowerCase().replace(/\/+$/, '');
+    }
+  })();
+  return path.endsWith('/sse') || path === 'sse' ? 'sse' : 'streamable_http';
 }
 
 function uniqueToolName(name, usedNames) {
@@ -6219,6 +6258,7 @@ function formWithMcpDiscovery(form, item, name) {
     name: name || item?.name || form.name,
     label: item?.label || item?.name || form.label,
     description: item?.description || form.description,
+    mcp_transport: nextMcp.transport || form.mcp_transport,
     mcp_tool_name: nextMcp.tool_name || item?.label || item?.name || form.mcp_tool_name,
     mcp_input_schema: JSON.stringify(nextMcp.input_schema || { type: 'object', properties: {} }, null, 2),
     server_label: form.server_label || item?.server_label,
