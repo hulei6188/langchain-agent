@@ -1214,6 +1214,7 @@ function App() {
         content: '',
         pending: true,
         reasoning: '',
+        reasoningTimeline: [],
         reasoningPending: effectiveThinkingEnabled,
         reasoningStartedAt: effectiveThinkingEnabled ? Date.now() : null,
         reasoningFinishedAt: null,
@@ -1330,13 +1331,13 @@ function App() {
       setMessages((items) => {
         const next = [...items];
         const last = next[next.length - 1];
-        if (last?.role === 'assistant' && (last.reasoningPending || last.reasoningStartedAt)) {
-          next[next.length - 1] = {
+        if (last?.role === 'assistant') {
+          next[next.length - 1] = appendReasoningTimelineItem({
             ...last,
             reasoningPending: true,
             reasoningStartedAt: last.reasoningStartedAt || Date.now(),
             reasoning: (last.reasoning || '') + (data.content || ''),
-          };
+          }, data.content || '');
         }
         return next;
       });
@@ -1360,6 +1361,20 @@ function App() {
           ...data,
         },
       ].slice(-30));
+      if (event === 'tool_call' || event === 'search_status') {
+        setMessages((items) => {
+          const next = [...items];
+          const last = next[next.length - 1];
+          if (last?.role === 'assistant') {
+            next[next.length - 1] = appendToolTimelineItem({
+              ...last,
+              reasoningPending: last.reasoningPending || (last.pending && !last.content),
+              reasoningStartedAt: last.reasoningStartedAt || Date.now(),
+            }, data, event);
+          }
+          return next;
+        });
+      }
     }
     if (event === 'done') {
       setActiveSessionId(data.session_id || null);
@@ -6350,6 +6365,101 @@ function sampleValueForSchema(spec, key = '') {
   if (/(phone|mobile|tel|电话)/i.test(hint)) return '13800138000';
   if (spec.format === 'uri' || spec.format === 'url') return 'https://example.com';
   return 'example';
+}
+
+function appendReasoningTimelineItem(message, chunk) {
+  const content = String(chunk || '');
+  if (!content) return message;
+  const timeline = Array.isArray(message?.reasoningTimeline) ? [...message.reasoningTimeline] : [];
+  const last = timeline[timeline.length - 1];
+  if (last?.type === 'reasoning') {
+    timeline[timeline.length - 1] = { ...last, content: `${last.content || ''}${content}` };
+  } else {
+    timeline.push({
+      id: `reasoning-${Date.now()}-${timeline.length}`,
+      type: 'reasoning',
+      content,
+    });
+  }
+  return { ...message, reasoningTimeline: timeline };
+}
+
+function appendToolTimelineItem(message, eventData, eventType = 'tool_call') {
+  const item = formatToolTimelineLabel(eventData, eventType);
+  if (!item) return message;
+  const timeline = Array.isArray(message?.reasoningTimeline) ? [...message.reasoningTimeline] : [];
+  if (item.type === 'search') {
+    const lastSearchIndex = [...timeline].reverse().findIndex((entry) => entry?.type === 'search');
+    if (lastSearchIndex >= 0) {
+      const index = timeline.length - 1 - lastSearchIndex;
+      timeline[index] = { ...timeline[index], ...item, id: timeline[index].id || item.id };
+      return { ...message, reasoningTimeline: timeline };
+    }
+  }
+  timeline.push(item);
+  return { ...message, reasoningTimeline: timeline };
+}
+
+function formatToolTimelineLabel(eventData = {}, eventType = 'tool_call') {
+  if (eventType === 'search_status') {
+    if (eventData.requested === false && !eventData.matched_results) return null;
+    const count = Number(eventData.matched_results || 0);
+    const reason = String(eventData.reason || '');
+    const status = reason === 'web_search_unavailable' ? 'error' : count > 0 || reason === 'no_results' ? 'success' : 'running';
+    const title = count > 0 ? `搜索到 ${count} 个网页` : status === 'error' ? '搜索工具不可用' : '正在搜索网页';
+    const provider = eventData.provider ? String(eventData.provider) : '';
+    const query = eventData.query ? `关键词：${String(eventData.query)}` : '';
+    const summary = searchStatusSummary(eventData);
+    return {
+      id: `search-${Date.now()}`,
+      type: 'search',
+      status,
+      title,
+      meta: [provider, query].filter(Boolean).join(' · '),
+      latency: formatTimelineLatency(eventData.latency_ms),
+      summary,
+    };
+  }
+
+  const toolName = eventData.tool_name || eventData.tool || eventData.name || eventData.tool_id || 'tool';
+  const toolType = eventData.tool_type || eventData.type || 'tool';
+  const isSearchTool = toolType === 'builtin_search' || toolName === 'web_search';
+  const status = eventData.status === 'error' || eventData.error_code ? 'error' : eventData.status === 'running' ? 'running' : 'success';
+  return {
+    id: `${isSearchTool ? 'search' : 'tool'}-${Date.now()}-${toolName}`,
+    type: isSearchTool ? 'search' : 'tool',
+    status,
+    title: isSearchTool ? '调用联网搜索' : `调用 ${toolName}`,
+    meta: [toolType, status === 'error' ? '失败' : status === 'running' ? '运行中' : '完成'].filter(Boolean).join(' · '),
+    latency: formatTimelineLatency(eventData.latency_ms),
+    summary: compactTimelineText(eventData.result_preview || eventData.error || eventData.error_code || eventData.input_preview || ''),
+  };
+}
+
+function searchStatusSummary(eventData = {}) {
+  const items = Array.isArray(eventData.items) ? eventData.items : [];
+  const titles = items
+    .slice(0, 3)
+    .map((item) => item?.title || item?.url || '')
+    .filter(Boolean);
+  if (titles.length) return `结果：${titles.join('、')}`;
+  if (eventData.reason === 'no_results') return '未返回可用搜索结果。';
+  if (eventData.reason === 'web_search_unavailable') return '当前搜索运行时不可用。';
+  if (eventData.query) return `正在围绕“${eventData.query}”获取结果。`;
+  return '';
+}
+
+function formatTimelineLatency(value) {
+  const ms = Number(value);
+  if (!Number.isFinite(ms) || ms <= 0) return '';
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  return `${(ms / 1000).toFixed(ms < 10000 ? 1 : 0)}s`;
+}
+
+function compactTimelineText(value, limit = 180) {
+  const text = typeof value === 'string' ? value : JSON.stringify(value || '', null, 0);
+  const compact = String(text || '').replace(/\s+/g, ' ').trim();
+  return compact.length > limit ? `${compact.slice(0, limit)}...` : compact;
 }
 
 function debugEventSummary(event) {
