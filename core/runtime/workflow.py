@@ -43,9 +43,9 @@ from core.services.user_models import (
 from core.services import web_search as web_search_service
 
 
-MAX_TOOL_CALLS_PER_RUN = 50
-MAX_TOOL_ROUNDS_PER_RUN = 16
-MAX_TOOL_WALL_TIME_SECONDS = 180
+MAX_TOOL_CALLS_PER_RUN = 200
+MAX_TOOL_ROUNDS_PER_RUN = 50
+MAX_TOOL_WALL_TIME_SECONDS = 1800
 DSML_TOOL_MARKUP_ERROR = "工具调用格式异常，未能正确执行，请重试。"
 DSML_TOOL_CALL_START_MARKER = "<||DSML||tool_calls>"
 DSML_STREAM_GUARD_TAIL_CHARS = len(DSML_TOOL_CALL_START_MARKER) - 1
@@ -777,7 +777,7 @@ class WorkflowRunner:
             else:
                 break
 
-        final = yield from self._stream_chat_response(agent, messages, context, stream_content=True)
+        final = yield from self._stream_chat_response(agent, messages, context, tools=tool_schemas, stream_content=True)
         return {
             "draft": strip_or_block_leaked_tool_markup(final.content or ""),
             "draft_streamed": bool(final.content),
