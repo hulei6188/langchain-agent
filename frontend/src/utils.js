@@ -280,6 +280,7 @@ function defaultAgentForm() {
     temperature: 0.6,
     knowledge_base_ids: [],
     tool_ids: [],
+    skill_ids: [],
     suggested_questions: ['你想问啥？'],
     variables: [],
     memory: { enabled: false, strategy: 'session_summary', max_messages: 48 },
@@ -342,6 +343,47 @@ function defaultKnowledgeBaseForm() {
     name: '',
     description: '',
   };
+}
+
+function defaultSkillForm() {
+  return {
+    name: '',
+    description: '',
+    system_prompt: '',
+    icon: 'SK',
+    category: 'general',
+    tagsText: '',
+    tags: [],
+    tool_ids: [],
+    knowledge_base_ids: [],
+  };
+}
+
+function skillFormPayload(form) {
+  return {
+    name: String(form.name || '').trim(),
+    description: String(form.description || '').trim(),
+    system_prompt: String(form.system_prompt || '').trim(),
+    icon: String(form.icon || 'SK').trim() || 'SK',
+    category: String(form.category || 'general').trim() || 'general',
+    tags: String(form.tagsText || '')
+      .split(',')
+      .map((item) => item.trim())
+      .filter(Boolean),
+    tool_ids: numericIdList(form.tool_ids),
+    knowledge_base_ids: numericIdList(form.knowledge_base_ids),
+    rag_config: {},
+    memory_config: {},
+  };
+}
+
+function toggleSkill(id, form, setForm) {
+  const skillIds = form.skill_ids || [];
+  const exists = skillIds.includes(id);
+  setForm({
+    ...form,
+    skill_ids: exists ? skillIds.filter((item) => item !== id) : [...skillIds, id],
+  });
 }
 
 function formFromPromptTemplate(template, overrides = {}) {
@@ -873,6 +915,8 @@ export {
   filterPromptTemplates,
   defaultPromptTemplateForm,
   defaultKnowledgeBaseForm,
+  defaultSkillForm,
+  skillFormPayload,
   formFromPromptTemplate,
   promptTemplateFormPayload,
   insertPromptIntoAgent,
@@ -901,6 +945,7 @@ export {
   attachmentKind,
   modelCapabilityWarning,
   toggleKb,
+  toggleSkill,
   toggleTool,
   buildToolDisplayGroups,
   toolEntrySearchText,

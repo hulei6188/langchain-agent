@@ -8,6 +8,7 @@ import { BuilderView } from './views/BuilderView.jsx';
 import { AgentAvatar, UserAvatar } from './components/AgentAvatar.jsx';
 import { PromptTemplateDialog } from './components/PromptTemplateDialog.jsx';
 import { KnowledgeBaseDialog } from './components/KnowledgeBaseDialog.jsx';
+import { SkillDialog } from './components/SkillDialog.jsx';
 import { KnowledgeDocumentList, KnowledgeUploadBox } from './components/KnowledgeDocumentList.jsx';
 
 import {
@@ -88,6 +89,8 @@ import {
   filterPromptTemplates,
   defaultPromptTemplateForm,
   defaultKnowledgeBaseForm,
+  defaultSkillForm,
+  skillFormPayload,
   formFromPromptTemplate,
   promptTemplateFormPayload,
   insertPromptIntoAgent,
@@ -116,6 +119,7 @@ import {
   attachmentKind,
   modelCapabilityWarning,
   toggleKb,
+  toggleSkill,
   toggleTool,
   buildToolDisplayGroups,
   initVariableValues,
@@ -144,6 +148,7 @@ function App() {
   const [activeAgent, setActiveAgent] = useState(null);
   const [knowledgeBases, setKnowledgeBases] = useState([]);
   const [tools, setTools] = useState([]);
+  const [skills, setSkills] = useState([]);
   const [promptTemplates, setPromptTemplates] = useState([]);
   const [models, setModels] = useState([]);
   const [adminModels, setAdminModels] = useState([]);
@@ -350,11 +355,12 @@ function App() {
     setMe(profile.user);
     const ws = await api('/api/workspaces/current', { token });
     setWorkspace(ws.workspace);
-    const [health, agentList, kbList, toolList, modelList, userModelList, marketList, reviewList, promptTemplateList, memberList] = await Promise.all([
+    const [health, agentList, kbList, toolList, skillList, modelList, userModelList, marketList, reviewList, promptTemplateList, memberList] = await Promise.all([
       api('/api/health').catch(() => defaultRuntimeStatus()),
       api('/api/agents', { token }),
       api('/api/knowledge-bases', { token }),
       api('/api/tools', { token }),
+      api('/api/skills', { token }),
       api('/api/models', { token }),
       api('/api/user-models', { token }).catch(() => ({ items: [] })),
       api('/api/market/agents', { token }).catch(() => ({ items: [] })),
@@ -365,6 +371,7 @@ function App() {
     setAgents(agentList.items);
     setKnowledgeBases(kbList.items);
     setTools(toolList.items);
+    setSkills(skillList.items || []);
     setPromptTemplates(promptTemplateList.items || []);
     setModels(modelList.items || []);
     setAdminModels(modelList.items || []);
@@ -460,6 +467,7 @@ function App() {
       temperature: agent.temperature ?? 0.4,
       knowledge_base_ids: agent.knowledge_base_ids || [],
       tool_ids: (agent.tools || []).map((tool) => tool.id),
+      skill_ids: (agent.skills || []).map((s) => s.id),
       suggested_questions: agent.suggested_questions || [],
       variables: agent.variables || [],
       memory: agent.memory || { enabled: false, strategy: 'session_summary', max_messages: 12 },
@@ -814,6 +822,8 @@ function App() {
     if (!activeAgentId) return;
     const body = agentPayload(agentForm, { model: selectedDraftModel });
     await api(`/api/agents/${activeAgentId}`, { token, method: 'PATCH', body });
+    // Sync skills binding separately
+    await updateAgentSkills(activeAgentId, numericIdList(agentForm.skill_ids || []));
     await bootstrap();
     await loadAgent(activeAgentId);
   }
@@ -858,6 +868,44 @@ function App() {
     const data = await api('/api/knowledge-bases', { token, method: 'POST', body });
     await bootstrap();
     return data.knowledge_base;
+  }
+
+  async function createSkill(rawForm) {
+    const body = skillFormPayload(rawForm);
+    if (!body.name) {
+      throw new Error('技能名称不能为空。');
+    }
+    const data = await api('/api/skills', { token, method: 'POST', body });
+    await loadSkills();
+    return data.skill;
+  }
+
+  async function updateSkill(skillId, rawForm) {
+    const body = skillFormPayload(rawForm);
+    if (!body.name) {
+      throw new Error('技能名称不能为空。');
+    }
+    const data = await api(`/api/skills/${skillId}`, { token, method: 'PATCH', body });
+    await loadSkills();
+    return data.skill;
+  }
+
+  async function deleteSkill(skillId) {
+    await api(`/api/skills/${skillId}`, { token, method: 'DELETE' });
+    await loadSkills();
+  }
+
+  async function loadSkills() {
+    const data = await api('/api/skills', { token });
+    setSkills(data.items || []);
+  }
+
+  async function updateAgentSkills(agentId, skillIds) {
+    await api(`/api/agents/${agentId}/skills`, {
+      token,
+      method: 'PUT',
+      body: { skill_ids: skillIds },
+    });
   }
 
   async function updateKnowledgeBase(kbId, payload) {
@@ -1534,6 +1582,10 @@ function App() {
     copyBuiltinPromptTemplate,
     createAgent,
     createKnowledgeBase,
+    createSkill,
+    updateSkill,
+    deleteSkill,
+    updateAgentSkills,
     updateKnowledgeBase,
     createModelConfig,
     createPromptTemplate,
@@ -1602,6 +1654,7 @@ function App() {
     rejectReview,
     reviewItems,
     tools,
+    skills,
     toolDebugEvents,
     testToolConfig,
     testUserModelDraft,
@@ -1705,6 +1758,10 @@ function HomeView(props) {
     copyMarketAgent,
     createAgent,
     createKnowledgeBase,
+    createSkill,
+    updateSkill,
+    deleteSkill,
+    updateAgentSkills,
     updateKnowledgeBase,
     createModelConfig,
     createPromptTemplate,
@@ -1756,6 +1813,7 @@ function HomeView(props) {
     rejectReview,
     reviewItems,
     tools,
+    skills,
     testToolConfig,
     uploadChatAttachment,
     uploadingAttachment,
@@ -1899,6 +1957,7 @@ function HomeView(props) {
           <NavButton icon={<ServerCog size={17} />} label="我的模型" active={activeNav === 'my-models'} onClick={() => setActiveNav('my-models')} />
           <NavButton icon={<Layers size={17} />} label="资源库" active={activeNav === 'resources'} onClick={() => setActiveNav('resources')} />
           <NavButton icon={<Wand2 size={17} />} label="工具" active={activeNav === 'tools'} onClick={() => setActiveNav('tools')} />
+          <NavButton icon={<Sparkles size={17} />} label="技能" active={activeNav === 'skills'} onClick={() => setActiveNav('skills')} />
           {canManage && <NavButton icon={<Shield size={17} />} label="审核" active={activeNav === 'reviews'} onClick={() => setActiveNav('reviews')} />}
           {canManage && <NavButton icon={<KeyRound size={17} />} label="成员" active={activeNav === 'members'} onClick={() => setActiveNav('members')} />}
           <NavButton icon={<Database size={17} />} label="知识库" active={activeNav === 'knowledge'} onClick={() => setActiveNav('knowledge')} />
@@ -2189,6 +2248,20 @@ function HomeView(props) {
             testToolConfig={testToolConfig}
             tools={tools}
             updateToolConfig={updateToolConfig}
+          />
+        )}
+
+        {activeNav === 'skills' && (
+          <SkillsHome
+            createSkill={createSkill}
+            deleteSkill={deleteSkill}
+            knowledgeBases={knowledgeBases}
+            notify={notify}
+            setProfileError={setProfileError}
+            skills={skills}
+            token={token}
+            tools={tools}
+            updateSkill={updateSkill}
           />
         )}
 
@@ -3462,6 +3535,160 @@ function ToolsHome({ createToolConfig, discoverMcpTools, deleteToolConfig, isDar
         tools={tools}
         updateToolConfig={updateToolConfig}
       />
+    </div>
+  );
+}
+
+function SkillsHome({
+  createSkill,
+  deleteSkill,
+  knowledgeBases,
+  notify,
+  setProfileError,
+  skills,
+  token,
+  tools,
+  updateSkill,
+}) {
+  const [dialogOpen, setDialogOpen] = useState(false);
+  const [form, setForm] = useState(() => defaultSkillForm());
+  const [saving, setSaving] = useState(false);
+  const [editingId, setEditingId] = useState(null);
+
+  function openCreate() {
+    setEditingId(null);
+    setForm(defaultSkillForm());
+    setProfileError('');
+    setDialogOpen(true);
+  }
+
+  function openEdit(summary) {
+    // Fetch full skill detail to populate the form with system_prompt, tools, kbs
+    setSaving(true);
+    setEditingId(summary.id);
+    setProfileError('');
+    api(`/api/skills/${summary.id}`, { token })
+      .then((data) => {
+        const skill = data.skill || {};
+        setForm({
+          name: skill.name || '',
+          description: skill.description || '',
+          system_prompt: skill.system_prompt || '',
+          icon: skill.icon || 'SK',
+          category: skill.category || 'general',
+          tagsText: (skill.tags || []).join(', '),
+          tags: skill.tags || [],
+          tool_ids: (skill.tools || []).map((t) => t.id),
+          knowledge_base_ids: (skill.knowledge_bases || []).map((kb) => kb.id),
+        });
+        setDialogOpen(true);
+      })
+      .catch((err) => {
+        setProfileError(errorMessage(err));
+        setEditingId(null);
+      })
+      .finally(() => setSaving(false));
+  }
+
+  function closeDialog() {
+    if (saving) return;
+    setDialogOpen(false);
+    setEditingId(null);
+    setForm(defaultSkillForm());
+  }
+
+  async function submitSkill(event) {
+    event.preventDefault();
+    setSaving(true);
+    setProfileError('');
+    try {
+      if (editingId) {
+        await updateSkill(editingId, form);
+      } else {
+        await createSkill(form);
+      }
+      setDialogOpen(false);
+      setEditingId(null);
+      setForm(defaultSkillForm());
+    } catch (err) {
+      setProfileError(errorMessage(err));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleDelete(skill) {
+    const confirmed = await window.confirm(`确定要删除技能「${skill.name}」吗？`);
+    if (!confirmed) return;
+    try {
+      await deleteSkill(skill.id);
+      notify('技能已删除。');
+    } catch (err) {
+      setProfileError(errorMessage(err));
+    }
+  }
+
+  return (
+    <div className="content-page">
+      <header className="page-heading">
+        <div>
+          <h1>技能</h1>
+          <p>管理可复用的能力包。每个技能包含 Prompt 片段、专属工具和知识库，可挂载到多个智能体。</p>
+        </div>
+        <button className="primary" type="button" onClick={openCreate}><Plus size={16} />新建技能</button>
+      </header>
+
+      {skills.length === 0 ? (
+        <div className="empty-state" style={{ textAlign: 'center', padding: '60px 20px', color: '#94a3b8' }}>
+          <Sparkles size={48} style={{ marginBottom: '16px', opacity: 0.4 }} />
+          <p style={{ fontSize: '15px', margin: 0 }}>暂无技能，点击右上角"新建技能"开始创建。</p>
+        </div>
+      ) : (
+        <div className="skill-card-list">
+          {skills.map((skill) => (
+            <div className="skill-card" key={skill.id}>
+              <span className="skill-card-icon">✨</span>
+              <div className="skill-card-body">
+                <div className="skill-card-head">
+                  <strong className="skill-card-name">{skill.name}</strong>
+                  <span className="mode-chip skill-card-category">{skill.category || 'general'}</span>
+                  {(skill.tags || []).slice(0, 3).map((tag) => (
+                    <span className="skill-card-tag" key={tag}>{tag}</span>
+                  ))}
+                </div>
+                <p className="skill-card-desc">
+                  {skill.description || '无描述'}
+                </p>
+              </div>
+              <div className="skill-card-actions">
+                <button type="button" className="ghost-icon small" title="编辑技能" onClick={() => openEdit(skill)}>
+                  <SquarePen size={14} />
+                </button>
+                <button type="button" className="ghost-icon small danger" title="删除技能" onClick={() => handleDelete(skill)}>
+                  <Trash2 size={14} />
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {dialogOpen && (
+        <SkillDialog
+          form={form}
+          onCancel={closeDialog}
+          onChange={setForm}
+          onSubmit={submitSkill}
+          saving={saving}
+          tools={tools}
+          knowledgeBases={knowledgeBases}
+          title={editingId ? "编辑技能" : "新建技能"}
+          description={editingId ? "修改技能的能力包内容。" : "创建一个可复用的能力包：包含 Prompt 片段、专属工具和知识库。"}
+          submitText={editingId ? "保存修改" : "创建技能"}
+          savingText={editingId ? "保存中..." : "创建中..."}
+          isEdit={!!editingId}
+        />
+      )}
     </div>
   );
 }

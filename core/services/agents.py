@@ -9,6 +9,7 @@ from core.db.models import (
     AgentKnowledgeBase,
     AgentMemoryProfile,
     AgentSettings,
+    AgentSkill,
     AgentTool,
     AgentVersion,
     Feedback,
@@ -19,6 +20,9 @@ from core.db.models import (
     RunStep,
     Session as ChatSession,
     SessionMemory,
+    Skill,
+    SkillKnowledgeBase,
+    SkillTool,
     Tool,
     UserModelConfig,
     WorkflowDefinition,
@@ -26,6 +30,7 @@ from core.db.models import (
 from core.config import get_settings
 from core.services.bootstrap import DEFAULT_WORKFLOW
 from core.services.models import model_payload
+from core.services.skills import skill_summary
 from core.services.tools import tool_payload
 from core.services.user_models import user_model_snapshot
 
@@ -108,6 +113,7 @@ def get_agent_detail(db: Session, agent: Agent) -> dict:
         "memory": normalize_memory(settings.memory),
         "rag": normalize_rag(settings.rag),
         "tool_policy": normalize_tool_policy(settings.tool_policy),
+        "skills": [skill_summary(skill) for skill in get_agent_skills(db, agent.id)],
     }
 
 
@@ -270,6 +276,7 @@ def delete_agent(db: Session, agent: Agent) -> None:
     db.query(AgentKnowledgeBase).filter(AgentKnowledgeBase.agent_id == agent.id).delete(synchronize_session=False)
     db.query(AgentMemoryProfile).filter(AgentMemoryProfile.agent_id == agent.id).delete(synchronize_session=False)
     db.query(AgentTool).filter(AgentTool.agent_id == agent.id).delete(synchronize_session=False)
+    db.query(AgentSkill).filter(AgentSkill.agent_id == agent.id).delete(synchronize_session=False)
     db.query(AgentSettings).filter(AgentSettings.agent_id == agent.id).delete(synchronize_session=False)
     db.query(WorkflowDefinition).filter(WorkflowDefinition.agent_id == agent.id).delete(synchronize_session=False)
     db.query(AgentVersion).filter(AgentVersion.agent_id == agent.id).delete(synchronize_session=False)
@@ -437,3 +444,20 @@ def _replace_agent_tools(db: Session, agent_id: int, tool_ids: list[int]) -> Non
 
 def workspace_kb_exists(db: Session, workspace_id: int, kb_id: int) -> bool:
     return db.query(KnowledgeBase).filter(KnowledgeBase.workspace_id == workspace_id, KnowledgeBase.id == kb_id).first() is not None
+
+
+def get_agent_skills(db: Session, agent_id: int) -> list[Skill]:
+    skill_ids = [
+        row.skill_id
+        for row in db.query(AgentSkill).filter(
+            AgentSkill.agent_id == agent_id,
+            AgentSkill.enabled.is_(True),
+        ).all()
+    ]
+    if not skill_ids:
+        return []
+    return (
+        db.query(Skill)
+        .filter(Skill.id.in_(skill_ids), Skill.enabled.is_(True))
+        .all()
+    )

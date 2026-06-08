@@ -134,6 +134,7 @@ class AgentSettings(Base):
     memory: Mapped[dict] = mapped_column(JSON, default=dict)
     rag: Mapped[dict] = mapped_column(JSON, default=dict)
     tool_policy: Mapped[dict] = mapped_column(JSON, default=dict)
+    skill_policy: Mapped[dict] = mapped_column(JSON, default=dict)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
 
 
@@ -308,6 +309,53 @@ class AgentTool(Base):
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     config: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+class Skill(Base):
+    __tablename__ = "skills"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    workspace_id: Mapped[int] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"), index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    name: Mapped[str] = mapped_column(String(160))
+    description: Mapped[str] = mapped_column(Text, default="")
+    system_prompt: Mapped[str] = mapped_column(Text, default="")
+    icon: Mapped[str] = mapped_column(String(40), default="SK")
+    category: Mapped[str] = mapped_column(String(80), default="general")
+    tags: Mapped[list] = mapped_column(JSON, default=list)
+    rag_config: Mapped[dict] = mapped_column(JSON, default=dict)
+    memory_config: Mapped[dict] = mapped_column(JSON, default=dict)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
+
+
+class SkillTool(Base):
+    __tablename__ = "skill_tools"
+    __table_args__ = (UniqueConstraint("skill_id", "tool_id", name="uq_skill_tool"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    skill_id: Mapped[int] = mapped_column(ForeignKey("skills.id", ondelete="CASCADE"), index=True)
+    tool_id: Mapped[int] = mapped_column(ForeignKey("tools.id", ondelete="CASCADE"), index=True)
+
+
+class SkillKnowledgeBase(Base):
+    __tablename__ = "skill_knowledge_bases"
+    __table_args__ = (UniqueConstraint("skill_id", "knowledge_base_id", name="uq_skill_knowledge_base"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    skill_id: Mapped[int] = mapped_column(ForeignKey("skills.id", ondelete="CASCADE"), index=True)
+    knowledge_base_id: Mapped[int] = mapped_column(ForeignKey("knowledge_bases.id", ondelete="CASCADE"), index=True)
+
+
+class AgentSkill(Base):
+    __tablename__ = "agent_skills"
+    __table_args__ = (UniqueConstraint("agent_id", "skill_id", name="uq_agent_skill"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    agent_id: Mapped[int] = mapped_column(ForeignKey("agents.id", ondelete="CASCADE"), index=True)
+    skill_id: Mapped[int] = mapped_column(ForeignKey("skills.id", ondelete="CASCADE"), index=True)
+    priority: Mapped[int] = mapped_column(Integer, default=0)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
 
 
 class WorkflowDefinition(Base):

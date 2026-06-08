@@ -296,6 +296,42 @@ class FeedbackRequest(BaseModel):
     rating: str = Field(pattern="^(positive|negative|none)$")
     comment: str = ""
 
+
+class SkillCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=160)
+    description: str = ""
+    system_prompt: str = ""
+    icon: str = "SK"
+    category: str = Field(default="general", min_length=1, max_length=80)
+    tags: list[str] = []
+    tool_ids: list[int] = []
+    knowledge_base_ids: list[int] = []
+    rag_config: dict = {}
+    memory_config: dict = {}
+
+
+class SkillUpdateRequest(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=160)
+    description: str | None = None
+    system_prompt: str | None = None
+    icon: str | None = None
+    category: str | None = Field(default=None, min_length=1, max_length=80)
+    tags: list[str] | None = None
+    tool_ids: list[int] | None = None
+    knowledge_base_ids: list[int] | None = None
+    rag_config: dict | None = None
+    memory_config: dict | None = None
+    enabled: bool | None = None
+
+
+class AgentSkillsRequest(BaseModel):
+    skill_ids: list[int]
+
+
+class SkillItemIdsRequest(BaseModel):
+    ids: list[int]
+
+
 # Ensure Pydantic models are fully defined (required for Pydantic 2.x)
 
 

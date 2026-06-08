@@ -46,6 +46,7 @@ import {
   memoryProfilePayload,
   formatDateTime,
   toggleKb,
+  toggleSkill,
   toggleTool,
   buildToolDisplayGroups,
   toolEntrySearchText,
@@ -181,6 +182,10 @@ export function BuilderView(props) {
     submitFeedback,
     deleteMemoryProfile,
     tools,
+    skills,
+    deleteSkill,
+    updateAgentSkills,
+    updateSkill,
     toolDebugEvents,
     uploadChatAttachment,
     uploadingAttachment,
@@ -203,6 +208,7 @@ export function BuilderView(props) {
   // Coze Redesign Collapsible panel states
   const [expandedSections, setExpandedSections] = useState({
     tools: true,
+    skills: true,
     kb: true,
     memorySession: true,
     memoryUser: false,
@@ -212,7 +218,9 @@ export function BuilderView(props) {
   // Modal open states
   const [toolsModalOpen, setToolsModalOpen] = useState(false);
   const [kbModalOpen, setKbModalOpen] = useState(false);
-  
+  const [skillsModalOpen, setSkillsModalOpen] = useState(false);
+  const [skillsSearch, setSkillsSearch] = useState('');
+
   // Search filter states
   const [toolsSearch, setToolsSearch] = useState('');
   const [kbSearch, setKbSearch] = useState('');
@@ -569,6 +577,54 @@ export function BuilderView(props) {
               {boundToolEntries.length === 0 && (
                 <p className="muted" style={{ fontSize: '12px', textAlign: 'center', margin: '10px 0 0' }}>
                   暂未绑定任何工具，点击“+ 添加”引入能力。
+                </p>
+              )}
+            </div>
+          </div>
+
+          {/* ==================== 技能 ==================== */}
+          <div className={`coze-accordion-item ${expandedSections.skills ? 'expanded' : ''}`}>
+            <div className="coze-accordion-header" onClick={() => toggleSection('skills')}>
+              <div className="coze-header-left">
+                <ChevronRight size={14} className="coze-caret-icon" />
+                <span>技能 <span className="coze-header-count">({(agentForm.skill_ids || []).length})</span></span>
+              </div>
+              <button
+                type="button"
+                className="coze-add-button"
+                onClick={(e) => { e.stopPropagation(); setSkillsModalOpen(true); }}
+              >
+                + 添加
+              </button>
+            </div>
+            <div className="coze-accordion-body">
+              {skills.filter((s) => (agentForm.skill_ids || []).includes(s.id)).map((skill) => (
+                <div className="coze-bound-card" key={skill.id}>
+                  <div className="coze-bound-card-info" style={{ minWidth: 0, flex: 1 }}>
+                    <span className="coze-bound-card-icon">
+                      <Sparkles size={14} />
+                    </span>
+                    <div style={{ minWidth: 0, flex: 1 }}>
+                      <div className="coze-bound-card-title">{skill.name}</div>
+                      <div className="coze-bound-card-meta">{skill.description || skill.category}</div>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    className="coze-bound-card-remove"
+                    title="解绑技能"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      toggleSkill(skill.id, agentForm, setAgentForm);
+                    }}
+                  >
+                    ✕
+                  </button>
+                </div>
+              ))}
+              {(agentForm.skill_ids || []).length === 0 && (
+                <p className="muted" style={{ fontSize: '12px', textAlign: 'center', margin: '10px 0 0' }}>
+                  暂未绑定任何技能，点击"+ 添加"挂载能力包。
                 </p>
               )}
             </div>
@@ -944,6 +1000,65 @@ export function BuilderView(props) {
               </div>
             </div>
           )}
+
+          {/* ==================== 选择技能弹窗 ==================== */}
+          {skillsModalOpen && (
+            <div className="coze-modal-backdrop" onClick={() => setSkillsModalOpen(false)}>
+              <div className="coze-modal-container" onClick={(e) => e.stopPropagation()}>
+                <div className="coze-modal-header">
+                  <h3>选择技能 (Select Skill)</h3>
+                  <button className="coze-modal-close-btn" onClick={() => setSkillsModalOpen(false)}>✕</button>
+                </div>
+                <div className="coze-modal-body">
+                  <div className="coze-modal-search" style={{ marginBottom: '16px' }}>
+                    <input
+                      type="text"
+                      placeholder="搜索技能名称或描述..."
+                      value={skillsSearch}
+                      onChange={(e) => setSkillsSearch(e.target.value)}
+                      autoFocus
+                    />
+                  </div>
+                  <div className="coze-modal-list">
+                    {skills
+                      .filter((s) => {
+                        const q = skillsSearch.trim().toLowerCase();
+                        if (!q) return true;
+                        return `${s.name} ${s.description || ''} ${s.category || ''} ${(s.tags || []).join(' ')}`.toLowerCase().includes(q);
+                      })
+                      .map((skill) => {
+                        const isAdded = (agentForm.skill_ids || []).includes(skill.id);
+                        return (
+                          <div className="coze-modal-row" key={skill.id}>
+                            <div className="coze-modal-row-info">
+                              <span style={{ fontSize: '16px', marginRight: '8px' }}>✨</span>
+                              <strong className="coze-modal-row-title">{skill.name}</strong>
+                              <div className="coze-modal-row-desc">{skill.description || skill.category || '无描述'}</div>
+                            </div>
+                            <button
+                              type="button"
+                              className={`coze-modal-row-btn ${isAdded ? 'added' : ''}`}
+                              disabled={isAdded}
+                              onClick={() => {
+                                if (isAdded) return;
+                                toggleSkill(skill.id, agentForm, setAgentForm);
+                              }}
+                            >
+                              {isAdded ? '已添加' : '添加'}
+                            </button>
+                          </div>
+                        );
+                      })
+                    }
+                    {skills.length === 0 && (
+                      <p className="muted" style={{ textAlign: 'center' }}>无可用技能，点击右上角新建。</p>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
         </section>
 
         <section className="chat-stage">
