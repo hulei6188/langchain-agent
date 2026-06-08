@@ -91,6 +91,101 @@ _BUILTIN_FUNCS = {
     "pi": _math.pi, "e": _math.e,
 }
 
+MAX_POWERSHELL_OUTPUT_CHARS = 30000
+MAX_POWERSHELL_TIMEOUT_SECONDS = 300
+
+
+def _exec_run_powershell(args: dict) -> dict:
+    """Execute an arbitrary PowerShell command on the local Windows machine.
+
+    Returns structured output including stdout, stderr, exit_code, and timing.
+    Output is truncated if it exceeds MAX_POWERSHELL_OUTPUT_CHARS.
+    """
+    command = str(args.get("command") or "").strip()
+    if not command:
+        return {
+            "content": json.dumps({"error": "command cannot be empty"}, ensure_ascii=False),
+            "result_preview": "Error: empty command",
+        }
+
+    cwd = str(args.get("cwd") or "").strip() or None
+    timeout = int(args.get("timeout") or 60)
+    if timeout < 1:
+        timeout = 60
+    elif timeout > MAX_POWERSHELL_TIMEOUT_SECONDS:
+        timeout = MAX_POWERSHELL_TIMEOUT_SECONDS
+
+    started = time.monotonic()
+    try:
+        completed = subprocess.run(
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            encoding="utf-8",
+            errors="replace",
+        )
+        duration_ms = int((time.monotonic() - started) * 1000)
+        stdout = completed.stdout or ""
+        stderr = completed.stderr or ""
+
+        truncated = False
+        if len(stdout) > MAX_POWERSHELL_OUTPUT_CHARS:
+            stdout = (
+                stdout[:MAX_POWERSHELL_OUTPUT_CHARS]
+                + f"\n\n[输出已截断，原始长度 {len(completed.stdout)} 字符，仅显示前 {MAX_POWERSHELL_OUTPUT_CHARS} 字符]"
+            )
+            truncated = True
+        if len(stderr) > MAX_POWERSHELL_OUTPUT_CHARS:
+            stderr = stderr[:MAX_POWERSHELL_OUTPUT_CHARS] + "\n\n[错误输出已截断]"
+
+        result = {
+            "command": command,
+            "cwd": cwd or str(Path.cwd()),
+            "exit_code": completed.returncode,
+            "stdout": stdout,
+            "stderr": stderr,
+            "duration_ms": duration_ms,
+            "timeout": False,
+            "truncated": truncated,
+        }
+        content = json.dumps(result, ensure_ascii=False)
+        exit_label = f"exit={completed.returncode}" if completed.returncode != 0 else "OK"
+        preview = f"[{exit_label}] {stdout[:200].strip()}"
+        if truncated:
+            preview += " (已截断)"
+        return {"content": content, "result_preview": preview}
+    except subprocess.TimeoutExpired:
+        duration_ms = int((time.monotonic() - started) * 1000)
+        result = {
+            "command": command,
+            "cwd": cwd or str(Path.cwd()),
+            "exit_code": -1,
+            "stdout": "",
+            "stderr": f"命令执行超时（{timeout}s）",
+            "duration_ms": duration_ms,
+            "timeout": True,
+            "truncated": False,
+        }
+        content = json.dumps(result, ensure_ascii=False)
+        return {"content": content, "result_preview": f"[timeout] 命令执行超时（{timeout}s）"}
+    except Exception as exc:
+        duration_ms = int((time.monotonic() - started) * 1000)
+        result = {
+            "command": command,
+            "cwd": cwd or str(Path.cwd()),
+            "exit_code": -1,
+            "stdout": "",
+            "stderr": str(exc),
+            "duration_ms": duration_ms,
+            "timeout": False,
+            "truncated": False,
+        }
+        content = json.dumps(result, ensure_ascii=False)
+        return {"content": content, "result_preview": f"Error: {exc}"}
+
+
 BUILTIN_TOOLS: dict[str, dict] = {
     "current_time": {
         "description": "获取当前日期和时间，支持折算全球时区。",
@@ -336,6 +431,47 @@ BUILTIN_TOOLS: dict[str, dict] = {
             "required": ["text"],
         },
         "execute": lambda ctx: _exec_character_counter(ctx),
+    },
+    "run_powershell": {
+        "description": (
+            "在 Windows 本机执行任意 PowerShell 命令。"
+            "可用于查看目录、搜索文件内容、读取文件、创建文件、修改文件、删除文件、移动文件、重命名文件、"
+            "运行脚本、安装依赖、启动服务、执行测试、执行 git 命令、调用 rg 搜索代码等。"
+            "模型可以根据用户任务自行组织 PowerShell 命令并调用该工具。"
+            "命令执行结果会返回 stdout、stderr、exit_code。"
+            "模型必须基于真实执行结果继续分析，不得编造结果。"
+            "当用户需要你查看本地文件、搜索代码、分析项目、修改文件、运行测试、执行构建、安装依赖、启动服务时，你可以调用 run_powershell。"
+            "你可以根据任务目标自行选择合适的 PowerShell 命令。"
+            "可以连续多次调用工具，直到完成用户任务。"
+            "执行命令前，优先使用当前项目目录作为工作目录。"
+            "如果不确定当前目录，可以先执行 Get-Location。"
+            "如果需要查看项目结构，可以先执行 Get-ChildItem。"
+            "如果需要搜索代码内容，优先使用 rg。"
+            "如果需要读取文件，优先使用 Get-Content。"
+            "如果需要修改文件，可以使用 Set-Content、Add-Content 或 python 脚本批量修改。"
+            "如果命令失败，需要根据 stderr 和 exit_code 继续排查。"
+            "对于长输出，需要提取关键信息总结给用户。"
+            "不要编造执行结果，必须以 run_powershell 返回结果为准。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "command": {
+                    "type": "string",
+                    "description": "要执行的 PowerShell 命令字符串，例如 Get-Location、Get-ChildItem、rg 'keyword' .、git status、Get-Content README.md",
+                },
+                "cwd": {
+                    "type": "string",
+                    "description": "可选，命令执行的工作目录。默认使用项目根目录或后端进程当前工作目录。",
+                },
+                "timeout": {
+                    "type": "integer",
+                    "description": f"可选，命令执行超时时间（秒），默认 60 秒，最大 {MAX_POWERSHELL_TIMEOUT_SECONDS} 秒。",
+                },
+            },
+            "required": ["command"],
+        },
+        "execute": lambda ctx: _exec_run_powershell(ctx),
     },
 }
 

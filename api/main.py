@@ -1818,11 +1818,20 @@ def compact_timeline_text(value, limit: int = 220) -> str:
 def summarize_tool_input(raw_input: str) -> dict:
     data = parse_json_preview(raw_input)
     if isinstance(data, dict):
-        query = first_string_value(data, ["query", "q", "keyword", "keywords", "search", "text", "input"])
+        query = first_string_value(data, ["command", "query", "q", "keyword", "keywords", "search", "text", "input"])
         count = first_scalar_value(data, ["count", "limit", "top_k", "max_results", "num_results"])
         if query:
-            suffix = f" · 数量 {count}" if count else ""
-            return {"label": "查询", "text": compact_timeline_text(f"{query}{suffix}", 120)}
+            is_command = "command" in data
+            label = "命令" if is_command else "查询"
+            suffix_parts = []
+            if count:
+                suffix_parts.append(f"数量 {count}")
+            if is_command:
+                cwd_val = str(data.get("cwd", "")).strip()
+                if cwd_val:
+                    suffix_parts.append(f"目录: {cwd_val}")
+            suffix = " · " + " · ".join(suffix_parts) if suffix_parts else ""
+            return {"label": label, "text": compact_timeline_text(f"{query}{suffix}", 120)}
         keys = [key for key, value in data.items() if value not in (None, "")]
         if keys:
             if len(keys) <= 3:
@@ -1840,6 +1849,40 @@ def summarize_tool_result(raw_result: str, *, status: str = "success") -> str:
     if status == "error":
         return f"调用失败：{compact_timeline_text(raw_result, 140)}" if raw_result else "调用失败。"
     data = parse_json_preview(raw_result)
+    # PowerShell / command execution result
+    if isinstance(data, dict) and "exit_code" in data and "command" in data:
+        exit_code = data.get("exit_code", -1)
+        is_timeout = bool(data.get("timeout"))
+        stdout = str(data.get("stdout") or "")
+        stderr = str(data.get("stderr") or "")
+        duration_ms = data.get("duration_ms", 0)
+        truncated = bool(data.get("truncated"))
+        parts = []
+        if is_timeout:
+            parts.append("[timeout] 命令执行超时")
+        elif exit_code == 0:
+            parts.append("[OK] 命令执行成功")
+        else:
+            parts.append(f"[exit={exit_code}] 命令执行失败")
+        duration_str = ""
+        try:
+            ms = int(duration_ms or 0)
+            if ms >= 1000:
+                duration_str = f"{ms / 1000:.1f}s"
+            elif ms > 0:
+                duration_str = f"{ms}ms"
+        except (TypeError, ValueError):
+            pass
+        if duration_str:
+            parts.append(f"耗时 {duration_str}")
+        if truncated:
+            parts.append("输出已截断")
+        if stderr and not is_timeout:
+            parts.append(f"stderr: {compact_timeline_text(stderr, 80)}")
+        if stdout:
+            preview = stdout.strip()[:120]
+            parts.append(compact_timeline_text(preview, 120))
+        return " · ".join(parts)
     items = collect_result_items(data)
     if items:
         return summarize_result_items(items, raw_result)
