@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from core.db.models import (
     Agent,
     AgentKnowledgeBase,
+    AgentSkill,
     AgentTool,
     AgentVersion,
     Message,
@@ -18,6 +19,9 @@ from core.db.models import (
     RunStep,
     Session as ChatSession,
     SessionMemory,
+    Skill,
+    SkillKnowledgeBase,
+    SkillTool,
     Tool,
     UserModelConfig,
     Upload,
@@ -1037,6 +1041,50 @@ class WorkflowRunner:
 
         user_model_config = self._user_model_config(user_id, source["user_model_config_id"])
         runtime_config = user_model_runtime_config(user_model_config) if user_model_config else None
+
+        # Merge Agent-bound Skills
+        agent_skill_rows = (
+            self.db.query(AgentSkill)
+            .filter(
+                AgentSkill.agent_id == agent.id,
+                AgentSkill.enabled.is_(True),
+            )
+            .all()
+        )
+        if agent_skill_rows:
+            skill_ids = [row.skill_id for row in agent_skill_rows]
+            skills = (
+                self.db.query(Skill)
+                .filter(Skill.id.in_(skill_ids), Skill.enabled.is_(True))
+                .all()
+            )
+            priority_map = {row.skill_id: row.priority for row in agent_skill_rows}
+            for skill in sorted(skills, key=lambda s: priority_map.get(s.id, 0), reverse=True):
+                # Merge system_prompt
+                source["system_prompt"] += (
+                    f"\n\n## Skill: {skill.name}\n{skill.system_prompt}"
+                )
+                # Merge tools (deduplicate)
+                skill_tool_ids = [
+                    st.tool_id
+                    for st in self.db.query(SkillTool)
+                    .filter(SkillTool.skill_id == skill.id)
+                    .all()
+                ]
+                source["tool_ids"] = list(
+                    dict.fromkeys(source["tool_ids"] + skill_tool_ids)
+                )
+                # Merge knowledge bases (deduplicate)
+                skill_kb_ids = [
+                    skb.knowledge_base_id
+                    for skb in self.db.query(SkillKnowledgeBase)
+                    .filter(SkillKnowledgeBase.skill_id == skill.id)
+                    .all()
+                ]
+                source["knowledge_base_ids"] = list(
+                    dict.fromkeys(source["knowledge_base_ids"] + skill_kb_ids)
+                )
+
         return SimpleNamespace(
             id=agent.id,
             workspace_id=agent.workspace_id,

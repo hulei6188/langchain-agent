@@ -154,6 +154,7 @@ CREATE TABLE IF NOT EXISTS agent_settings (
     memory JSONB NOT NULL DEFAULT '{}'::jsonb,
     rag JSONB NOT NULL DEFAULT '{}'::jsonb,
     tool_policy JSONB NOT NULL DEFAULT '{}'::jsonb,
+    skill_policy JSONB NOT NULL DEFAULT '{}'::jsonb,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS ix_agent_settings_agent_id ON agent_settings (agent_id);
@@ -208,6 +209,57 @@ CREATE TABLE IF NOT EXISTS agent_tools (
 CREATE INDEX IF NOT EXISTS ix_agent_tools_agent_id ON agent_tools (agent_id);
 CREATE INDEX IF NOT EXISTS ix_agent_tools_tool_id ON agent_tools (tool_id);
 CREATE INDEX IF NOT EXISTS ix_agent_tools_enabled ON agent_tools (enabled);
+
+CREATE TABLE IF NOT EXISTS skills (
+    id BIGSERIAL PRIMARY KEY,
+    workspace_id BIGINT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    user_id BIGINT NOT NULL REFERENCES users(id),
+    name VARCHAR(160) NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    system_prompt TEXT NOT NULL DEFAULT '',
+    icon VARCHAR(40) NOT NULL DEFAULT 'SK',
+    category VARCHAR(80) NOT NULL DEFAULT 'general',
+    tags JSONB NOT NULL DEFAULT '[]'::jsonb,
+    rag_config JSONB NOT NULL DEFAULT '{}'::jsonb,
+    memory_config JSONB NOT NULL DEFAULT '{}'::jsonb,
+    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS ix_skills_workspace_id ON skills (workspace_id);
+CREATE INDEX IF NOT EXISTS ix_skills_user_id ON skills (user_id);
+CREATE INDEX IF NOT EXISTS ix_skills_category ON skills (category);
+CREATE INDEX IF NOT EXISTS ix_skills_enabled ON skills (enabled);
+
+CREATE TABLE IF NOT EXISTS skill_tools (
+    id BIGSERIAL PRIMARY KEY,
+    skill_id BIGINT NOT NULL REFERENCES skills(id) ON DELETE CASCADE,
+    tool_id BIGINT NOT NULL REFERENCES tools(id) ON DELETE CASCADE,
+    CONSTRAINT uq_skill_tool UNIQUE (skill_id, tool_id)
+);
+CREATE INDEX IF NOT EXISTS ix_skill_tools_skill_id ON skill_tools (skill_id);
+CREATE INDEX IF NOT EXISTS ix_skill_tools_tool_id ON skill_tools (tool_id);
+
+CREATE TABLE IF NOT EXISTS skill_knowledge_bases (
+    id BIGSERIAL PRIMARY KEY,
+    skill_id BIGINT NOT NULL REFERENCES skills(id) ON DELETE CASCADE,
+    knowledge_base_id BIGINT NOT NULL REFERENCES knowledge_bases(id) ON DELETE CASCADE,
+    CONSTRAINT uq_skill_knowledge_base UNIQUE (skill_id, knowledge_base_id)
+);
+CREATE INDEX IF NOT EXISTS ix_skill_knowledge_bases_skill_id ON skill_knowledge_bases (skill_id);
+CREATE INDEX IF NOT EXISTS ix_skill_knowledge_bases_knowledge_base_id ON skill_knowledge_bases (knowledge_base_id);
+
+CREATE TABLE IF NOT EXISTS agent_skills (
+    id BIGSERIAL PRIMARY KEY,
+    agent_id BIGINT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+    skill_id BIGINT NOT NULL REFERENCES skills(id) ON DELETE CASCADE,
+    priority INTEGER NOT NULL DEFAULT 0,
+    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    CONSTRAINT uq_agent_skill UNIQUE (agent_id, skill_id)
+);
+CREATE INDEX IF NOT EXISTS ix_agent_skills_agent_id ON agent_skills (agent_id);
+CREATE INDEX IF NOT EXISTS ix_agent_skills_skill_id ON agent_skills (skill_id);
+CREATE INDEX IF NOT EXISTS ix_agent_skills_enabled ON agent_skills (enabled);
 
 CREATE TABLE IF NOT EXISTS knowledge_bases (
     id BIGSERIAL PRIMARY KEY,
@@ -539,6 +591,41 @@ COMMENT ON COLUMN agent_tools.enabled IS '是否对该智能体启用工具';
 COMMENT ON COLUMN agent_tools.config IS '智能体维度的工具配置';
 COMMENT ON COLUMN agent_tools.created_at IS '绑定创建时间';
 
+COMMENT ON TABLE skills IS 'Skill 可复用能力包';
+COMMENT ON COLUMN skills.id IS 'Skill 主键';
+COMMENT ON COLUMN skills.workspace_id IS '所属工作区 ID';
+COMMENT ON COLUMN skills.user_id IS '创建者用户 ID';
+COMMENT ON COLUMN skills.name IS 'Skill 名称';
+COMMENT ON COLUMN skills.description IS 'Skill 描述';
+COMMENT ON COLUMN skills.system_prompt IS 'Skill 专属系统提示词片段';
+COMMENT ON COLUMN skills.icon IS 'Skill 图标';
+COMMENT ON COLUMN skills.category IS 'Skill 分类';
+COMMENT ON COLUMN skills.tags IS 'Skill 标签列表';
+COMMENT ON COLUMN skills.rag_config IS 'Skill RAG 配置';
+COMMENT ON COLUMN skills.memory_config IS 'Skill 记忆配置';
+COMMENT ON COLUMN skills.enabled IS 'Skill 是否启用';
+COMMENT ON COLUMN skills.created_at IS 'Skill 创建时间';
+COMMENT ON COLUMN skills.updated_at IS 'Skill 更新时间';
+
+COMMENT ON TABLE skill_tools IS 'Skill 与 Tool 关联表';
+COMMENT ON COLUMN skill_tools.id IS '关联主键';
+COMMENT ON COLUMN skill_tools.skill_id IS 'Skill ID';
+COMMENT ON COLUMN skill_tools.tool_id IS 'Tool ID';
+
+COMMENT ON TABLE skill_knowledge_bases IS 'Skill 与 KnowledgeBase 关联表';
+COMMENT ON COLUMN skill_knowledge_bases.id IS '关联主键';
+COMMENT ON COLUMN skill_knowledge_bases.skill_id IS 'Skill ID';
+COMMENT ON COLUMN skill_knowledge_bases.knowledge_base_id IS 'KnowledgeBase ID';
+
+COMMENT ON TABLE agent_skills IS 'Agent 与 Skill 挂载关联表';
+COMMENT ON COLUMN agent_skills.id IS '关联主键';
+COMMENT ON COLUMN agent_skills.agent_id IS 'Agent ID';
+COMMENT ON COLUMN agent_skills.skill_id IS 'Skill ID';
+COMMENT ON COLUMN agent_skills.priority IS 'Skill 优先级，数值越大越靠前';
+COMMENT ON COLUMN agent_skills.enabled IS '是否对该 Agent 启用此 Skill';
+
+COMMENT ON COLUMN agent_settings.skill_policy IS 'Skill 调用策略配置';
+
 COMMENT ON COLUMN knowledge_bases.id IS '知识库主键';
 COMMENT ON COLUMN knowledge_bases.workspace_id IS '所属工作区 ID';
 COMMENT ON COLUMN knowledge_bases.name IS '知识库名称';
@@ -698,6 +785,11 @@ FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 DROP TRIGGER IF EXISTS trg_tools_updated_at ON tools;
 CREATE TRIGGER trg_tools_updated_at
 BEFORE UPDATE ON tools
+FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+DROP TRIGGER IF EXISTS trg_skills_updated_at ON skills;
+CREATE TRIGGER trg_skills_updated_at
+BEFORE UPDATE ON skills
 FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
 DROP TRIGGER IF EXISTS trg_knowledge_documents_updated_at ON knowledge_documents;

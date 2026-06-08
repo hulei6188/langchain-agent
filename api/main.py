@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 from api.deps import get_current_membership, get_current_user, require_manager
 from api.schemas import (
     AgentCreateRequest,
+    AgentSkillsRequest,
     AgentUpdateRequest,
     ChatRequest,
     FeedbackRequest,
@@ -36,6 +37,9 @@ from api.schemas import (
     PromptTemplateUpdateRequest,
     RegisterRequest,
     SessionUpdateRequest,
+    SkillCreateRequest,
+    SkillItemIdsRequest,
+    SkillUpdateRequest,
     ToolRequest,
     ToolTestRequest,
     ToolUpdateRequest,
@@ -49,6 +53,7 @@ from api.schemas import (
 from core.config import get_settings
 from core.db.models import (
     Agent,
+    AgentSkill,
     AgentVersion,
     Feedback,
     KnowledgeBase,
@@ -60,6 +65,9 @@ from core.db.models import (
     RunStep,
     Session as ChatSession,
     SessionMemory,
+    Skill,
+    SkillKnowledgeBase,
+    SkillTool,
     Tool,
     User,
     UserModelConfig,
@@ -136,6 +144,13 @@ from core.services.tools import (
     tool_payload,
     update_tool,
     validate_tool_ids,
+)
+from core.services.skills import (
+    create_skill,
+    delete_skill,
+    get_skill_detail,
+    list_workspace_skills,
+    update_skill,
 )
 from core.services.uploads import create_upload, upload_payload
 from core.services.user_models import (
@@ -640,6 +655,152 @@ def test_tool_endpoint(tool_id: int, request: ToolTestRequest, membership: Works
     if not tool:
         raise HTTPException(status_code=404, detail="Tool not found")
     return test_tool(tool, input_data=request.input, body=request.body)
+
+
+# ── Skills ───────────────────────────────────────────────────────────
+
+
+@app.get("/api/skills")
+def list_skills(
+    membership: WorkspaceMember = Depends(get_current_membership),
+    db: Session = Depends(get_db),
+):
+    items = list_workspace_skills(db, workspace_id=membership.workspace_id)
+    return {"items": items}
+
+
+@app.post("/api/skills")
+def create_skill_endpoint(
+    request: SkillCreateRequest,
+    membership: WorkspaceMember = Depends(get_current_membership),
+    db: Session = Depends(get_db),
+):
+    if request.tool_ids:
+        try:
+            validate_tool_ids(
+                db,
+                workspace_id=membership.workspace_id,
+                user_id=membership.user_id,
+                tool_ids=request.tool_ids,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    skill = create_skill(
+        db,
+        workspace_id=membership.workspace_id,
+        user_id=membership.user_id,
+        payload=request.model_dump(),
+    )
+    return {"skill": get_skill_detail(db, skill)}
+
+
+@app.get("/api/skills/{skill_id}")
+def get_skill(
+    skill_id: int,
+    membership: WorkspaceMember = Depends(get_current_membership),
+    db: Session = Depends(get_db),
+):
+    skill = require_workspace_skill(db, membership.workspace_id, skill_id)
+    return {"skill": get_skill_detail(db, skill)}
+
+
+@app.patch("/api/skills/{skill_id}")
+def patch_skill(
+    skill_id: int,
+    request: SkillUpdateRequest,
+    membership: WorkspaceMember = Depends(get_current_membership),
+    db: Session = Depends(get_db),
+):
+    skill = require_workspace_skill(db, membership.workspace_id, skill_id)
+    if request.tool_ids is not None:
+        try:
+            validate_tool_ids(
+                db,
+                workspace_id=membership.workspace_id,
+                user_id=membership.user_id,
+                tool_ids=request.tool_ids,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    skill = update_skill(db, skill=skill, payload=request.model_dump(exclude_unset=True))
+    return {"skill": get_skill_detail(db, skill)}
+
+
+@app.delete("/api/skills/{skill_id}")
+def delete_skill_endpoint(
+    skill_id: int,
+    membership: WorkspaceMember = Depends(get_current_membership),
+    db: Session = Depends(get_db),
+):
+    skill = require_workspace_skill(db, membership.workspace_id, skill_id)
+    delete_skill(db, skill=skill)
+    return {"deleted": True}
+
+
+@app.put("/api/skills/{skill_id}/tools")
+def update_skill_tools(
+    skill_id: int,
+    request: SkillItemIdsRequest,
+    membership: WorkspaceMember = Depends(get_current_membership),
+    db: Session = Depends(get_db),
+):
+    skill = require_workspace_skill(db, membership.workspace_id, skill_id)
+    from core.services.skills import _replace_skill_tools
+
+    if request.ids:
+        try:
+            validate_tool_ids(
+                db,
+                workspace_id=membership.workspace_id,
+                user_id=membership.user_id,
+                tool_ids=request.ids,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _replace_skill_tools(db, skill.id, request.ids)
+    db.commit()
+    return {"skill": get_skill_detail(db, skill)}
+
+
+@app.put("/api/skills/{skill_id}/knowledge-bases")
+def update_skill_knowledge_bases(
+    skill_id: int,
+    request: SkillItemIdsRequest,
+    membership: WorkspaceMember = Depends(get_current_membership),
+    db: Session = Depends(get_db),
+):
+    skill = require_workspace_skill(db, membership.workspace_id, skill_id)
+    from core.services.skills import _replace_skill_kbs
+
+    _replace_skill_kbs(db, skill.id, request.ids)
+    db.commit()
+    return {"skill": get_skill_detail(db, skill)}
+
+
+# ── Agent Skills ─────────────────────────────────────────────────────
+
+
+@app.put("/api/agents/{agent_id}/skills")
+def update_agent_skills(
+    agent_id: int,
+    request: AgentSkillsRequest,
+    membership: WorkspaceMember = Depends(get_current_membership),
+    db: Session = Depends(get_db),
+):
+    agent = require_workspace_agent(db, membership.workspace_id, agent_id)
+    require_agent_write_access(agent, membership)
+    # Remove existing bindings and recreate
+    db.query(AgentSkill).filter(AgentSkill.agent_id == agent.id).delete()
+    for skill_id in request.skill_ids:
+        skill = db.query(Skill).filter(
+            Skill.id == skill_id,
+            Skill.workspace_id == membership.workspace_id,
+        ).first()
+        if not skill:
+            raise HTTPException(status_code=400, detail=f"Skill {skill_id} not found or not accessible")
+        db.add(AgentSkill(agent_id=agent.id, skill_id=skill_id))
+    db.commit()
+    return {"agent": get_agent_detail(db, agent)}
 
 
 @app.get("/api/prompt-templates")
@@ -2065,6 +2226,13 @@ def require_workspace_kb(db: Session, workspace_id: int, kb_id: int) -> Knowledg
     if not kb:
         raise HTTPException(status_code=404, detail="Knowledge base not found")
     return kb
+
+
+def require_workspace_skill(db: Session, workspace_id: int, skill_id: int) -> Skill:
+    skill = db.query(Skill).filter(Skill.workspace_id == workspace_id, Skill.id == skill_id).first()
+    if not skill:
+        raise HTTPException(status_code=404, detail="Skill not found")
+    return skill
 
 
 def require_kb_write_access(kb: KnowledgeBase, membership: WorkspaceMember) -> None:
