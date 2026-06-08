@@ -6677,9 +6677,12 @@ function appendToolTimelineItem(message, eventData, eventType = 'tool_call') {
 
 function formatToolTimelineLabel(eventData = {}, eventType = 'tool_call') {
   if (eventType === 'search_status') {
-    if (eventData.requested === false && !eventData.matched_results) return null;
+    // Only show search timeline item if search actually happened — not just
+    // the initial "tool_available" status emitted at the start of every run.
     const count = Number(eventData.matched_results || 0);
     const reason = String(eventData.reason || '');
+    if (reason === 'tool_available' && count === 0) return null;
+    if (eventData.requested === false && !eventData.matched_results) return null;
     const status = reason === 'web_search_unavailable' ? 'error' : count > 0 || reason === 'no_results' ? 'success' : 'running';
     const title = count > 0 ? `搜索到 ${count} 个网页` : status === 'error' ? '搜索工具不可用' : '正在搜索网页';
     const provider = eventData.provider ? String(eventData.provider) : '';
