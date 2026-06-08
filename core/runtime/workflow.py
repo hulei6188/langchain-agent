@@ -87,7 +87,9 @@ def parse_dsml_tool_calls(text: str) -> list[dict]:
 
     normalized = _normalize_dsml_markup(text)
     tool_calls: list[dict] = []
+    dsml_blocks_found = 0
     for block_match in _DSML_TOOL_CALLS_BLOCK_RE.finditer(normalized):
+        dsml_blocks_found += 1
         body_start = block_match.start("body")
         body_end = block_match.end("body")
         normalized_body = normalized[body_start:body_end]
@@ -116,6 +118,8 @@ def parse_dsml_tool_calls(text: str) -> list[dict]:
                     },
                 }
             )
+    if dsml_blocks_found > 0 and not tool_calls:
+        logger.warning("DSML tool call parsing failed: found %d DSML block(s) but extracted 0 valid tool calls. Raw content:\n%s", dsml_blocks_found, text)
     return tool_calls
 
 
@@ -176,7 +180,7 @@ def _coerce_dsml_tool_calls(response: ChatResponse, *, stage: str) -> ChatRespon
         response.tool_calls = dsml_calls
         response.content = ""
         return response
-    logger.warning("Failed to parse DSML tool calls during %s; preview=%r", stage, _dsml_preview(response.content))
+    logger.warning("Failed to parse DSML tool calls during %s; full content:\n%s", stage, response.content)
     response.content = DSML_TOOL_MARKUP_ERROR
     return response
 
@@ -852,13 +856,13 @@ class WorkflowRunner:
                     final_tool_calls = dsml_calls
                     content_for_response = ""
                 else:
-                    logger.warning("Failed to parse DSML tool calls from streamed content; preview=%r", _dsml_preview(joined_content))
+                    logger.warning("Failed to parse DSML tool calls from streamed content; full content:\n%s", joined_content)
                     content_for_response = DSML_TOOL_MARKUP_ERROR
             else:
                 logger.warning("Blocked DSML tool call markup in streamed final content; preview=%r", _dsml_preview(joined_content))
                 content_for_response = strip_or_block_leaked_tool_markup(joined_content)
         elif not final_tool_calls and _contains_leaked_tool_markup(joined_content):
-            logger.warning("Blocked incomplete tool call markup in streamed content; preview=%r", _dsml_preview(joined_content))
+            logger.warning("Blocked incomplete tool call markup in streamed content; full content:\n%s", joined_content)
             content_for_response = DSML_TOOL_MARKUP_ERROR
 
         if stream_content and not final_tool_calls and content_for_response:
