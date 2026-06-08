@@ -453,7 +453,7 @@ class WorkflowRunner:
                         started = time.monotonic()
                         if matching:
                             try:
-                                result = execute_tool(matching, {"input": tool_args})
+                                result = execute_tool(matching, {"input": tool_args, "_session_key": str(context.get("session_id") or "")})
                                 result["latency_ms"] = result.get("latency_ms", int((time.monotonic() - started) * 1000))
                                 tool_content = result.get("content") or result.get("result_preview") or ""
                                 event_data = tool_call_event(matching, result, input_preview=json.dumps(tool_args, ensure_ascii=False))
@@ -755,7 +755,7 @@ class WorkflowRunner:
         started = time.monotonic()
         if matching:
             try:
-                result = execute_tool(matching, {"input": tool_args})
+                result = execute_tool(matching, {"input": tool_args, "_session_key": str(context.get("session_id") or "")})
                 result["latency_ms"] = result.get("latency_ms", int((time.monotonic() - started) * 1000))
                 tool_content = result.get("content") or result.get("result_preview") or ""
                 event_data = {

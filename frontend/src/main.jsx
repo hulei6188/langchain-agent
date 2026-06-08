@@ -4060,7 +4060,7 @@ const MCP_TOOL_PRESET = {
   type: 'mcp',
   name: 'mcp_tool',
   label: 'MCP Tool',
-  description: 'Calls a remote MCP tool over Streamable HTTP.',
+  description: 'Calls a remote MCP tool over Streamable HTTP, SSE, or stdio.',
   method: 'POST',
   url: 'http://127.0.0.1:8001/mcp',
   headers_schema: JSON.stringify({}, null, 2),
@@ -4071,6 +4071,10 @@ const MCP_TOOL_PRESET = {
   mcp_transport: 'streamable_http',
   mcp_tool_name: '',
   mcp_input_schema: JSON.stringify({ type: 'object', properties: {} }, null, 2),
+  mcp_command: '',
+  mcp_args: '',
+  mcp_env: '',
+  mcp_cwd: '',
   server_label: '',
 };
 
@@ -4104,6 +4108,10 @@ function formFromTool(tool, overrides = {}) {
     mcp_transport: mcp.transport || 'streamable_http',
     mcp_tool_name: mcp.tool_name || '',
     mcp_input_schema: JSON.stringify(mcp.input_schema || { type: 'object', properties: {} }, null, 2),
+    mcp_command: mcp.command || '',
+    mcp_args: Array.isArray(mcp.args) ? mcp.args.join(' ') : (mcp.args || ''),
+    mcp_env: mcp.env && typeof mcp.env === 'object' ? JSON.stringify(mcp.env, null, 2) : '',
+    mcp_cwd: mcp.cwd || '',
     server_label: tool?.server_label || '',
     ...overrides,
   };
@@ -4280,12 +4288,14 @@ function ToolsPanel({ createToolConfig, discoverMcpTools, deleteToolConfig, isDa
 
   const isHttpForm = form.type === 'http';
   const isMcpForm = form.type === 'mcp';
+  const isMcpStdio = isMcpForm && mcpTransportValue(form.mcp_transport, form.url) === 'stdio';
+  const isMcpRemote = isMcpForm && !isMcpStdio;
   const isEditingMcpGroup = Boolean(editingMcpGroup);
   const isCreatingMcpGroup = isMcpForm && !editingTool && !isEditingMcpGroup;
   const needsBodySchema = isHttpForm && !['GET', 'DELETE'].includes(String(form.method || '').toUpperCase());
-  const needsAuthSecret = (isHttpForm || isMcpForm) && form.auth_type !== 'none';
-  const needsAuthHeader = (isHttpForm || isMcpForm) && ['bearer', 'header'].includes(form.auth_type);
-  const needsAuthQuery = (isHttpForm || isMcpForm) && form.auth_type === 'query';
+  const needsAuthSecret = (isHttpForm || isMcpRemote) && form.auth_type !== 'none';
+  const needsAuthHeader = (isHttpForm || isMcpRemote) && ['bearer', 'header'].includes(form.auth_type);
+  const needsAuthQuery = (isHttpForm || isMcpRemote) && form.auth_type === 'query';
   const toolDisplayEntries = useMemo(() => buildToolDisplayGroups(tools), [tools]);
   const toolTheme = isDarkTheme ? {
     rowBg: '#121620',
@@ -4530,9 +4540,25 @@ function ToolsPanel({ createToolConfig, discoverMcpTools, deleteToolConfig, isDa
 
   function mcpGroupConfigPatch(tool) {
     const timeout = Number(form.timeout_seconds);
-    const authType = form.auth_type || 'none';
+    const transport = mcpTransportValue(form.mcp_transport, form.url);
+    const isStdio = transport === 'stdio';
+    const authType = isStdio ? 'none' : (form.auth_type || 'none');
+    const mcpConfig = {
+      transport,
+      tool_name: tool?.mcp?.tool_name || tool?.name || '',
+      input_schema: tool?.mcp?.input_schema || { type: 'object', properties: {} },
+    };
+    if (isStdio) {
+      mcpConfig.command = String(form.mcp_command || '').trim();
+      const argsStr = String(form.mcp_args || '').trim();
+      mcpConfig.args = argsStr ? argsStr.split(/\s+/) : [];
+      if (String(form.mcp_cwd || '').trim()) mcpConfig.cwd = String(form.mcp_cwd).trim();
+      if (String(form.mcp_env || '').trim()) {
+        try { mcpConfig.env = JSON.parse(String(form.mcp_env).trim()); } catch { /* ignore */ }
+      }
+    }
     return {
-      url: String(form.url || '').trim(),
+      url: isStdio ? '' : String(form.url || '').trim(),
       server_label: String(form.server_label || '').trim(),
       auth: {
         type: authType,
@@ -4541,11 +4567,7 @@ function ToolsPanel({ createToolConfig, discoverMcpTools, deleteToolConfig, isDa
       },
       timeout_seconds: clampToolTimeout('mcp', timeout),
       enabled: Boolean(form.enabled),
-      mcp: {
-        transport: mcpTransportValue(form.mcp_transport, form.url),
-        tool_name: tool?.mcp?.tool_name || tool?.name || '',
-        input_schema: tool?.mcp?.input_schema || { type: 'object', properties: {} },
-      },
+      mcp: mcpConfig,
     };
   }
 
@@ -4627,7 +4649,7 @@ function ToolsPanel({ createToolConfig, discoverMcpTools, deleteToolConfig, isDa
 
   function applyMcpDiscovery(item) {
     const nextMcp = item?.mcp || {};
-    updateToolForm({
+    const patch = {
       name: item?.name || form.name,
       label: item?.label || form.label,
       description: item?.description || form.description,
@@ -4635,31 +4657,65 @@ function ToolsPanel({ createToolConfig, discoverMcpTools, deleteToolConfig, isDa
       mcp_tool_name: nextMcp.tool_name || item?.name || form.mcp_tool_name,
       mcp_input_schema: JSON.stringify(nextMcp.input_schema || { type: 'object', properties: {} }, null, 2),
       server_label: form.server_label || item?.server_label,
-    });
+    };
+    if (nextMcp.transport === 'stdio') {
+      patch.mcp_command = nextMcp.command || form.mcp_command || '';
+      patch.mcp_args = Array.isArray(nextMcp.args) ? nextMcp.args.join(' ') : (nextMcp.args || form.mcp_args || '');
+      patch.mcp_cwd = nextMcp.cwd || form.mcp_cwd || '';
+      patch.mcp_env = nextMcp.env && typeof nextMcp.env === 'object' ? JSON.stringify(nextMcp.env, null, 2) : (form.mcp_env || '');
+    }
+    updateToolForm(patch);
   }
 
   async function fetchRemoteMcpItems() {
-    const auth = {
-      type: form.auth_type || 'none',
-      header_name: ['bearer', 'header'].includes(form.auth_type) ? form.auth_header_name || 'Authorization' : null,
-      query_name: form.auth_type === 'query' ? form.auth_query_name || null : null,
-    };
-    if (needsAuthSecret && String(form.auth_secret || '').trim()) {
-      auth.secret = String(form.auth_secret).trim();
-    }
-    const data = await discoverMcpTools({
+    const transport = mcpTransportValue(form.mcp_transport, form.url);
+    const payload = {
       tool_id: editingTool?.id || null,
       server_label: String(form.server_label || '').trim(),
-      transport: mcpTransportValue(form.mcp_transport, form.url),
-      url: String(form.url || '').trim(),
-      auth,
+      transport,
       timeout_seconds: clampToolTimeout('mcp', Number(form.timeout_seconds)),
-    });
+    };
+    if (transport === 'stdio') {
+      const argsStr = String(form.mcp_args || '').trim();
+      payload.mcp = {
+        transport: 'stdio',
+        command: String(form.mcp_command || '').trim(),
+        args: argsStr ? argsStr.split(/\s+/) : [],
+      };
+      if (String(form.mcp_cwd || '').trim()) {
+        payload.mcp.cwd = String(form.mcp_cwd).trim();
+      }
+      if (String(form.mcp_env || '').trim()) {
+        try {
+          payload.mcp.env = JSON.parse(String(form.mcp_env).trim());
+        } catch {
+          // ignore invalid JSON
+        }
+      }
+    } else {
+      const auth = {
+        type: form.auth_type || 'none',
+        header_name: ['bearer', 'header'].includes(form.auth_type) ? form.auth_header_name || 'Authorization' : null,
+        query_name: form.auth_type === 'query' ? form.auth_query_name || null : null,
+      };
+      if (needsAuthSecret && String(form.auth_secret || '').trim()) {
+        auth.secret = String(form.auth_secret).trim();
+      }
+      payload.url = String(form.url || '').trim();
+      payload.auth = auth;
+    }
+    const data = await discoverMcpTools(payload);
     return data.items || [];
   }
 
   async function discoverRemoteMcpTools() {
-    if (!form.url.trim()) {
+    const transport = mcpTransportValue(form.mcp_transport, form.url);
+    if (transport === 'stdio') {
+      if (!String(form.mcp_command || '').trim()) {
+        showToolError('请先填写 MCP 命令 (mcp.command)');
+        return;
+      }
+    } else if (!form.url.trim()) {
       showToolError('请先填写 MCP 服务器 URL');
       return;
     }
@@ -4788,227 +4844,341 @@ function ToolsPanel({ createToolConfig, discoverMcpTools, deleteToolConfig, isDa
               <p>{isEditingMcpGroup ? '修改该 MCP 服务下所有小工具共享的 URL、超时、鉴权和启用状态。' : editingTool ? '修改工具基础配置、Schema、超时和启用状态。已保存的密钥不会回显，需要单独替换。' : '配置可绑定到智能体的 HTTP、MCP 或内置联网搜索工具。密钥只提交一次，保存后不回显。'}</p>
             </header>
             <form className="tool-form dialog-form" onSubmit={submitTool}>
-              <div className="tool-type-switch">
-                <button type="button" disabled={!!editingTool || isEditingMcpGroup} className={form.type === 'http' ? 'active' : ''} onClick={() => switchType('http')}>HTTP</button>
-                <button type="button" disabled={!!editingTool || isEditingMcpGroup} className={form.type === 'mcp' ? 'active' : ''} onClick={() => switchType('mcp')}>MCP</button>
-                <button type="button" disabled={!!editingTool || isEditingMcpGroup} className={form.type === 'builtin_search' ? 'active' : ''} onClick={() => switchType('builtin_search')}>builtin_search</button>
-              </div>
-              <div className="tool-form-grid">
-                {isMcpForm ? (
-                  <label className="field-stack">
-                    <span>server_label</span>
-                    <input value={form.server_label} onChange={(event) => updateToolForm({ server_label: event.target.value })} placeholder="Amap Maps 高德地图" autoFocus />
-                  </label>
-                ) : (
-                  <>
-                    <label className="field-stack">
-                      <span>name</span>
-                      <input value={form.name} onChange={(event) => updateToolForm({ name: event.target.value })} placeholder="weather_lookup" autoFocus />
-                    </label>
-                    <label className="field-stack">
-                      <span>label</span>
-                      <input value={form.label} onChange={(event) => updateToolForm({ label: event.target.value })} placeholder="Weather lookup" />
-                    </label>
-                  </>
-                )}
-                {isHttpForm && (
-                  <label className="field-stack">
-                    <span>method</span>
-                    <select value={form.method} onChange={(event) => updateToolForm({ method: event.target.value })}>
-                      {['GET', 'POST', 'PUT', 'PATCH', 'DELETE'].map((method) => <option key={method} value={method}>{method}</option>)}
-                    </select>
-                  </label>
-                )}
-                {(isHttpForm || isMcpForm) && (
-                  <label className="field-stack tool-url-field">
-                    <span>url</span>
-                    <input
-                      value={form.url}
-                      onChange={(event) => {
-                        const nextUrl = event.target.value;
-                        const inferredTransport = mcpTransportValue('', nextUrl);
-                        updateToolForm({
-                          url: nextUrl,
-                          ...(isMcpForm && inferredTransport === 'sse' ? { mcp_transport: inferredTransport } : {}),
-                        });
-                      }}
-                      placeholder={isMcpForm ? 'https://dashscope.aliyuncs.com/api/v1/mcps/WebParser/sse' : 'https://api.example.com/weather'}
-                    />
-                  </label>
-                )}
-                {isMcpForm && (
-                  <label className="field-stack">
-                    <span>mcp.transport</span>
-                    <select value={mcpTransportValue(form.mcp_transport, form.url)} onChange={(event) => updateToolForm({ mcp_transport: event.target.value })}>
-                      <option value="streamable_http">streamable_http</option>
-                      <option value="sse">sse</option>
-                    </select>
-                  </label>
-                )}
-                {isHttpForm && (
-                  <label className="field-stack">
-                    <span>response_path</span>
-                    <input value={form.response_path} onChange={(event) => updateToolForm({ response_path: event.target.value })} placeholder="$" />
-                  </label>
-                )}
-                {(isHttpForm || isMcpForm) && (
-                  <label className="field-stack">
-                    <span>timeout_seconds</span>
-                    <input type="number" min="1" max={toolTimeoutMax(isMcpForm ? 'mcp' : 'http')} value={form.timeout_seconds} onChange={(event) => updateToolForm({ timeout_seconds: event.target.value })} />
-                    {isMcpForm && <small>MCP 工具默认 30s，慢速网页解析可调高到 120s。</small>}
-                  </label>
-                )}
-                {isMcpForm && editingTool && !isEditingMcpGroup && (
-                  <label className="field-stack">
-                    <span>mcp.tool_name</span>
-                    <input value={form.mcp_tool_name} onChange={(event) => updateToolForm({ mcp_tool_name: event.target.value })} placeholder="get_weather" />
-                  </label>
-                )}
-                {!isEditingMcpGroup && !isMcpForm && (
-                  <label className="field-stack tool-description-field">
-                    <span>description</span>
-                    <textarea value={form.description} onChange={(event) => updateToolForm({ description: event.target.value })} placeholder="工具能力说明" />
-                  </label>
-                )}
-              </div>
-              {!isMcpForm && (
-                <div className="coze-param-editor-container" style={{ gridColumn: 'span 2', display: 'flex', flexDirection: 'column', gap: '12px', marginTop: '8px' }}>
-                  {isHttpForm && (
-                    <ParamTableEditor 
-                      isDarkTheme={isDarkTheme}
-                      label="Headers 参数结构定义 (headers_schema)" 
-                      params={headersParams} 
-                      onChange={(next) => {
-                        setHeadersParams(next);
-                        updateToolForm({ headers_schema: paramsToSchema(next) });
-                      }} 
-                    />
-                  )}
-                  <ParamTableEditor 
-                    isDarkTheme={isDarkTheme}
-                    label={isHttpForm ? "Query 请求参数定义 (query_schema)" : "联网搜索参数定义 (search_query_schema)"} 
-                    params={queryParams} 
-                    onChange={(next) => {
-                      setQueryParams(next);
-                      updateToolForm({ query_schema: paramsToSchema(next) });
-                    }} 
-                  />
-                  {needsBodySchema && (
-                    <ParamTableEditor 
-                      isDarkTheme={isDarkTheme}
-                      label="Body 请求体定义 (body_schema)" 
-                      params={bodyParams} 
-                      onChange={(next) => {
-                        setBodyParams(next);
-                        updateToolForm({ body_schema: paramsToSchema(next) });
-                      }} 
-                    />
-                  )}
-                </div>
-              )}
-              {isMcpForm && !isEditingMcpGroup && (
-                <div className="coze-param-editor-container" style={{ gridColumn: 'span 2', display: 'grid', gap: '12px', marginTop: '8px' }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
-                    <strong style={{ fontSize: '13px' }}>MCP 工具定义</strong>
-                    <button type="button" onClick={() => discoverRemoteMcpTools()} disabled={discoveringMcp || !form.url.trim()} style={toolAccentButtonStyle}>
-                      <Sparkles size={13} />
-                      {discoveringMcp ? '读取中...' : '读取远端工具'}
-                    </button>
+              <div className="tool-modal-body">
+                {/* ── Left: type selector ── */}
+                <div className="tool-type-panel">
+                  <div className="tool-type-switch">
+                    <button type="button" disabled={!!editingTool || isEditingMcpGroup} className={form.type === 'http' ? 'active' : ''} onClick={() => switchType('http')}>HTTP</button>
+                    <button type="button" disabled={!!editingTool || isEditingMcpGroup} className={form.type === 'mcp' ? 'active' : ''} onClick={() => switchType('mcp')}>MCP</button>
+                    <button type="button" disabled={!!editingTool || isEditingMcpGroup} className={form.type === 'builtin_search' ? 'active' : ''} onClick={() => switchType('builtin_search')}>builtin_search</button>
                   </div>
-                  {mcpDiscoveries.length > 0 && (
-                    <div style={{ display: 'grid', gap: '8px' }}>
-                      {mcpDiscoveries.map((item, index) => (
-                        <div
-                          key={`${item.name || item.label}-${index}`}
-                          role={editingTool ? 'button' : undefined}
-                          tabIndex={editingTool ? 0 : undefined}
-                          onClick={editingTool ? () => applyMcpDiscovery(item) : undefined}
-                          onKeyDown={editingTool ? (event) => {
-                            if (event.key === 'Enter' || event.key === ' ') {
-                              event.preventDefault();
-                              applyMcpDiscovery(item);
-                            }
-                          } : undefined}
-                          style={{
-                            ...toolButtonStyle,
-                            justifyContent: 'space-between',
-                            textAlign: 'left',
-                            cursor: editingTool ? 'pointer' : 'default',
-                            background: editingTool ? toolButtonStyle.background : toolTheme.rowBg,
-                          }}
-                        >
-                          <span style={{ display: 'grid', gap: '2px' }}>
-                            <strong>{item.label || item.name}</strong>
-                            <small style={{ color: toolTheme.text }}>{item.description || '无描述'}</small>
-                          </span>
-                          <span style={{ color: toolTheme.accentText }}>{editingTool ? '使用' : '将保存'}</span>
+                </div>
+
+                {/* ── Right: config form grid ── */}
+                <div className="tool-config-form">
+                  {/* ── Non-MCP: name + label ── */}
+                  {!isMcpForm && !isEditingMcpGroup && (
+                    <>
+                      <div className="form-field">
+                        <label>name</label>
+                        <input value={form.name} onChange={(event) => updateToolForm({ name: event.target.value })} placeholder="weather_lookup" autoFocus />
+                      </div>
+                      <div className="form-field">
+                        <label>label</label>
+                        <input value={form.label} onChange={(event) => updateToolForm({ label: event.target.value })} placeholder="Weather lookup" />
+                      </div>
+                    </>
+                  )}
+
+                  {/* ── MCP: server_label + transport ── */}
+                  {isMcpForm && (
+                    <>
+                      <div className="form-field">
+                        <label>server_label</label>
+                        <input value={form.server_label} onChange={(event) => updateToolForm({ server_label: event.target.value })} placeholder="请输入服务标签" autoFocus />
+                      </div>
+                      <div className="form-field">
+                        <label>mcp.transport</label>
+                        <select value={mcpTransportValue(form.mcp_transport, form.url)} onChange={(event) => updateToolForm({ mcp_transport: event.target.value })}>
+                          <option value="streamable_http">streamable_http</option>
+                          <option value="sse">sse</option>
+                          <option value="stdio">stdio</option>
+                        </select>
+                      </div>
+                    </>
+                  )}
+
+                  {/* ── HTTP: method + response_path ── */}
+                  {isHttpForm && (
+                    <>
+                      <div className="form-field">
+                        <label>method</label>
+                        <select value={form.method} onChange={(event) => updateToolForm({ method: event.target.value })}>
+                          {['GET', 'POST', 'PUT', 'PATCH', 'DELETE'].map((method) => <option key={method} value={method}>{method}</option>)}
+                        </select>
+                      </div>
+                      <div className="form-field">
+                        <label>response_path</label>
+                        <input value={form.response_path} onChange={(event) => updateToolForm({ response_path: event.target.value })} placeholder="$" />
+                      </div>
+                    </>
+                  )}
+
+                  {/* ── Remote MCP / HTTP: url (full width) ── */}
+                  {(isHttpForm || isMcpRemote) && (
+                    <div className="form-field full">
+                      <label>url</label>
+                      <input
+                        value={form.url}
+                        onChange={(event) => {
+                          const nextUrl = event.target.value;
+                          const inferredTransport = mcpTransportValue('', nextUrl);
+                          updateToolForm({
+                            url: nextUrl,
+                            ...(isMcpForm && inferredTransport === 'sse' ? { mcp_transport: inferredTransport } : {}),
+                          });
+                        }}
+                        placeholder={isMcpForm ? 'https://dashscope.aliyuncs.com/api/v1/mcps/WebParser/sse' : 'https://api.example.com/weather'}
+                      />
+                    </div>
+                  )}
+
+                  {/* ── stdio: command + timeout_seconds ── */}
+                  {isMcpStdio && (
+                    <>
+                      <div className="form-field">
+                        <label>mcp.command</label>
+                        <input
+                          value={form.mcp_command || ''}
+                          onChange={(event) => updateToolForm({ mcp_command: event.target.value })}
+                          placeholder="npx"
+                          autoFocus
+                        />
+                        <p className="field-help">启动 MCP 服务器的可执行命令，例如 npx、node、python</p>
+                      </div>
+                      <div className="form-field">
+                        <label>timeout_seconds</label>
+                        <input type="number" min="1" max={toolTimeoutMax('mcp')} value={form.timeout_seconds} onChange={(event) => updateToolForm({ timeout_seconds: event.target.value })} />
+                        <p className="field-help">MCP 工具默认 30s，慢速网页解析可调高到 120s</p>
+                      </div>
+                    </>
+                  )}
+
+                  {/* ── stdio: mcp.args (full width) ── */}
+                  {isMcpStdio && (
+                    <div className="form-field full">
+                      <label>mcp.args</label>
+                      <textarea
+                        value={form.mcp_args || ''}
+                        onChange={(event) => updateToolForm({ mcp_args: event.target.value })}
+                        placeholder="@playwright/mcp"
+                        rows={2}
+                      />
+                      <p className="field-help">参数以空格分隔，例如：@playwright/mcp --allowed-hosts=example.com</p>
+                    </div>
+                  )}
+
+                  {/* ── stdio: mcp.cwd (full width) ── */}
+                  {isMcpStdio && (
+                    <div className="form-field full">
+                      <label>mcp.cwd (可选)</label>
+                      <input
+                        value={form.mcp_cwd || ''}
+                        onChange={(event) => updateToolForm({ mcp_cwd: event.target.value })}
+                        placeholder="C:\Users\Ivy\project"
+                      />
+                      <p className="field-help">MCP 进程的工作目录，留空使用后端当前工作目录</p>
+                    </div>
+                  )}
+
+                  {/* ── stdio: mcp.env (full width) ── */}
+                  {isMcpStdio && (
+                    <div className="form-field full">
+                      <label>mcp.env (可选)</label>
+                      <textarea
+                        value={form.mcp_env || ''}
+                        onChange={(event) => updateToolForm({ mcp_env: event.target.value })}
+                        placeholder='{"KEY":"value","DEBUG":"pw:api"}'
+                        rows={3}
+                      />
+                      <p className="field-help">JSON 格式的环境变量，例如 {'{'}"DEBUG": "pw:api"{'}'}</p>
+                    </div>
+                  )}
+
+                  {/* ── timeout_seconds for non-stdio ── */}
+                  {!isMcpStdio && (isHttpForm || isMcpForm) && (
+                    <div className="form-field">
+                      <label>timeout_seconds</label>
+                      <input type="number" min="1" max={toolTimeoutMax(isMcpForm ? 'mcp' : 'http')} value={form.timeout_seconds} onChange={(event) => updateToolForm({ timeout_seconds: event.target.value })} />
+                      {isMcpForm && <p className="field-help">MCP 工具默认 30s</p>}
+                    </div>
+                  )}
+
+                  {/* ── MCP editing: tool_name + input_schema ── */}
+                  {isMcpForm && editingTool && !isEditingMcpGroup && (
+                    <>
+                      <div className="form-field">
+                        <label>mcp.tool_name</label>
+                        <input value={form.mcp_tool_name} onChange={(event) => updateToolForm({ mcp_tool_name: event.target.value })} placeholder="get_weather" />
+                      </div>
+                      <div className="form-field full">
+                        <label>mcp.input_schema</label>
+                        <textarea value={form.mcp_input_schema} onChange={(event) => updateToolForm({ mcp_input_schema: event.target.value })} placeholder='{"type":"object","properties":{}}' rows={3} />
+                      </div>
+                    </>
+                  )}
+
+                  {/* ── Non-MCP: description (full width) ── */}
+                  {!isEditingMcpGroup && !isMcpForm && (
+                    <div className="form-field full">
+                      <label>description</label>
+                      <textarea value={form.description} onChange={(event) => updateToolForm({ description: event.target.value })} placeholder="工具能力说明" rows={3} />
+                    </div>
+                  )}
+
+                  {/* ── Auth section for remote MCP / HTTP ── */}
+                  {(isHttpForm || isMcpRemote) && (
+                    <>
+                      <div className="form-field">
+                        <label>auth.type</label>
+                        <select value={form.auth_type} onChange={(event) => updateToolForm({ auth_type: event.target.value })}>
+                          <option value="none">none</option>
+                          <option value="bearer">bearer</option>
+                          <option value="header">header</option>
+                          <option value="query">query</option>
+                        </select>
+                      </div>
+                      {needsAuthHeader && (
+                        <div className="form-field">
+                          <label>auth.header_name</label>
+                          <input value={form.auth_header_name} onChange={(event) => updateToolForm({ auth_header_name: event.target.value })} placeholder="Authorization" />
                         </div>
-                      ))}
+                      )}
+                      {needsAuthQuery && (
+                        <div className="form-field">
+                          <label>auth.query_name</label>
+                          <input value={form.auth_query_name} onChange={(event) => updateToolForm({ auth_query_name: event.target.value })} placeholder="api_key" />
+                        </div>
+                      )}
+                      {!editingTool && !isEditingMcpGroup && needsAuthSecret && (
+                        <div className="form-field">
+                          <label>auth.secret</label>
+                          <input type="password" value={form.auth_secret} onChange={(event) => updateToolForm({ auth_secret: event.target.value })} placeholder="只提交一次，不回显" autoComplete="off" />
+                        </div>
+                      )}
+                      {editingTool && needsAuthSecret && (
+                        <div className="form-field full">
+                          <div className="tool-edit-secret-note">
+                            <strong>密钥不在编辑表单中回显</strong>
+                            <span>需要换密钥时，在列表里点击"替换 Secret"。</span>
+                          </div>
+                        </div>
+                      )}
+                      {isEditingMcpGroup && needsAuthSecret && (
+                        <div className="form-field full">
+                          <div className="tool-edit-secret-note">
+                            <strong>密钥不在编辑表单中回显</strong>
+                            <span>需要换密钥时，在 MCP 父项点击"更新密钥"。</span>
+                          </div>
+                        </div>
+                      )}
+                    </>
+                  )}
+
+                  {/* ── MCP discovery section ── */}
+                  {isMcpForm && !isEditingMcpGroup && (
+                    <div className="tool-mcp-discovery">
+                      <div className="tool-mcp-discovery-header">
+                        <strong>MCP 工具定义</strong>
+                        <button
+                          type="button"
+                          onClick={() => discoverRemoteMcpTools()}
+                          disabled={discoveringMcp || (isMcpStdio ? !String(form.mcp_command || '').trim() : !form.url.trim())}
+                          style={toolAccentButtonStyle}
+                        >
+                          <Sparkles size={13} />
+                          {discoveringMcp ? '读取中...' : isMcpStdio ? '读取本地工具' : '读取远端工具'}
+                        </button>
+                      </div>
+                      {mcpDiscoveries.length > 0 && (
+                        <div style={{ display: 'grid', gap: '8px' }}>
+                          {mcpDiscoveries.map((item, index) => (
+                            <div
+                              key={`${item.name || item.label}-${index}`}
+                              role={editingTool ? 'button' : undefined}
+                              tabIndex={editingTool ? 0 : undefined}
+                              onClick={editingTool ? () => applyMcpDiscovery(item) : undefined}
+                              onKeyDown={editingTool ? (event) => {
+                                if (event.key === 'Enter' || event.key === ' ') {
+                                  event.preventDefault();
+                                  applyMcpDiscovery(item);
+                                }
+                              } : undefined}
+                              style={{
+                                ...toolButtonStyle,
+                                justifyContent: 'space-between',
+                                textAlign: 'left',
+                                cursor: editingTool ? 'pointer' : 'default',
+                                background: editingTool ? toolButtonStyle.background : toolTheme.rowBg,
+                              }}
+                            >
+                              <span style={{ display: 'grid', gap: '2px' }}>
+                                <strong>{item.label || item.name}</strong>
+                                <small style={{ color: toolTheme.text }}>{item.description || '无描述'}</small>
+                              </span>
+                              <span style={{ color: toolTheme.accentText }}>{editingTool ? '使用' : '将保存'}</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
                     </div>
                   )}
-                  {editingTool && (
-                    <label className="field-stack">
-                      <span>mcp.input_schema</span>
-                      <textarea value={form.mcp_input_schema} onChange={(event) => updateToolForm({ mcp_input_schema: event.target.value })} placeholder='{"type":"object","properties":{}}' />
-                    </label>
+
+                  {/* ── Footer: enable + security note + actions ── */}
+                  <div className="tool-config-footer">
+                    <div className="model-checks" style={{ flex: '0 0 auto' }}>
+                      <label><input type="checkbox" checked={form.enabled} onChange={(event) => updateToolForm({ enabled: event.target.checked })} />启用</label>
+                    </div>
+                    <div className="tool-security-note" style={{ fontSize: '12px', color: '#6b7280', minWidth: 0 }}>
+                      {isHttpForm && 'HTTP 工具必须使用 https://，后端负责阻断 localhost、私网和 metadata 地址。'}
+                      {isMcpRemote && 'MCP 支持 Streamable HTTP 和 SSE；http:// 仅允许本机 localhost，公网地址请使用 https://。'}
+                      {isMcpStdio && 'stdio 传输在本地启动子进程通信（如 npx @playwright/mcp），默认无网络鉴权。'}
+                    </div>
+                  </div>
+
+                  {/* ── Non-MCP schema editors (full width) ── */}
+                  {!isMcpForm && (
+                    <div className="form-field full" style={{ gap: '10px' }}>
+                      {isHttpForm && (
+                        <ParamTableEditor
+                          isDarkTheme={isDarkTheme}
+                          label="Headers 参数结构定义 (headers_schema)"
+                          params={headersParams}
+                          onChange={(next) => {
+                            setHeadersParams(next);
+                            updateToolForm({ headers_schema: paramsToSchema(next) });
+                          }}
+                        />
+                      )}
+                      <ParamTableEditor
+                        isDarkTheme={isDarkTheme}
+                        label={isHttpForm ? "Query 请求参数定义 (query_schema)" : "联网搜索参数定义 (search_query_schema)"}
+                        params={queryParams}
+                        onChange={(next) => {
+                          setQueryParams(next);
+                          updateToolForm({ query_schema: paramsToSchema(next) });
+                        }}
+                      />
+                      {needsBodySchema && (
+                        <ParamTableEditor
+                          isDarkTheme={isDarkTheme}
+                          label="Body 请求体定义 (body_schema)"
+                          params={bodyParams}
+                          onChange={(next) => {
+                            setBodyParams(next);
+                            updateToolForm({ body_schema: paramsToSchema(next) });
+                          }}
+                        />
+                      )}
+                    </div>
                   )}
                 </div>
-              )}
-              {(isHttpForm || isMcpForm) && (
-                <div className="tool-auth-grid">
-                  <label className="field-stack">
-                    <span>auth.type</span>
-                    <select value={form.auth_type} onChange={(event) => updateToolForm({ auth_type: event.target.value })}>
-                      <option value="none">none</option>
-                      <option value="bearer">bearer</option>
-                      <option value="header">header</option>
-                      <option value="query">query</option>
-                    </select>
-                  </label>
-                  {needsAuthHeader && (
-                    <label className="field-stack">
-                      <span>auth.header_name</span>
-                      <input value={form.auth_header_name} onChange={(event) => updateToolForm({ auth_header_name: event.target.value })} placeholder="Authorization" />
-                    </label>
-                  )}
-                  {needsAuthQuery && (
-                    <label className="field-stack">
-                      <span>auth.query_name</span>
-                      <input value={form.auth_query_name} onChange={(event) => updateToolForm({ auth_query_name: event.target.value })} placeholder="api_key" />
-                    </label>
-                  )}
-                  {!editingTool && !isEditingMcpGroup && needsAuthSecret && (
-                    <label className="field-stack">
-                      <span>auth.secret</span>
-                       <input type="password" value={form.auth_secret} onChange={(event) => updateToolForm({ auth_secret: event.target.value })} placeholder="只提交一次，不回显" autoComplete="off" />
-                    </label>
-                  )}
-                  {editingTool && needsAuthSecret && (
-                    <div className="tool-edit-secret-note">
-                      <strong>密钥不在编辑表单中回显</strong>
-                      <span>需要换密钥时，在列表里点击“替换 Secret”。</span>
-                    </div>
-                  )}
-                  {isEditingMcpGroup && needsAuthSecret && (
-                    <div className="tool-edit-secret-note">
-                      <strong>密钥不在编辑表单中回显</strong>
-                      <span>需要换密钥时，在 MCP 父项点击“更新密钥”。</span>
-                    </div>
-                  )}
-                </div>
-              )}
-              <div className="model-checks">
-                <label><input type="checkbox" checked={form.enabled} onChange={(event) => updateToolForm({ enabled: event.target.checked })} />启用</label>
-                {isHttpForm && (
-                  <span className="tool-security-note">HTTP 工具必须使用 https://，后端负责阻断 localhost、私网和 metadata 地址。</span>
-                )}
-                {isMcpForm && (
-                  <span className="tool-security-note">MCP 支持 Streamable HTTP 和 SSE；`http://` 仅允许本机 localhost，公网地址请使用 `https://`。</span>
-                )}
               </div>
-              <footer className="dialog-actions">
+
+              <footer className="dialog-actions form-actions-right">
                 <button type="button" onClick={closeToolForm} disabled={saving}>取消</button>
-                <button className="primary-model-action" type="submit" disabled={saving || (!isEditingMcpGroup && !isMcpForm && (!form.name.trim() || !form.label.trim())) || ((form.type === 'http' || form.type === 'mcp') && !form.url.trim()) || (form.type === 'mcp' && editingTool && !form.mcp_tool_name.trim())}>
+                <button
+                  className="primary-model-action"
+                  type="submit"
+                  disabled={
+                    saving
+                    || (!isEditingMcpGroup && !isMcpForm && (!form.name.trim() || !form.label.trim()))
+                    || (isMcpStdio && !String(form.mcp_command || '').trim())
+                    || (isMcpRemote && !form.url.trim())
+                    || (isHttpForm && !form.url.trim())
+                    || (isMcpForm && editingTool && !form.mcp_tool_name.trim())
+                  }
+                >
                   <Plus size={15} />{saving ? '保存中...' : isEditingMcpGroup ? '保存 MCP 工具组' : editingTool ? '保存修改' : isCreatingMcpGroup ? '保存全部 MCP 工具' : '保存工具'}
                 </button>
               </footer>
@@ -5979,7 +6149,7 @@ function UserModelsPanel({
                 <label><input type="checkbox" checked={form.enabled} onChange={(event) => updateForm({ enabled: event.target.checked })} />启用</label>
                 <label><input type="checkbox" checked={form.is_default} onChange={(event) => updateForm({ is_default: event.target.checked })} />设为默认</label>
               </div>
-              {formReady && !draftTestResult?.ok && <p className="model-row-warning">保存前请先点击“测试当前配置”。图片探测用于判断是否可发送图片附件；文档附件由后端解析成文本，RAG/Embedding 使用后端默认配置。</p>}
+              {formReady && !draftTestResult?.ok && <p className="model-row-warning">保存前请先点击"测试当前配置"。图片探测用于判断是否可发送图片附件；文档附件由后端解析成文本，RAG/Embedding 使用后端默认配置。</p>}
               {draftTestResult && <UserModelTestResult result={draftTestResult} />}
               <div className="model-form-actions">
                 <button className="preset-action" type="button" disabled={draftTesting || saving || !formReady} onClick={testDraftModel}>{draftTesting ? '检测中' : '测试当前配置'}</button>
@@ -6035,7 +6205,7 @@ function UserModelsPanel({
             </button>
             <header className="model-dialog-heading">
               <h3>编辑模型</h3>
-              <p>修改模型地址、名称和运行参数。API Key 不回显，需要用“替换 Key”单独更新。</p>
+              <p>修改模型地址、名称和运行参数。API Key 不回显，需要用"替换 Key"单独更新。</p>
             </header>
             <form className="user-model-form" onSubmit={submitEditUserModel}>
               <div className="model-channel-card">
@@ -6442,7 +6612,9 @@ function toolFormPayload(form, { includeSecret = false } = {}) {
   const timeout = Number(form.timeout_seconds);
   const isHttp = form.type === 'http';
   const isMcp = form.type === 'mcp';
-  const authType = (isHttp || isMcp) ? form.auth_type || 'none' : 'none';
+  const transport = isMcp ? mcpTransportValue(form.mcp_transport, form.url) : 'streamable_http';
+  const isMcpStdio = isMcp && transport === 'stdio';
+  const authType = (isHttp || (isMcp && !isMcpStdio)) ? form.auth_type || 'none' : 'none';
   const auth = {
     type: authType,
     header_name: ['bearer', 'header'].includes(authType) ? form.auth_header_name || 'Authorization' : null,
@@ -6453,6 +6625,22 @@ function toolFormPayload(form, { includeSecret = false } = {}) {
   }
   const method = String(form.method || 'GET').toUpperCase();
   const hasBodySchema = isHttp && !['GET', 'DELETE'].includes(method);
+  const mcpConfig = isMcp ? {
+    transport,
+    tool_name: String(form.mcp_tool_name || '').trim(),
+    input_schema: parseJsonField(form.mcp_input_schema || '{}', 'mcp.input_schema'),
+  } : {};
+  if (isMcpStdio) {
+    const argsStr = String(form.mcp_args || '').trim();
+    mcpConfig.command = String(form.mcp_command || '').trim();
+    mcpConfig.args = argsStr ? argsStr.split(/\s+/) : [];
+    if (String(form.mcp_cwd || '').trim()) {
+      mcpConfig.cwd = String(form.mcp_cwd).trim();
+    }
+    if (String(form.mcp_env || '').trim()) {
+      mcpConfig.env = parseJsonField(form.mcp_env, 'mcp.env');
+    }
+  }
   return {
     type: isHttp ? 'http' : isMcp ? 'mcp' : form.type,
     name: String(form.name || '').trim(),
@@ -6461,18 +6649,14 @@ function toolFormPayload(form, { includeSecret = false } = {}) {
     server_label: String(form.server_label || '').trim(),
     enabled: Boolean(form.enabled),
     method: isHttp ? method : isMcp ? 'POST' : method,
-    url: (isHttp || isMcp) ? String(form.url || '').trim() : '',
+    url: isMcpStdio ? '' : (isHttp || isMcp) ? String(form.url || '').trim() : '',
     headers_schema: isHttp ? parseJsonField(form.headers_schema, 'headers_schema') : {},
     query_schema: isHttp || form.type === 'builtin_search' ? parseJsonField(form.query_schema, 'query_schema') : {},
     body_schema: hasBodySchema ? parseJsonField(form.body_schema, 'body_schema') : {},
     auth,
     response_path: isHttp ? String(form.response_path || '$').trim() || '$' : '$',
     timeout_seconds: (isHttp || isMcp) ? clampToolTimeout(isMcp ? 'mcp' : 'http', timeout) : 10,
-    mcp: isMcp ? {
-      transport: mcpTransportValue(form.mcp_transport, form.url),
-      tool_name: String(form.mcp_tool_name || '').trim(),
-      input_schema: parseJsonField(form.mcp_input_schema || '{}', 'mcp.input_schema'),
-    } : {},
+    mcp: mcpConfig,
   };
 }
 
@@ -6493,7 +6677,7 @@ function clampToolTimeout(type, value) {
 
 function mcpTransportValue(value, url = '') {
   const raw = String(value || '').trim().toLowerCase();
-  if (raw === 'sse' || raw === 'streamable_http') return raw;
+  if (raw === 'sse' || raw === 'streamable_http' || raw === 'stdio') return raw;
   if (raw === 'streamable-http' || raw === 'streamablehttp') return 'streamable_http';
   const path = (() => {
     try {
@@ -6525,7 +6709,7 @@ function uniqueToolName(name, usedNames) {
 
 function formWithMcpDiscovery(form, item, name) {
   const nextMcp = item?.mcp || {};
-  return {
+  const result = {
     ...form,
     type: 'mcp',
     name: name || item?.name || form.name,
@@ -6536,23 +6720,38 @@ function formWithMcpDiscovery(form, item, name) {
     mcp_input_schema: JSON.stringify(nextMcp.input_schema || { type: 'object', properties: {} }, null, 2),
     server_label: form.server_label || item?.server_label,
   };
+  if (nextMcp.transport === 'stdio') {
+    result.mcp_command = nextMcp.command || form.mcp_command || '';
+    result.mcp_args = Array.isArray(nextMcp.args) ? nextMcp.args.join(' ') : (nextMcp.args || form.mcp_args || '');
+    result.mcp_cwd = nextMcp.cwd || form.mcp_cwd || '';
+    result.mcp_env = nextMcp.env && typeof nextMcp.env === 'object' ? JSON.stringify(nextMcp.env, null, 2) : (form.mcp_env || '');
+  }
+  return result;
 }
 
 function buildMcpDiscoveryPayloads(form, discoveries, existingTools = []) {
   const usedNames = new Set(existingTools.map((tool) => tool?.name).filter(Boolean));
+  const isStdio = mcpTransportValue(form.mcp_transport, form.url) === 'stdio';
   const existingRemoteKeys = new Set(
     existingTools
       .filter((tool) => toolType(tool) === 'mcp')
-      .map((tool) => `${String(tool?.url || '').trim()}\n${String(tool?.mcp?.tool_name || '').trim()}`)
+      .map((tool) => {
+        const keyUrl = isStdio
+          ? `${String(tool?.mcp?.command || '').trim()}\n${(tool?.mcp?.args || []).join(' ')}`
+          : String(tool?.url || '').trim();
+        return `${keyUrl}\n${String(tool?.mcp?.tool_name || '').trim()}`;
+      })
   );
-  const url = String(form.url || '').trim();
+  const identifier = isStdio
+    ? `${String(form.mcp_command || '').trim()}\n${String(form.mcp_args || '').trim()}`
+    : String(form.url || '').trim();
   const payloads = [];
   let skippedCount = 0;
 
   for (const item of discoveries || []) {
     const remoteName = String(item?.mcp?.tool_name || item?.label || item?.name || '').trim();
     if (!remoteName) continue;
-    const remoteKey = `${url}\n${remoteName}`;
+    const remoteKey = `${identifier}\n${remoteName}`;
     if (existingRemoteKeys.has(remoteKey)) {
       skippedCount += 1;
       continue;
@@ -6739,7 +6938,7 @@ function searchStatusSummary(eventData = {}) {
   if (titles.length) return `结果：${titles.join('、')}`;
   if (eventData.reason === 'no_results') return '未返回可用搜索结果。';
   if (eventData.reason === 'web_search_unavailable') return '当前搜索运行时不可用。';
-  if (eventData.query) return `正在围绕“${eventData.query}”获取结果。`;
+  if (eventData.query) return `正在围绕"${eventData.query}"获取结果。`;
   return '';
 }
 
