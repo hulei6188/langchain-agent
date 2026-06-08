@@ -4875,7 +4875,7 @@ function ToolsPanel({ createToolConfig, discoverMcpTools, deleteToolConfig, isDa
                     <>
                       <div className="form-field">
                         <label>server_label</label>
-                        <input value={form.server_label} onChange={(event) => updateToolForm({ server_label: event.target.value })} placeholder="Amap Maps 高德地图" autoFocus />
+                        <input value={form.server_label} onChange={(event) => updateToolForm({ server_label: event.target.value })} placeholder="请输入服务标签" autoFocus />
                       </div>
                       <div className="form-field">
                         <label>mcp.transport</label>

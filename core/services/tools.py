@@ -439,19 +439,9 @@ BUILTIN_TOOLS: dict[str, dict] = {
             "运行脚本、安装依赖、启动服务、执行测试、执行 git 命令、调用 rg 搜索代码等。"
             "模型可以根据用户任务自行组织 PowerShell 命令并调用该工具。"
             "命令执行结果会返回 stdout、stderr、exit_code。"
-            "模型必须基于真实执行结果继续分析，不得编造结果。"
             "当用户需要你查看本地文件、搜索代码、分析项目、修改文件、运行测试、执行构建、安装依赖、启动服务时，你可以调用 run_powershell。"
             "你可以根据任务目标自行选择合适的 PowerShell 命令。"
             "可以连续多次调用工具，直到完成用户任务。"
-            "执行命令前，优先使用当前项目目录作为工作目录。"
-            "如果不确定当前目录，可以先执行 Get-Location。"
-            "如果需要查看项目结构，可以先执行 Get-ChildItem。"
-            "如果需要搜索代码内容，优先使用 rg。"
-            "如果需要读取文件，优先使用 Get-Content。"
-            "如果需要修改文件，可以使用 Set-Content、Add-Content 或 python 脚本批量修改。"
-            "如果命令失败，需要根据 stderr 和 exit_code 继续排查。"
-            "对于长输出，需要提取关键信息总结给用户。"
-            "不要编造执行结果，必须以 run_powershell 返回结果为准。"
         ),
         "parameters": {
             "type": "object",
@@ -945,6 +935,8 @@ def _execute_mcp_tool(tool: Tool, context: dict) -> dict:
             command = str(mcp.get("command") or "").strip()
             if not command:
                 raise ValueError("MCP stdio tool requires a command")
+            # Per-chat-session pooling key — isolates browser state
+            session_key = str(context.get("_session_key") or "").strip() or None
             result = call_stdio_mcp_tool(
                 command,
                 args=mcp.get("args") or [],
@@ -953,6 +945,7 @@ def _execute_mcp_tool(tool: Tool, context: dict) -> dict:
                 env=mcp.get("env"),
                 cwd=mcp.get("cwd"),
                 timeout_seconds=tool.timeout_seconds,
+                session_key=session_key,
             )
         else:
             server_url = str(tool.url or "").strip()

@@ -2616,7 +2616,7 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
   padding: 12px;
   border: 1px solid #e5e7eb;
   border-radius: 10px;
-  background: #fafbfc;
+  background: #f3f4f6;
 }
 .tool-mcp-discovery-header {
   display: flex;
@@ -2642,6 +2642,8 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
 .tool-config-footer .tool-security-note {
   flex: 1;
   min-width: 0;
+  color: #667085;
+  font-size: 12px;
 }
 .tool-config-footer .model-checks {
   grid-column: auto;
@@ -8230,6 +8232,55 @@ body.dark .suggestion-strip button:hover {
   border-color: #536078;
   background: #242938;
   color: #f3f4f7;
+}
+
+/* ── Dark: tool config dialog layout ── */
+body.dark .tool-type-panel .tool-type-switch button {
+  color: #9aa3b6;
+}
+body.dark .tool-type-panel .tool-type-switch button:hover:not(:disabled) {
+  background: #242938;
+  color: #f3f4f7;
+}
+body.dark .tool-type-panel .tool-type-switch button.active {
+  background: #e6e8ef;
+  color: #111827;
+  border-color: #e6e8ef;
+}
+
+body.dark .form-field > label {
+  color: #9aa3b6;
+}
+body.dark .form-field .field-help {
+  color: #6f7789;
+}
+
+body.dark .tool-mcp-discovery {
+  border-color: #303544;
+  background: #121620;
+}
+body.dark .tool-mcp-discovery-header strong {
+  color: #f3f4f7;
+}
+
+body.dark .tool-config-footer .tool-security-note {
+  color: #9aa3b6;
+}
+body.dark .dialog-actions.form-actions-right button:not(.primary-model-action) {
+  border-color: #364052;
+  background: #1f2430;
+  color: #d8dbe6;
+}
+body.dark .dialog-actions.form-actions-right button:not(.primary-model-action):hover:not(:disabled) {
+  border-color: #536078;
+  background: #242938;
+  color: #f3f4f7;
+}
+
+/* ── Dark: params editor inside form-field ── */
+body.dark .form-field .param-table-editor-wrapper {
+  border-color: #303544 !important;
+  background: #1a1e27 !important;
 }
 
 
