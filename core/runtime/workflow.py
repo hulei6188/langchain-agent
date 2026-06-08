@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import datetime
 import json
+import logging
+import re
 import time
 from types import SimpleNamespace
 
@@ -44,6 +46,157 @@ from core.services import web_search as web_search_service
 MAX_TOOL_CALLS_PER_RUN = 50
 MAX_TOOL_ROUNDS_PER_RUN = 16
 MAX_TOOL_WALL_TIME_SECONDS = 180
+DSML_TOOL_MARKUP_ERROR = "工具调用格式异常，未能正确执行，请重试。"
+DSML_TOOL_CALL_START_MARKER = "<||DSML||tool_calls>"
+DSML_STREAM_GUARD_TAIL_CHARS = len(DSML_TOOL_CALL_START_MARKER) - 1
+
+logger = logging.getLogger(__name__)
+
+_DSML_TOOL_CALLS_BLOCK_RE = re.compile(
+    r"<\|\|DSML\|\|tool_calls\s*>(?P<body>.*?)</\|\|DSML\|\|tool_calls\s*>",
+    re.DOTALL,
+)
+_DSML_INVOKE_RE = re.compile(
+    r"<\|\|DSML\|\|invoke\b(?P<attrs>[^>]*)>(?P<body>.*?)</\|\|DSML\|\|invoke\s*>",
+    re.DOTALL,
+)
+_DSML_PARAMETER_RE = re.compile(
+    r"<\|\|DSML\|\|parameter\b(?P<attrs>[^>]*)>(?P<body>.*?)</\|\|DSML\|\|parameter\s*>",
+    re.DOTALL,
+)
+
+
+def _normalize_dsml_markup(text: str) -> str:
+    return text.replace("｜", "|")
+
+
+def contains_dsml_tool_calls(text: str | None) -> bool:
+    if not text:
+        return False
+    return DSML_TOOL_CALL_START_MARKER in _normalize_dsml_markup(text)
+
+
+def _dsml_attr(attrs: str, name: str) -> str:
+    match = re.search(rf"\b{re.escape(name)}\s*=\s*([\"'])(.*?)\1", attrs or "", re.DOTALL)
+    return match.group(2) if match else ""
+
+
+def parse_dsml_tool_calls(text: str) -> list[dict]:
+    if not text or not contains_dsml_tool_calls(text):
+        return []
+
+    normalized = _normalize_dsml_markup(text)
+    tool_calls: list[dict] = []
+    for block_match in _DSML_TOOL_CALLS_BLOCK_RE.finditer(normalized):
+        body_start = block_match.start("body")
+        body_end = block_match.end("body")
+        normalized_body = normalized[body_start:body_end]
+        original_body = text[body_start:body_end]
+        for invoke_match in _DSML_INVOKE_RE.finditer(normalized_body):
+            tool_name = _dsml_attr(invoke_match.group("attrs"), "name")
+            if not tool_name:
+                continue
+            invoke_body_start = invoke_match.start("body")
+            invoke_body_end = invoke_match.end("body")
+            normalized_invoke_body = normalized_body[invoke_body_start:invoke_body_end]
+            original_invoke_body = original_body[invoke_body_start:invoke_body_end]
+            params: dict[str, str] = {}
+            for param_match in _DSML_PARAMETER_RE.finditer(normalized_invoke_body):
+                param_name = _dsml_attr(param_match.group("attrs"), "name")
+                if not param_name:
+                    continue
+                params[param_name] = original_invoke_body[param_match.start("body") : param_match.end("body")]
+            tool_calls.append(
+                {
+                    "id": f"call_dsml_{len(tool_calls)}",
+                    "type": "function",
+                    "function": {
+                        "name": tool_name,
+                        "arguments": json.dumps(params, ensure_ascii=False),
+                    },
+                }
+            )
+    return tool_calls
+
+
+def _strip_complete_dsml_tool_call_blocks(text: str) -> str:
+    if not text:
+        return ""
+    normalized = _normalize_dsml_markup(text)
+    spans = [match.span() for match in _DSML_TOOL_CALLS_BLOCK_RE.finditer(normalized)]
+    if not spans:
+        return text
+    pieces: list[str] = []
+    last = 0
+    for start, end in spans:
+        pieces.append(text[last:start])
+        last = end
+    pieces.append(text[last:])
+    return "".join(pieces)
+
+
+def _contains_leaked_tool_markup(text: str | None) -> bool:
+    if not text:
+        return False
+    normalized = _normalize_dsml_markup(text)
+    return (
+        contains_dsml_tool_calls(normalized)
+        or "<||DSML||tool_calls" in normalized
+        or "<||DSML||invoke" in normalized
+        or bool(re.search(r"\binvoke\s+name\s*=\s*([\"'])", normalized))
+    )
+
+
+def strip_or_block_leaked_tool_markup(text: str) -> str:
+    if not text:
+        return ""
+    if not _contains_leaked_tool_markup(text):
+        return text
+    cleaned = _strip_complete_dsml_tool_call_blocks(text).strip()
+    if cleaned and not _contains_leaked_tool_markup(cleaned):
+        return cleaned
+    return DSML_TOOL_MARKUP_ERROR
+
+
+def _dsml_preview(text: str | None) -> str:
+    return (text or "")[:500]
+
+
+def _dsml_tool_names(tool_calls: list[dict]) -> list[str]:
+    return [str((call.get("function") or {}).get("name") or "") for call in tool_calls if (call.get("function") or {}).get("name")]
+
+
+def _coerce_dsml_tool_calls(response: ChatResponse, *, stage: str) -> ChatResponse:
+    if not response.content or response.tool_calls or not contains_dsml_tool_calls(response.content):
+        return response
+    logger.warning("Detected DSML tool call markup in assistant content during %s", stage)
+    dsml_calls = parse_dsml_tool_calls(response.content)
+    if dsml_calls:
+        logger.warning("Parsed DSML tool calls during %s: tools=%s", stage, _dsml_tool_names(dsml_calls))
+        response.tool_calls = dsml_calls
+        response.content = ""
+        return response
+    logger.warning("Failed to parse DSML tool calls during %s; preview=%r", stage, _dsml_preview(response.content))
+    response.content = DSML_TOOL_MARKUP_ERROR
+    return response
+
+
+def _buffer_stream_content(
+    pending: str,
+    content: str,
+    suppress_content_stream: bool,
+) -> tuple[str, bool, list[str]]:
+    if suppress_content_stream:
+        return pending, True, []
+    pending += content
+    marker_index = _normalize_dsml_markup(pending).find(DSML_TOOL_CALL_START_MARKER)
+    if marker_index >= 0:
+        safe_prefix = pending[:marker_index]
+        return "", True, [safe_prefix] if safe_prefix else []
+    if len(pending) <= DSML_STREAM_GUARD_TAIL_CHARS:
+        return pending, False, []
+    safe_content = pending[:-DSML_STREAM_GUARD_TAIL_CHARS]
+    return pending[-DSML_STREAM_GUARD_TAIL_CHARS:], False, [safe_content] if safe_content else []
 
 
 def default_workflow() -> list[dict]:
@@ -159,7 +312,7 @@ class WorkflowRunner:
                 }
             )
 
-        final_answer = context.get("answer") or context.get("draft") or "当前智能体没有生成回答。"
+        final_answer = strip_or_block_leaked_tool_markup(context.get("answer") or context.get("draft") or "当前智能体没有生成回答。")
         if context.get("memory_enabled"):
             self._update_session_memory(
                 chat_session.id,
@@ -226,7 +379,7 @@ class WorkflowRunner:
             steps.append(step_payload)
             yield {"event": "step", "step": step_payload}
 
-        final_answer = context.get("answer") or context.get("draft") or "当前智能体没有生成回答。"
+        final_answer = strip_or_block_leaked_tool_markup(context.get("answer") or context.get("draft") or "当前智能体没有生成回答。")
         if context.get("memory_enabled"):
             self._update_session_memory(
                 chat_session.id,
@@ -409,9 +562,10 @@ class WorkflowRunner:
                     tools=tool_schemas,
                     thinking_enabled=self._thinking_request_value(context),
                 )
+                response = _coerce_dsml_tool_calls(response, stage=f"tool node non-stream round {_round}")
                 if response.content and not response.tool_calls:
                     return {
-                        "draft": response.content,
+                        "draft": strip_or_block_leaked_tool_markup(response.content),
                         "draft_reasoning": response.reasoning_content or "",
                         "web_sources": web_sources,
                         "search_status": search_status,
@@ -510,7 +664,7 @@ class WorkflowRunner:
                 thinking_enabled=self._thinking_request_value(context),
             )
             return {
-                "draft": final.content or "",
+                "draft": strip_or_block_leaked_tool_markup(final.content or ""),
                 "draft_reasoning": final.reasoning_content or "",
                 "web_sources": web_sources,
                 "search_status": search_status,
@@ -529,9 +683,10 @@ class WorkflowRunner:
                 runtime_config=agent.runtime_config,
                 thinking_enabled=self._thinking_request_value(context),
             ).content or ""
+            draft = strip_or_block_leaked_tool_markup(draft)
             return self._llm_output(agent, context, draft)
         if node_type == "Answer":
-            answer = (context.get("draft") or "").strip()
+            answer = strip_or_block_leaked_tool_markup((context.get("draft") or "").strip()).strip()
             if not answer:
                 raise ValueError("Model returned an empty answer")
             return {"answer": answer, "citation_count": len([*context.get("sources", []), *context.get("web_sources", [])])}
@@ -570,10 +725,11 @@ class WorkflowRunner:
                 stream_content=True,
                 live_content_with_tools=total_calls > 0,
             )
+            response = _coerce_dsml_tool_calls(response, stage=f"tool node stream round {_round}")
             reasoning_streamed = bool(response.reasoning_content and context.get("thinking_enabled"))
             if response.content and not response.tool_calls:
                 return {
-                    "draft": response.content,
+                    "draft": strip_or_block_leaked_tool_markup(response.content),
                     "draft_streamed": True,
                     "draft_reasoning": response.reasoning_content or "",
                     "draft_reasoning_streamed": reasoning_streamed,
@@ -619,7 +775,7 @@ class WorkflowRunner:
 
         final = yield from self._stream_chat_response(agent, messages, context, stream_content=True)
         return {
-            "draft": final.content or "",
+            "draft": strip_or_block_leaked_tool_markup(final.content or ""),
             "draft_streamed": bool(final.content),
             "draft_reasoning": final.reasoning_content or "",
             "draft_reasoning_streamed": bool(final.reasoning_content and context.get("thinking_enabled")),
@@ -645,7 +801,10 @@ class WorkflowRunner:
         tool_call_builders: dict[int, dict] = {}
         final_tool_calls: list[dict] = []
         saw_tool_call = False
-        should_stream_content_live = stream_content and (not tools or live_content_with_tools)
+        pending_live_content = ""
+        suppress_content_stream = False
+        emitted_live_content = False
+        should_stream_content_live = stream_content
         for chunk in self.provider.chat_stream_events(
             messages,
             model=agent.model,
@@ -662,7 +821,14 @@ class WorkflowRunner:
             elif chunk.type == "content":
                 content_chunks.append(chunk.content)
                 if should_stream_content_live and not saw_tool_call:
-                    yield {"event": "token", "content": chunk.content}
+                    pending_live_content, suppress_content_stream, safe_chunks = _buffer_stream_content(
+                        pending_live_content,
+                        chunk.content,
+                        suppress_content_stream,
+                    )
+                    for safe_content in safe_chunks:
+                        emitted_live_content = True
+                        yield {"event": "token", "content": safe_content}
             elif chunk.type == "tool_call_delta":
                 saw_tool_call = True
                 self._merge_stream_tool_call_deltas(tool_call_builders, chunk.tool_calls or [])
@@ -671,11 +837,41 @@ class WorkflowRunner:
                 final_tool_calls = chunk.tool_calls or []
         if not final_tool_calls:
             final_tool_calls = self._finalize_stream_tool_calls(tool_call_builders)
-        if stream_content and tools and not should_stream_content_live and not final_tool_calls and content_chunks:
-            for content in content_chunks:
-                yield {"event": "token", "content": content}
+
+        joined_content = "".join(content_chunks)
+        content_for_response = joined_content
+        if final_tool_calls and _contains_leaked_tool_markup(joined_content):
+            logger.warning("Detected DSML tool call markup alongside standard tool calls during stream response")
+            content_for_response = ""
+        elif not final_tool_calls and contains_dsml_tool_calls(joined_content):
+            logger.warning("Detected DSML tool call markup in streamed assistant content")
+            if tools:
+                dsml_calls = parse_dsml_tool_calls(joined_content)
+                if dsml_calls:
+                    logger.warning("Parsed DSML tool calls from streamed content: tools=%s", _dsml_tool_names(dsml_calls))
+                    final_tool_calls = dsml_calls
+                    content_for_response = ""
+                else:
+                    logger.warning("Failed to parse DSML tool calls from streamed content; preview=%r", _dsml_preview(joined_content))
+                    content_for_response = DSML_TOOL_MARKUP_ERROR
+            else:
+                logger.warning("Blocked DSML tool call markup in streamed final content; preview=%r", _dsml_preview(joined_content))
+                content_for_response = strip_or_block_leaked_tool_markup(joined_content)
+        elif not final_tool_calls and _contains_leaked_tool_markup(joined_content):
+            logger.warning("Blocked incomplete tool call markup in streamed content; preview=%r", _dsml_preview(joined_content))
+            content_for_response = DSML_TOOL_MARKUP_ERROR
+
+        if stream_content and not final_tool_calls and content_for_response:
+            if should_stream_content_live:
+                if suppress_content_stream:
+                    if content_for_response == DSML_TOOL_MARKUP_ERROR or not emitted_live_content:
+                        yield {"event": "token", "content": content_for_response}
+                elif not _contains_leaked_tool_markup(joined_content) and pending_live_content:
+                    yield {"event": "token", "content": pending_live_content}
+            elif tools:
+                yield {"event": "token", "content": content_for_response}
         return ChatResponse(
-            content="".join(content_chunks) or None,
+            content=content_for_response or None,
             reasoning_content="".join(reasoning_chunks),
             tool_calls=final_tool_calls or None,
         )
@@ -831,7 +1027,7 @@ class WorkflowRunner:
         }
 
     def _stream_llm_node(self, agent, node: dict, context: dict):
-        draft = context.get("draft", "")
+        draft = strip_or_block_leaked_tool_markup(context.get("draft", ""))
         if draft:
             draft_reasoning = context.get("draft_reasoning") or ""
             if draft_reasoning and context.get("thinking_enabled") and not context.get("draft_reasoning_streamed"):
@@ -844,6 +1040,9 @@ class WorkflowRunner:
         messages = self._llm_messages(agent, context)
         chunks = []
         reasoning_chunks = []
+        pending_live_content = ""
+        suppress_content_stream = False
+        emitted_live_content = False
         for chunk in self.provider.chat_stream_events(
             messages,
             model=agent.model,
@@ -858,8 +1057,24 @@ class WorkflowRunner:
                 yield {"event": "reasoning_token", "content": chunk.content}
             elif chunk.type == "content":
                 chunks.append(chunk.content)
-                yield {"event": "token", "content": chunk.content}
-        draft = "".join(chunks)
+                pending_live_content, suppress_content_stream, safe_chunks = _buffer_stream_content(
+                    pending_live_content,
+                    chunk.content,
+                    suppress_content_stream,
+                )
+                for safe_content in safe_chunks:
+                    emitted_live_content = True
+                    yield {"event": "token", "content": safe_content}
+        raw_draft = "".join(chunks)
+        draft = strip_or_block_leaked_tool_markup(raw_draft)
+        if draft and draft != raw_draft:
+            logger.warning("Blocked leaked tool call markup in streamed LLM node; preview=%r", _dsml_preview(raw_draft))
+        if draft:
+            if suppress_content_stream:
+                if draft == DSML_TOOL_MARKUP_ERROR or not emitted_live_content:
+                    yield {"event": "token", "content": draft}
+            elif not _contains_leaked_tool_markup(raw_draft) and pending_live_content:
+                yield {"event": "token", "content": pending_live_content}
         return self._llm_output(agent, context, draft, reasoning="".join(reasoning_chunks))
 
     def _thinking_request_value(self, context: dict) -> bool | None:
@@ -938,6 +1153,22 @@ class WorkflowRunner:
             content = item.get("content") or ""
             if current_message_id and item.get("id") == current_message_id and role == "user":
                 content = self._user_content(context["input"], context.get("uploads", []))
+            if role == "assistant" and _contains_leaked_tool_markup(content):
+                cleaned_content = _strip_complete_dsml_tool_call_blocks(content).strip()
+                if cleaned_content and not _contains_leaked_tool_markup(cleaned_content):
+                    logger.warning(
+                        "Cleaned DSML tool call markup from historical assistant message id=%s",
+                        item.get("id"),
+                    )
+                    content = cleaned_content
+                else:
+                    logger.warning(
+                        "Skipping historical assistant message with leaked DSML tool call markup id=%s; preview=%r",
+                        item.get("id"),
+                        _dsml_preview(content),
+                    )
+                    index += 1
+                    continue
             tool_calls = item.get("tool_calls") or []
             if role == "assistant" and tool_calls:
                 tool_call_ids = {call.get("id") for call in tool_calls if call.get("id")}
@@ -1330,6 +1561,12 @@ class WorkflowRunner:
         session_id = context.get("session_id")
         if not session_id:
             return
+        if role == "assistant" and _contains_leaked_tool_markup(content):
+            logger.warning(
+                "Blocked leaked tool call markup before persisting intermediate assistant message; preview=%r",
+                _dsml_preview(content),
+            )
+            content = ""
         visible_reasoning = reasoning if context.get("thinking_enabled") else ""
         payload_meta = {
             "is_intermediate": True,

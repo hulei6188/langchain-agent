@@ -1365,21 +1365,13 @@ function App() {
       setMessages((items) => {
         const next = [...items];
         const last = next[next.length - 1];
-        if (last?.role === 'assistant' && last?.meta?.is_intermediate) {
-          // Intermediate assistant — buffer content silently, don't show yet
-          next[next.length - 1] = {
-            ...last,
-            _intermediateContent: (last._intermediateContent || '') + data.content,
-          };
-        } else {
-          next[next.length - 1] = {
-            ...last,
-            pending: false,
-            reasoningPending: false,
-            reasoningFinishedAt: last?.reasoningPending && last?.reasoningStartedAt && !last?.reasoningFinishedAt ? Date.now() : last?.reasoningFinishedAt,
-            content: (last.content || '') + data.content,
-          };
-        }
+        next[next.length - 1] = {
+          ...last,
+          pending: false,
+          reasoningPending: false,
+          reasoningFinishedAt: last?.reasoningPending && last?.reasoningStartedAt && !last?.reasoningFinishedAt ? Date.now() : last?.reasoningFinishedAt,
+          content: (last.content || '') + data.content,
+        };
         return next;
       });
     }
@@ -1426,8 +1418,6 @@ function App() {
               ...last,
               reasoningPending: last.reasoningPending || (last.pending && !last.content),
               reasoningStartedAt: last.reasoningStartedAt || Date.now(),
-              // Mark as intermediate while tool calling is in progress
-              meta: { ...(last.meta || {}), is_intermediate: true },
             }, data, event);
           }
           return next;

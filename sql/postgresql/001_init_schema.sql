@@ -186,6 +186,8 @@ CREATE TABLE IF NOT EXISTS tools (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CHECK (type <> 'http' OR url LIKE 'https://%')
 );
+
+
 CREATE UNIQUE INDEX IF NOT EXISTS ux_tools_global_name
     ON tools (name)
     WHERE workspace_id IS NULL AND user_id IS NULL;
@@ -240,6 +242,17 @@ CREATE TABLE IF NOT EXISTS skill_tools (
 CREATE INDEX IF NOT EXISTS ix_skill_tools_skill_id ON skill_tools (skill_id);
 CREATE INDEX IF NOT EXISTS ix_skill_tools_tool_id ON skill_tools (tool_id);
 
+CREATE TABLE IF NOT EXISTS knowledge_bases (
+    id BIGSERIAL PRIMARY KEY,
+    workspace_id BIGINT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    name VARCHAR(160) NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    created_by BIGINT NOT NULL REFERENCES users(id),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS ix_knowledge_bases_workspace_id ON knowledge_bases (workspace_id);
+CREATE INDEX IF NOT EXISTS ix_knowledge_bases_created_by ON knowledge_bases (created_by);
+
 CREATE TABLE IF NOT EXISTS skill_knowledge_bases (
     id BIGSERIAL PRIMARY KEY,
     skill_id BIGINT NOT NULL REFERENCES skills(id) ON DELETE CASCADE,
@@ -261,17 +274,6 @@ CREATE INDEX IF NOT EXISTS ix_agent_skills_agent_id ON agent_skills (agent_id);
 CREATE INDEX IF NOT EXISTS ix_agent_skills_skill_id ON agent_skills (skill_id);
 CREATE INDEX IF NOT EXISTS ix_agent_skills_enabled ON agent_skills (enabled);
 
-CREATE TABLE IF NOT EXISTS knowledge_bases (
-    id BIGSERIAL PRIMARY KEY,
-    workspace_id BIGINT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
-    name VARCHAR(160) NOT NULL,
-    description TEXT NOT NULL DEFAULT '',
-    created_by BIGINT NOT NULL REFERENCES users(id),
-    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-CREATE INDEX IF NOT EXISTS ix_knowledge_bases_workspace_id ON knowledge_bases (workspace_id);
-CREATE INDEX IF NOT EXISTS ix_knowledge_bases_created_by ON knowledge_bases (created_by);
-
 CREATE TABLE IF NOT EXISTS agent_knowledge_bases (
     id BIGSERIAL PRIMARY KEY,
     agent_id BIGINT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
@@ -285,6 +287,7 @@ CREATE TABLE IF NOT EXISTS knowledge_documents (
     id BIGSERIAL PRIMARY KEY,
     knowledge_base_id BIGINT NOT NULL REFERENCES knowledge_bases(id) ON DELETE CASCADE,
     filename VARCHAR(255) NOT NULL,
+    title VARCHAR(255) NOT NULL DEFAULT '',
     content_type VARCHAR(80) NOT NULL,
     source_type VARCHAR(40) NOT NULL DEFAULT 'text' CHECK (source_type IN ('text', 'file')),
     text TEXT NOT NULL,
@@ -292,6 +295,7 @@ CREATE TABLE IF NOT EXISTS knowledge_documents (
     status VARCHAR(20) NOT NULL DEFAULT 'uploaded' CHECK (status IN ('uploaded', 'indexing', 'indexed', 'failed')),
     chunk_count INTEGER NOT NULL DEFAULT 0 CHECK (chunk_count >= 0),
     error_message TEXT NOT NULL DEFAULT '',
+    segment_config JSONB NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -371,6 +375,10 @@ CREATE TABLE IF NOT EXISTS messages (
     reasoning TEXT NOT NULL DEFAULT '',
     reasoning_duration_ms INTEGER NULL,
     sources JSONB NOT NULL DEFAULT '[]'::jsonb,
+    tool_calls JSONB NOT NULL DEFAULT '[]'::jsonb,
+    tool_call_id VARCHAR(120) NOT NULL DEFAULT '',
+    tool_name VARCHAR(120) NOT NULL DEFAULT '',
+    meta JSONB NOT NULL DEFAULT '{}'::jsonb,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS ix_messages_session_id ON messages (session_id);
@@ -640,6 +648,7 @@ COMMENT ON COLUMN agent_knowledge_bases.knowledge_base_id IS '知识库 ID';
 COMMENT ON COLUMN knowledge_documents.id IS '知识文档主键';
 COMMENT ON COLUMN knowledge_documents.knowledge_base_id IS '所属知识库 ID';
 COMMENT ON COLUMN knowledge_documents.filename IS '原始文件名';
+COMMENT ON COLUMN knowledge_documents.title IS '文档标题';
 COMMENT ON COLUMN knowledge_documents.content_type IS '文档内容类型';
 COMMENT ON COLUMN knowledge_documents.source_type IS '文档来源类型';
 COMMENT ON COLUMN knowledge_documents.text IS '文档全文文本';
@@ -647,6 +656,7 @@ COMMENT ON COLUMN knowledge_documents.text_preview IS '文档内容预览';
 COMMENT ON COLUMN knowledge_documents.status IS '文档处理状态';
 COMMENT ON COLUMN knowledge_documents.chunk_count IS '切分后的分块数量';
 COMMENT ON COLUMN knowledge_documents.error_message IS '处理失败错误信息';
+COMMENT ON COLUMN knowledge_documents.segment_config IS '分段配置';
 COMMENT ON COLUMN knowledge_documents.created_at IS '知识文档创建时间';
 COMMENT ON COLUMN knowledge_documents.updated_at IS '知识文档更新时间';
 
@@ -699,6 +709,10 @@ COMMENT ON COLUMN messages.content IS '消息内容';
 COMMENT ON COLUMN messages.reasoning IS '模型推理文本';
 COMMENT ON COLUMN messages.reasoning_duration_ms IS '推理耗时（毫秒）';
 COMMENT ON COLUMN messages.sources IS '引用来源列表';
+COMMENT ON COLUMN messages.tool_calls IS '工具调用记录列表';
+COMMENT ON COLUMN messages.tool_call_id IS '关联的工具调用 ID';
+COMMENT ON COLUMN messages.tool_name IS '关联的工具名称';
+COMMENT ON COLUMN messages.meta IS '消息扩展元数据';
 COMMENT ON COLUMN messages.created_at IS '消息创建时间';
 
 COMMENT ON COLUMN runs.id IS '运行记录主键';
