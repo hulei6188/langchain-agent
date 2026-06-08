@@ -17,10 +17,17 @@ try:
         from mcp.client.streamable_http import streamable_http_client
     except Exception:
         from mcp.client.streamable_http import streamablehttp_client as streamable_http_client
+    try:
+        from mcp.client.stdio import stdio_client, StdioServerParameters
+    except Exception:
+        stdio_client = None
+        StdioServerParameters = None
 except Exception:  # pragma: no cover - optional dependency at runtime
     ClientSession = None
     sse_client = None
     streamable_http_client = None
+    stdio_client = None
+    StdioServerParameters = None
 
 
 class MCPClientError(ValueError):
@@ -57,6 +64,127 @@ def call_mcp_tool(
             timeout_seconds=timeout_seconds,
         )
     )
+
+
+def discover_stdio_mcp_tools(
+    command: str,
+    args: list[str] | None = None,
+    *,
+    env: dict[str, str] | None = None,
+    cwd: str | None = None,
+    timeout_seconds: int = 15,
+) -> list[dict]:
+    """Discover tools from a stdio-based MCP server (e.g. Playwright MCP)."""
+    return asyncio.run(
+        _discover_stdio_mcp_tools(
+            command,
+            args=args or [],
+            env=env,
+            cwd=cwd,
+            timeout_seconds=timeout_seconds,
+        )
+    )
+
+
+def call_stdio_mcp_tool(
+    command: str,
+    args: list[str] | None,
+    tool_name: str,
+    arguments: dict[str, Any] | None = None,
+    *,
+    env: dict[str, str] | None = None,
+    cwd: str | None = None,
+    timeout_seconds: int = 15,
+) -> dict:
+    """Call a tool on a stdio-based MCP server (e.g. Playwright MCP)."""
+    timeout_seconds = _normalize_timeout(timeout_seconds)
+    return asyncio.run(
+        _call_stdio_mcp_tool(
+            command,
+            args or [],
+            tool_name,
+            arguments or {},
+            env=env,
+            cwd=cwd,
+            timeout_seconds=timeout_seconds,
+        )
+    )
+
+
+async def _discover_stdio_mcp_tools(
+    command: str,
+    args: list[str],
+    *,
+    env: dict[str, str] | None,
+    cwd: str | None,
+    timeout_seconds: int,
+) -> list[dict]:
+    _require_stdio_sdk()
+    try:
+        async with _stdio_session(command, args, env=env, cwd=cwd, timeout_seconds=timeout_seconds) as session:
+            result = await session.list_tools()
+    except MCPClientError:
+        raise
+    except BaseException as exc:
+        _raise_mcp_client_error(exc)
+    tools = []
+    for item in getattr(result, "tools", []) or []:
+        input_schema = _jsonable(getattr(item, "inputSchema", None) or getattr(item, "input_schema", None) or {}) or {}
+        tools.append(
+            {
+                "name": str(getattr(item, "name", "") or ""),
+                "description": str(getattr(item, "description", "") or ""),
+                "input_schema": input_schema if isinstance(input_schema, dict) else {},
+            }
+        )
+    return tools
+
+
+async def _call_stdio_mcp_tool(
+    command: str,
+    args: list[str],
+    tool_name: str,
+    arguments: dict[str, Any],
+    *,
+    env: dict[str, str] | None,
+    cwd: str | None,
+    timeout_seconds: int,
+) -> dict:
+    _require_stdio_sdk()
+    try:
+        async with _stdio_session(command, args, env=env, cwd=cwd, timeout_seconds=timeout_seconds) as session:
+            result = await session.call_tool(
+                tool_name,
+                arguments=arguments,
+                read_timeout_seconds=timedelta(seconds=timeout_seconds),
+            )
+    except MCPClientError:
+        raise
+    except BaseException as exc:
+        _raise_mcp_client_error(exc)
+    structured = _jsonable(getattr(result, "structuredContent", None) or getattr(result, "structured_content", None))
+    content_blocks = [_jsonable(item) for item in (getattr(result, "content", None) or [])]
+    text_parts = [part for part in (_content_text(block) for block in content_blocks) if part]
+    if not text_parts and structured is not None:
+        text_parts.append(json.dumps(structured, ensure_ascii=False))
+    if not text_parts and content_blocks:
+        payload = content_blocks[0] if len(content_blocks) == 1 else content_blocks
+        text_parts.append(json.dumps(payload, ensure_ascii=False))
+    text_content = "\n\n".join(text_parts).strip()
+    is_error = bool(getattr(result, "isError", False) or getattr(result, "is_error", False))
+    if is_error:
+        detail = text_content or json.dumps(structured or content_blocks or {"error": "MCP tool returned error"}, ensure_ascii=False)
+        raise MCPClientError(detail[:500])
+    result_json = structured
+    if result_json is None and content_blocks:
+        result_json = content_blocks[0] if len(content_blocks) == 1 else {"content": content_blocks}
+    return {
+        "status_code": 200,
+        "content_type": "application/json" if result_json is not None else "text/plain",
+        "content": text_content,
+        "result_preview": text_content[:500],
+        "result_json": result_json,
+    }
 
 
 async def _discover_mcp_tools(server_url: str, *, headers: dict[str, str], transport: str, timeout_seconds: int) -> list[dict]:
@@ -140,6 +268,13 @@ def _require_sdk(transport: str = "streamable_http") -> None:
         return
     if streamable_http_client is None:
         raise MCPClientError("MCP Streamable HTTP client is not available. Update the 'mcp' package in the backend environment.")
+
+
+def _require_stdio_sdk() -> None:
+    if ClientSession is None:
+        raise MCPClientError("MCP Python SDK is not installed. Add the 'mcp' package to the backend environment.")
+    if stdio_client is None or StdioServerParameters is None:
+        raise MCPClientError("MCP stdio client is not available. Update the 'mcp' package in the backend environment.")
 
 
 def _normalize_timeout(timeout_seconds: int | float | None) -> int:
@@ -262,6 +397,66 @@ class _SessionContext:
 def _session(server_url: str, *, headers: dict[str, str], transport: str, timeout_seconds: int) -> _SessionContext:
     normalized_transport = str(transport or "streamable_http").strip().lower() or "streamable_http"
     return _SessionContext(server_url, headers=headers, transport=normalized_transport, timeout_seconds=timeout_seconds)
+
+
+class _StdioSessionContext:
+    def __init__(self, command: str, args: list[str], *, env: dict[str, str] | None, cwd: str | None, timeout_seconds: int) -> None:
+        self._server_params = StdioServerParameters(
+            command=command,
+            args=args,
+            env=env,
+            cwd=cwd,
+        )
+        self._timeout_seconds = timeout_seconds
+        self._transport_cm = None
+        self._session_cm = None
+
+    async def __aenter__(self):
+        try:
+            self._transport_cm = stdio_client(self._server_params)
+            read_stream, write_stream = await self._transport_cm.__aenter__()
+            self._session_cm = ClientSession(read_stream, write_stream, read_timeout_seconds=timedelta(seconds=self._timeout_seconds))
+            session = await self._session_cm.__aenter__()
+            await session.initialize()
+            return session
+        except BaseException as exc:
+            await self._close(exc_type=type(exc), exc=exc, tb=exc.__traceback__)
+            if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                raise
+            _raise_mcp_client_error(exc)
+
+    async def __aexit__(self, exc_type, exc, tb):
+        await self._close(exc_type=exc_type, exc=exc, tb=tb)
+
+    async def _close(self, *, exc_type=None, exc=None, tb=None):
+        try:
+            if self._session_cm is not None:
+                try:
+                    await self._session_cm.__aexit__(exc_type, exc, tb)
+                except BaseException:
+                    pass
+        finally:
+            try:
+                if self._transport_cm is not None:
+                    try:
+                        await self._transport_cm.__aexit__(exc_type, exc, tb)
+                    except BaseException:
+                        pass
+            finally:
+                pass
+        self._session_cm = None
+        self._transport_cm = None
+
+
+def _stdio_session(
+    command: str,
+    args: list[str],
+    *,
+    env: dict[str, str] | None,
+    cwd: str | None,
+    timeout_seconds: int,
+) -> _StdioSessionContext:
+    return _StdioSessionContext(command, args, env=env, cwd=cwd, timeout_seconds=timeout_seconds)
 
 
 def _transport_supports_http_client() -> bool:

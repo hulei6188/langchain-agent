@@ -27,7 +27,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from core.db.models import Agent, AgentTool, Tool
-from core.integrations.mcp_client import MCPClientError, call_mcp_tool, discover_mcp_tools as discover_mcp_tools_client
+from core.integrations.mcp_client import MCPClientError, call_mcp_tool, call_stdio_mcp_tool, discover_mcp_tools as discover_mcp_tools_client, discover_stdio_mcp_tools
 from core.security.api_keys import decrypt_api_key, encrypt_api_key
 from core.services import web_search as web_search_service
 
@@ -36,7 +36,7 @@ MAX_RESPONSE_BYTES = 1024 * 1024
 TOOL_TYPES = {"builtin", "builtin_search", "http", "mcp"}
 HTTP_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE"}
 AUTH_TYPES = {"none", "bearer", "header", "query"}
-MCP_TRANSPORTS = {"streamable_http", "sse"}
+MCP_TRANSPORTS = {"streamable_http", "sse", "stdio"}
 DEFAULT_HTTP_TIMEOUT_SECONDS = 10
 MAX_HTTP_TIMEOUT_SECONDS = 30
 DEFAULT_MCP_TIMEOUT_SECONDS = 30
@@ -588,10 +588,61 @@ def validate_tool_ids(db: Session, *, workspace_id: int, user_id: int, tool_ids:
 
 def discover_mcp_tools(payload: dict, *, existing_tool: Tool | None = None) -> list[dict]:
     data = {key: value for key, value in payload.items() if value is not None}
+    existing_mcp = _tool_mcp_config(existing_tool)
+    mcp_config = _auth_value(data.get("mcp")) if "mcp" in data else {}
+    transport = _mcp_transport_value(
+        mcp_config.get("transport") if mcp_config else data.get("transport"),
+        url=str(data.get("url", "")).strip(),
+        existing=existing_mcp.get("transport"),
+    )
+
+    # ── stdio transport ──
+    if transport == "stdio":
+        command = str(mcp_config.get("command") or "").strip()
+        if not command:
+            raise ValueError("MCP stdio transport requires a command")
+        stdio_args = list(mcp_config.get("args") or []) if isinstance(mcp_config.get("args"), list) else []
+        stdio_env = dict(mcp_config.get("env")) if isinstance(mcp_config.get("env"), dict) else None
+        stdio_cwd = str(mcp_config.get("cwd") or "").strip() or None
+        timeout = _timeout_seconds(data.get("timeout_seconds"), default=DEFAULT_MCP_TIMEOUT_SECONDS, maximum=MAX_MCP_TIMEOUT_SECONDS, label="MCP timeout")
+        try:
+            remote_tools = discover_stdio_mcp_tools(
+                command,
+                args=stdio_args,
+                env=stdio_env,
+                cwd=stdio_cwd,
+                timeout_seconds=timeout,
+            )
+        except MCPClientError as exc:
+            raise ValueError(f"MCP tool discovery failed: {_preview(str(exc), 300)}") from exc
+        server_label = str(data.get("server_label") or "").strip() or command
+        items = []
+        for remote in remote_tools:
+            remote_name = str(remote.get("name") or "").strip()
+            if not remote_name:
+                continue
+            items.append(
+                {
+                    "name": _suggest_mcp_tool_name(remote_name),
+                    "label": remote_name,
+                    "description": str(remote.get("description") or "").strip(),
+                    "server_label": server_label,
+                    "mcp": {
+                        "transport": transport,
+                        "command": command,
+                        "args": stdio_args,
+                        "env": stdio_env,
+                        "cwd": stdio_cwd,
+                        "tool_name": remote_name,
+                        "input_schema": _mcp_input_schema_value(remote.get("input_schema")),
+                    },
+                }
+            )
+        return items
+
+    # ── HTTP / SSE transport ──
     url = str(data.get("url", "")).strip()
     _validate_safe_mcp_url(url)
-    existing_mcp = _tool_mcp_config(existing_tool)
-    transport = _mcp_transport_value(data.get("transport"), url=url, existing=existing_mcp.get("transport"))
     auth = _auth_value(data.get("auth"))
     auth_type = str(auth.get("type", "none")).strip() or "none"
     if auth_type not in AUTH_TYPES:
@@ -749,46 +800,90 @@ def _tool_fields(payload: dict, *, partial: bool = False, existing: Tool | None 
         result["timeout_seconds"] = timeout
         result["schema"] = {}
     elif tool_type == "mcp":
-        if "url" in data or not partial:
-            url = str(data.get("url", existing.url if existing else "")).strip()
-            _validate_safe_mcp_url(url)
-            result["url"] = url
-        auth = _auth_value(data.get("auth")) if "auth" in data else {}
-        auth_type = str(auth.get("type", existing.auth_type if existing else "none")).strip() or "none"
-        if auth_type not in AUTH_TYPES:
-            raise ValueError("Unsupported auth type")
-        result["auth_type"] = auth_type
-        result["auth_header_name"] = str(auth.get("header_name", existing.auth_header_name if existing else "Authorization")).strip() or "Authorization"
-        result["auth_query_name"] = str(auth.get("query_name", existing.auth_query_name if existing else "")).strip()
-        if "secret" in auth:
-            secret = str(auth.get("secret") or "").strip()
-            if not secret:
-                raise ValueError("Tool secret cannot be empty")
-            result["secret"] = secret
-        if auth.get("clear_secret"):
-            result["clear_secret"] = True
-        timeout = _timeout_seconds(
-            data.get("timeout_seconds", existing.timeout_seconds if existing else DEFAULT_MCP_TIMEOUT_SECONDS),
-            default=DEFAULT_MCP_TIMEOUT_SECONDS,
-            maximum=MAX_MCP_TIMEOUT_SECONDS,
-            label="MCP timeout",
-        )
-        result["timeout_seconds"] = timeout
         existing_mcp = _tool_mcp_config(existing)
         mcp = _auth_value(data.get("mcp")) if "mcp" in data else {}
-        if "server_label" not in result:
-            result["server_label"] = str(data.get("server_label", existing.server_label if existing else "")).strip()
-        transport = _mcp_transport_value(mcp.get("transport"), url=str(result.get("url") or data.get("url") or (existing.url if existing else "")), existing=existing_mcp.get("transport"))
-        remote_tool_name = str(mcp.get("tool_name", existing_mcp.get("tool_name", data.get("name", "")))).strip()
-        if not remote_tool_name:
-            raise ValueError("MCP tool_name is required")
-        result["schema"] = {
-            "mcp": {
-                "transport": transport,
-                "tool_name": remote_tool_name,
-                "input_schema": _mcp_input_schema_value(mcp.get("input_schema", existing_mcp.get("input_schema"))),
+        transport = _mcp_transport_value(
+            mcp.get("transport"),
+            url=str(data.get("url") or (existing.url if existing else "")),
+            existing=existing_mcp.get("transport"),
+        )
+
+        if transport == "stdio":
+            # stdio transport: URL is optional, command is required
+            if "url" in data or (not partial and not existing):
+                result["url"] = str(data.get("url", existing.url if existing else "")).strip()
+            command = str(mcp.get("command") or "").strip()
+            if not command:
+                raise ValueError("MCP stdio transport requires a command in mcp schema")
+            timeout = _timeout_seconds(
+                data.get("timeout_seconds", existing.timeout_seconds if existing else DEFAULT_MCP_TIMEOUT_SECONDS),
+                default=DEFAULT_MCP_TIMEOUT_SECONDS,
+                maximum=MAX_MCP_TIMEOUT_SECONDS,
+                label="MCP timeout",
+            )
+            result["timeout_seconds"] = timeout
+            if "server_label" not in result:
+                result["server_label"] = str(data.get("server_label", existing.server_label if existing else "")).strip() or command
+            remote_tool_name = str(mcp.get("tool_name", existing_mcp.get("tool_name", data.get("name", "")))).strip()
+            if not remote_tool_name:
+                raise ValueError("MCP tool_name is required")
+            stdio_args = list(mcp.get("args") or []) if isinstance(mcp.get("args"), list) else []
+            stdio_env = dict(mcp.get("env")) if isinstance(mcp.get("env"), dict) else None
+            stdio_cwd = str(mcp.get("cwd") or "").strip() or None
+            result["schema"] = {
+                "mcp": {
+                    "transport": transport,
+                    "command": command,
+                    "args": stdio_args,
+                    "env": stdio_env,
+                    "cwd": stdio_cwd,
+                    "tool_name": remote_tool_name,
+                    "input_schema": _mcp_input_schema_value(mcp.get("input_schema", existing_mcp.get("input_schema"))),
+                }
             }
-        }
+            # auth fields default to none for stdio (no HTTP auth needed)
+            result["auth_type"] = "none"
+            result["auth_header_name"] = "Authorization"
+            result["auth_query_name"] = ""
+        else:
+            # HTTP / SSE transport: URL is required
+            if "url" in data or not partial:
+                url = str(data.get("url", existing.url if existing else "")).strip()
+                _validate_safe_mcp_url(url)
+                result["url"] = url
+            auth = _auth_value(data.get("auth")) if "auth" in data else {}
+            auth_type = str(auth.get("type", existing.auth_type if existing else "none")).strip() or "none"
+            if auth_type not in AUTH_TYPES:
+                raise ValueError("Unsupported auth type")
+            result["auth_type"] = auth_type
+            result["auth_header_name"] = str(auth.get("header_name", existing.auth_header_name if existing else "Authorization")).strip() or "Authorization"
+            result["auth_query_name"] = str(auth.get("query_name", existing.auth_query_name if existing else "")).strip()
+            if "secret" in auth:
+                secret = str(auth.get("secret") or "").strip()
+                if not secret:
+                    raise ValueError("Tool secret cannot be empty")
+                result["secret"] = secret
+            if auth.get("clear_secret"):
+                result["clear_secret"] = True
+            timeout = _timeout_seconds(
+                data.get("timeout_seconds", existing.timeout_seconds if existing else DEFAULT_MCP_TIMEOUT_SECONDS),
+                default=DEFAULT_MCP_TIMEOUT_SECONDS,
+                maximum=MAX_MCP_TIMEOUT_SECONDS,
+                label="MCP timeout",
+            )
+            result["timeout_seconds"] = timeout
+            if "server_label" not in result:
+                result["server_label"] = str(data.get("server_label", existing.server_label if existing else "")).strip()
+            remote_tool_name = str(mcp.get("tool_name", existing_mcp.get("tool_name", data.get("name", "")))).strip()
+            if not remote_tool_name:
+                raise ValueError("MCP tool_name is required")
+            result["schema"] = {
+                "mcp": {
+                    "transport": transport,
+                    "tool_name": remote_tool_name,
+                    "input_schema": _mcp_input_schema_value(mcp.get("input_schema", existing_mcp.get("input_schema"))),
+                }
+            }
         result["method"] = "POST"
         result["headers_schema"] = {}
         result["query_schema"] = {}
@@ -841,28 +936,43 @@ def _execute_mcp_tool(tool: Tool, context: dict) -> dict:
     remote_tool_name = str(mcp.get("tool_name") or "").strip() or tool.name
     if not remote_tool_name:
         raise ValueError("MCP tool is missing remote tool_name")
-    server_url = str(tool.url or "").strip()
-    _validate_safe_mcp_url(server_url)
-    secret = decrypt_api_key(tool.encrypted_secret) if tool.encrypted_secret else ""
-    target_url, headers = _mcp_request_target(
-        server_url,
-        auth_type=tool.auth_type,
-        auth_header_name=tool.auth_header_name,
-        auth_query_name=tool.auth_query_name,
-        secret=secret,
-    )
+    transport = str(mcp.get("transport") or "streamable_http")
     arguments = _dict_value(context.get("input"))
     _validate_mcp_input(mcp.get("input_schema"), arguments)
     started = time.monotonic()
     try:
-        result = call_mcp_tool(
-            target_url,
-            remote_tool_name,
-            arguments=arguments,
-            headers=headers,
-            transport=str(mcp.get("transport") or "streamable_http"),
-            timeout_seconds=tool.timeout_seconds,
-        )
+        if transport == "stdio":
+            command = str(mcp.get("command") or "").strip()
+            if not command:
+                raise ValueError("MCP stdio tool requires a command")
+            result = call_stdio_mcp_tool(
+                command,
+                args=mcp.get("args") or [],
+                tool_name=remote_tool_name,
+                arguments=arguments,
+                env=mcp.get("env"),
+                cwd=mcp.get("cwd"),
+                timeout_seconds=tool.timeout_seconds,
+            )
+        else:
+            server_url = str(tool.url or "").strip()
+            _validate_safe_mcp_url(server_url)
+            secret = decrypt_api_key(tool.encrypted_secret) if tool.encrypted_secret else ""
+            target_url, headers = _mcp_request_target(
+                server_url,
+                auth_type=tool.auth_type,
+                auth_header_name=tool.auth_header_name,
+                auth_query_name=tool.auth_query_name,
+                secret=secret,
+            )
+            result = call_mcp_tool(
+                target_url,
+                remote_tool_name,
+                arguments=arguments,
+                headers=headers,
+                transport=transport,
+                timeout_seconds=tool.timeout_seconds,
+            )
     except MCPClientError as exc:
         detail = _preview(str(exc), 300)
         if "timed out" in detail.lower() or "timeout" in detail.lower() or "connection closed before the tool returned" in detail.lower():
@@ -1736,11 +1846,19 @@ def _tool_mcp_config(tool: Tool | None) -> dict:
     mcp = tool.schema.get("mcp")
     if not isinstance(mcp, dict):
         return {}
-    return {
+    config = {
         "transport": str(mcp.get("transport") or "streamable_http").strip().lower() or "streamable_http",
         "tool_name": str(mcp.get("tool_name") or "").strip(),
         "input_schema": _mcp_input_schema_value(mcp.get("input_schema")),
     }
+    if config["transport"] == "stdio":
+        config["command"] = str(mcp.get("command") or "").strip()
+        raw_args = mcp.get("args")
+        config["args"] = list(raw_args) if isinstance(raw_args, list) else []
+        env = mcp.get("env")
+        config["env"] = dict(env) if isinstance(env, dict) else None
+        config["cwd"] = str(mcp.get("cwd") or "").strip() or None
+    return config
 
 
 def _mcp_transport_value(value, *, url: str = "", existing: str | None = None) -> str:
