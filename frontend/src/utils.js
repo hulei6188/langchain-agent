@@ -627,6 +627,110 @@ function toggleTool(id, form, setForm) {
   setForm({ ...form, tool_ids: exists ? form.tool_ids.filter((item) => item !== id) : [...form.tool_ids, id] });
 }
 
+function toolType(tool) {
+  return tool?.type || (tool?.mcp ? 'mcp' : tool?.name === 'builtin_search' ? 'builtin_search' : 'http');
+}
+
+function toolHasSecret(tool) {
+  return Boolean(tool?.auth?.has_secret || tool?.has_secret || tool?.auth_has_secret);
+}
+
+function mcpServerKey(tool) {
+  if (toolType(tool) !== 'mcp') return '';
+  const url = String(tool?.url || '').trim();
+  const label = String(tool?.server_label || '').trim();
+  return `mcp:${label || url || tool?.id || tool?.name || 'server'}`;
+}
+
+function mcpServerHost(url) {
+  const text = String(url || '').trim();
+  if (!text) return '';
+  try {
+    return new URL(text).host;
+  } catch {
+    return text.replace(/^https?:\/\//i, '').split('/')[0] || text;
+  }
+}
+
+function mcpGroupTitle(group) {
+  const first = group?.tools?.[0] || {};
+  return String(first?.server_label || '').trim() || mcpServerHost(first?.url) || 'MCP Server';
+}
+
+function mcpGroupDescription(group) {
+  const tools = group?.tools || [];
+  const names = tools
+    .map((tool) => tool?.mcp?.tool_name || tool?.label || tool?.name)
+    .filter(Boolean)
+    .slice(0, 4)
+    .join('、');
+  const suffix = tools.length > 4 ? ` 等 ${tools.length} 个小工具` : `${tools.length} 个小工具`;
+  return names ? `${suffix}：${names}` : suffix;
+}
+
+function buildToolDisplayGroups(tools = []) {
+  const entries = [];
+  const groups = new Map();
+  for (const tool of tools || []) {
+    if (toolType(tool) !== 'mcp') {
+      entries.push({ kind: 'tool', id: `tool:${tool?.id}`, tool });
+      continue;
+    }
+    const key = mcpServerKey(tool);
+    let group = groups.get(key);
+    if (!group) {
+      group = { kind: 'mcp_group', id: key, key, tools: [] };
+      groups.set(key, group);
+      entries.push(group);
+    }
+    group.tools.push(tool);
+  }
+  return entries.map((entry) => {
+    if (entry.kind !== 'mcp_group') return entry;
+    const title = mcpGroupTitle(entry);
+    return {
+      ...entry,
+      title,
+      label: title,
+      description: mcpGroupDescription(entry),
+      url: entry.tools[0]?.url || '',
+      enabled: entry.tools.some((tool) => tool?.enabled !== false),
+      allEnabled: entry.tools.every((tool) => tool?.enabled !== false),
+      hasSecret: entry.tools.some((tool) => toolHasSecret(tool)),
+      toolIds: entry.tools.map((tool) => tool.id),
+    };
+  });
+}
+
+function toolEntrySearchText(entry) {
+  if (entry?.kind === 'mcp_group') {
+    return [
+      entry.title,
+      entry.description,
+      entry.url,
+      ...entry.tools.flatMap((tool) => [
+        tool?.name,
+        tool?.label,
+        tool?.description,
+        tool?.mcp?.tool_name,
+        tool?.server_label,
+      ]),
+    ].filter(Boolean).join(' ').toLowerCase();
+  }
+  const tool = entry?.tool || {};
+  return [tool.name, tool.label, tool.description, tool.url].filter(Boolean).join(' ').toLowerCase();
+}
+
+function addToolIds(ids, form, setForm) {
+  const nextIds = Array.from(new Set([...(form.tool_ids || []), ...(ids || [])]));
+  setForm({ ...form, tool_ids: nextIds });
+}
+
+function removeToolIds(ids, form, setForm) {
+  const removeSet = new Set(ids || []);
+  setForm({ ...form, tool_ids: (form.tool_ids || []).filter((id) => !removeSet.has(id)) });
+}
+
 function initVariableValues(variables) {
   const values = {};
   for (const variable of variables || []) {
@@ -798,6 +902,10 @@ export {
   modelCapabilityWarning,
   toggleKb,
   toggleTool,
+  buildToolDisplayGroups,
+  toolEntrySearchText,
+  addToolIds,
+  removeToolIds,
   initVariableValues,
   castVariables,
   fileToBase64,

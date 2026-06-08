@@ -4,7 +4,7 @@ import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 import 'katex/dist/katex.min.css';
-import { Brain, ThumbsUp, ThumbsDown, FileText, Search, ImagePlus } from 'lucide-react';
+import { AlertCircle, Brain, CheckCircle2, FileText, Loader2, Search, ThumbsDown, ThumbsUp, Wrench } from 'lucide-react';
 import { AgentAvatar } from './AgentAvatar.jsx';
 
 export function MessageList({ messages, feedbackByMessage = {}, submitFeedback = () => {}, avatar = 'AI' }) {
@@ -20,9 +20,11 @@ export function MessageList({ messages, feedbackByMessage = {}, submitFeedback =
           <div className="message-body">
             {message.role === 'assistant' ? (
               <div className={message.error ? 'message-error' : ''}>
-                {(message.reasoning || message.reasoningPending) && (
+                {(message.reasoning || message.reasoningPending || message.reasoningTimeline?.length || message.toolCalls?.length) && (
                   <MessageReasoning
                     content={message.reasoning || ''}
+                    timeline={message.reasoningTimeline || []}
+                    toolCalls={message.toolCalls || []}
                     pending={message.reasoningPending}
                     startedAt={message.reasoningStartedAt}
                     finishedAt={message.reasoningFinishedAt}
@@ -112,7 +114,7 @@ function formatThinkingDuration(startedAt, finishedAt, now, durationMs) {
   return seconds ? `${minutes} 分 ${seconds} 秒` : `${minutes} 分`;
 }
 
-function MessageReasoning({ content, pending, startedAt, finishedAt, durationMs }) {
+function MessageReasoning({ content, timeline = [], toolCalls = [], pending, startedAt, finishedAt, durationMs }) {
   const [open, setOpen] = useState(true);
   const [now, setNow] = useState(() => Date.now());
 
@@ -130,19 +132,146 @@ function MessageReasoning({ content, pending, startedAt, finishedAt, durationMs 
   const duration = formatThinkingDuration(startedAt, finishedAt, now, pending ? null : durationMs);
   const statusText = pending ? '思考中' : '已思考';
   const durationText = duration ? (pending ? `（${duration}）` : `（用时 ${duration}）`) : '';
+  const timelineItems = reasoningTimelineItems(content, timeline, toolCalls, pending);
+  const contentLength = timelineItems
+    .filter((item) => item.type === 'reasoning')
+    .reduce((total, item) => total + String(item.content || '').length, 0);
 
   return (
     <details className={pending ? 'message-reasoning is-pending' : 'message-reasoning is-done'} open={open} onToggle={(event) => setOpen(event.currentTarget.open)}>
       <summary>
         <Brain size={14} />
         <strong>{statusText}{durationText}</strong>
-        {content ? <small className="message-reasoning-count">{content.length} 字</small> : null}
+        {contentLength ? <small className="message-reasoning-count">{contentLength} 字</small> : null}
       </summary>
       <div className="message-reasoning-content">
-        {content ? <MarkdownContent content={content} /> : <p>等待模型返回推理过程...</p>}
+        <ol className="reasoning-timeline">
+          {timelineItems.map((item, index) => (
+            <ReasoningTimelineItem item={item} key={item.id || `${item.type}-${index}`} />
+          ))}
+        </ol>
       </div>
     </details>
   );
+}
+
+function ReasoningTimelineItem({ item }) {
+  if (item.type === 'tool' || item.type === 'search') {
+    const rawInput = item.rawInput || item.inputRaw || '';
+    const rawResult = item.rawResult || item.resultRaw || '';
+    const icon = item.type === 'search'
+      ? <Search size={15} />
+      : item.status === 'error'
+        ? <AlertCircle size={15} />
+        : item.status === 'running'
+          ? <Loader2 size={15} />
+          : <Wrench size={15} />;
+    return (
+      <li className={`reasoning-timeline-item is-${item.type} status-${item.status || 'success'}`}>
+        <span className="reasoning-timeline-node" aria-hidden="true">{icon}</span>
+        <div className="reasoning-timeline-main">
+          <div className="reasoning-tool-title">
+            <strong>{item.title || '调用工具'}</strong>
+            {item.status === 'success' && <CheckCircle2 size={13} />}
+          </div>
+          <div className="reasoning-tool-meta">
+            {item.meta && <span>{item.meta}</span>}
+            {item.latency && <span>{item.latency}</span>}
+          </div>
+          {item.inputPreview && <p className="reasoning-tool-input"><span>{item.inputLabel || '参数'}：</span>{item.inputPreview}</p>}
+          {item.summary && <p className="reasoning-tool-summary"><span>结果摘要：</span>{item.summary}</p>}
+          {(rawInput || rawResult) && (
+            <div className="reasoning-tool-raw-list">
+              <ToolRawDetails label="查看原始参数" value={rawInput} />
+              <ToolRawDetails label="查看原始结果" value={rawResult} />
+            </div>
+          )}
+        </div>
+      </li>
+    );
+  }
+
+  return (
+    <li className="reasoning-timeline-item is-reasoning">
+      <span className="reasoning-timeline-node" aria-hidden="true" />
+      <div className="reasoning-timeline-main">
+        <MarkdownContent content={item.content || ''} />
+      </div>
+    </li>
+  );
+}
+
+function ToolRawDetails({ label, value }) {
+  if (!value) return null;
+  return (
+    <details className="reasoning-tool-raw">
+      <summary>{label}</summary>
+      <pre><code>{formatRawToolValue(value)}</code></pre>
+    </details>
+  );
+}
+
+function formatRawToolValue(value) {
+  if (typeof value !== 'string') return JSON.stringify(value || '', null, 2);
+  try {
+    return JSON.stringify(JSON.parse(value), null, 2);
+  } catch {
+    return value;
+  }
+}
+
+function reasoningTimelineItems(content, timeline, toolCalls, pending) {
+  const source = Array.isArray(timeline) && timeline.length > 0 ? timeline : [{ type: 'reasoning', content }];
+  const items = [];
+  source.forEach((item, index) => {
+    if (!item) return;
+    if (item.type === 'reasoning') {
+      const block = normalizeReasoningBlock(item.content);
+      if (block) {
+        items.push({ type: 'reasoning', content: block, id: item.id || `reasoning-${index}` });
+      }
+      return;
+    }
+    items.push({ ...item, id: item.id || `${item.type}-${index}` });
+  });
+
+  if (!Array.isArray(timeline) || timeline.length === 0) {
+    (toolCalls || []).forEach((call, index) => {
+      const name = call?.function?.name || call?.tool_name || call?.name || `tool_${index + 1}`;
+      items.push({
+        id: `stored-tool-${index}`,
+        type: 'tool',
+        status: 'success',
+        title: `调用 ${name}`,
+        meta: call?.type || 'tool',
+        summary: compactText(call?.function?.arguments || call?.arguments || ''),
+      });
+    });
+  }
+
+  if (!items.length) {
+    items.push({
+      id: 'reasoning-waiting',
+      type: 'reasoning',
+      content: pending ? '等待模型返回推理过程...' : '暂无推理过程。',
+    });
+  }
+  return items;
+}
+
+export function splitReasoningSteps(text) {
+  const normalized = normalizeReasoningBlock(text);
+  return normalized ? [normalized] : [];
+}
+
+function normalizeReasoningBlock(value) {
+  return String(value || '').replace(/\r\n/g, '\n').trim();
+}
+
+function compactText(value, limit = 160) {
+  const text = typeof value === 'string' ? value : JSON.stringify(value || '', null, 0);
+  const compact = String(text || '').replace(/\s+/g, ' ').trim();
+  return compact.length > limit ? `${compact.slice(0, limit)}...` : compact;
 }
 
 export function MarkdownContent({ content }) {
@@ -152,6 +281,13 @@ export function MarkdownContent({ content }) {
         remarkPlugins={[remarkGfm, remarkMath]}
         rehypePlugins={[rehypeKatex]}
         components={{
+          table({ children, node, ...props }) {
+            return (
+              <div className="markdown-table-wrapper">
+                <table {...props}>{children}</table>
+              </div>
+            );
+          },
           pre({ children, ...props }) {
             const child = React.Children.toArray(children).find(React.isValidElement);
             if (!child) {

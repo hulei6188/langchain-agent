@@ -279,6 +279,7 @@ class Tool(Base):
     name: Mapped[str] = mapped_column(String(120), index=True)
     label: Mapped[str] = mapped_column(String(160))
     description: Mapped[str] = mapped_column(Text, default="")
+    server_label: Mapped[str] = mapped_column(String(160), default="")
     schema: Mapped[dict] = mapped_column(JSON, default=dict)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     method: Mapped[str] = mapped_column(String(12), default="GET")

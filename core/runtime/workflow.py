@@ -564,6 +564,7 @@ class WorkflowRunner:
                 context,
                 tools=tool_schemas,
                 stream_content=True,
+                live_content_with_tools=total_calls > 0,
             )
             reasoning_streamed = bool(response.reasoning_content and context.get("thinking_enabled"))
             if response.content and not response.tool_calls:
@@ -597,11 +598,10 @@ class WorkflowRunner:
                 for tc in calls_this_round:
                     if time.monotonic() - tool_loop_start > max_tool_wall_time:
                         break
-                    web_sources, search_status, tool_name = self._execute_stream_tool_call(
+                    web_sources, search_status, tool_name = yield from self._execute_stream_tool_call(
                         tc,
                         bound_tools,
                         messages,
-                        events,
                         web_sources,
                         search_status,
                         context,
@@ -626,12 +626,22 @@ class WorkflowRunner:
             "events": events,
         }
 
-    def _stream_chat_response(self, agent, messages: list[dict], context: dict, *, tools: list[dict] | None = None, stream_content: bool = False):
+    def _stream_chat_response(
+        self,
+        agent,
+        messages: list[dict],
+        context: dict,
+        *,
+        tools: list[dict] | None = None,
+        stream_content: bool = False,
+        live_content_with_tools: bool = False,
+    ):
         content_chunks: list[str] = []
         reasoning_chunks: list[str] = []
         tool_call_builders: dict[int, dict] = {}
         final_tool_calls: list[dict] = []
         saw_tool_call = False
+        should_stream_content_live = stream_content and (not tools or live_content_with_tools)
         for chunk in self.provider.chat_stream_events(
             messages,
             model=agent.model,
@@ -647,7 +657,7 @@ class WorkflowRunner:
                 yield {"event": "reasoning_token", "content": chunk.content}
             elif chunk.type == "content":
                 content_chunks.append(chunk.content)
-                if stream_content and not saw_tool_call:
+                if should_stream_content_live and not saw_tool_call:
                     yield {"event": "token", "content": chunk.content}
             elif chunk.type == "tool_call_delta":
                 saw_tool_call = True
@@ -657,6 +667,9 @@ class WorkflowRunner:
                 final_tool_calls = chunk.tool_calls or []
         if not final_tool_calls:
             final_tool_calls = self._finalize_stream_tool_calls(tool_call_builders)
+        if stream_content and tools and not should_stream_content_live and not final_tool_calls and content_chunks:
+            for content in content_chunks:
+                yield {"event": "token", "content": content}
         return ChatResponse(
             content="".join(content_chunks) or None,
             reasoning_content="".join(reasoning_chunks),
@@ -715,7 +728,6 @@ class WorkflowRunner:
         tc: dict,
         bound_tools: list[Tool],
         messages: list[dict],
-        events: list[dict],
         web_sources: list[dict],
         search_status: dict,
         context: dict,
@@ -729,17 +741,30 @@ class WorkflowRunner:
         except json.JSONDecodeError:
             tool_args = {"input": func.get("arguments") or ""}
         matching = next((t for t in bound_tools if t.name == tool_name), None)
+        start_data = self._tool_call_start_event(
+            matching,
+            tool_name=tool_name,
+            tool_call_id=tc.get("id") or "",
+            input_preview=json.dumps(tool_args, ensure_ascii=False),
+        )
+        yield {"event": "tool_call_start", "data": start_data}
         started = time.monotonic()
         if matching:
             try:
                 result = execute_tool(matching, {"input": tool_args})
                 result["latency_ms"] = result.get("latency_ms", int((time.monotonic() - started) * 1000))
                 tool_content = result.get("content") or result.get("result_preview") or ""
-                event_data = tool_call_event(matching, result, input_preview=json.dumps(tool_args, ensure_ascii=False))
-                events.append({"event": "tool_call", "data": event_data})
+                event_data = {
+                    **tool_call_event(matching, result, input_preview=json.dumps(tool_args, ensure_ascii=False)),
+                    "type": "tool_call_result",
+                    "tool_call_id": tc.get("id") or "",
+                }
+                yield {"event": "tool_call_result", "data": event_data}
                 if matching.type == "builtin_search":
                     web_sources, search_status = self._merge_web_search_tool_result(web_sources, search_status, result)
-                    events.append({"event": "search_status", "data": self._search_status_event(search_status)})
+                    search_event = self._search_status_event(search_status)
+                    search_event["tool_call_id"] = tc.get("id") or ""
+                    yield {"event": "search_status", "data": search_event}
                 messages.append({"role": "tool", "tool_call_id": tc["id"], "content": tool_content})
                 self._persist_intermediate_message(
                     context,
@@ -751,9 +776,13 @@ class WorkflowRunner:
                 )
             except ValueError as exc:
                 error_result = {"tool": tool_name, "content": "", "result_preview": "", "latency_ms": int((time.monotonic() - started) * 1000), "error": str(exc)}
-                event_data = tool_call_event(matching, error_result, status="error", input_preview=json.dumps(tool_args, ensure_ascii=False), error_code="tool_error")
+                event_data = {
+                    **tool_call_event(matching, error_result, status="error", input_preview=json.dumps(tool_args, ensure_ascii=False), error_code="tool_error"),
+                    "type": "tool_call_result",
+                    "tool_call_id": tc.get("id") or "",
+                }
                 tool_content = f"Error: {exc}"
-                events.append({"event": "tool_call", "data": event_data})
+                yield {"event": "tool_call_result", "data": event_data}
                 messages.append({"role": "tool", "tool_call_id": tc["id"], "content": tool_content})
                 self._persist_intermediate_message(
                     context,
@@ -765,9 +794,13 @@ class WorkflowRunner:
                 )
         else:
             unknown_tool = type("_", (), {"id": None, "name": tool_name, "type": "unknown"})()
-            event_data = tool_call_event(unknown_tool, {"tool": tool_name, "content": "", "result_preview": "", "latency_ms": 0}, status="error", input_preview="{}", error_code="tool_not_found")
+            event_data = {
+                **tool_call_event(unknown_tool, {"tool": tool_name, "content": "", "result_preview": "", "latency_ms": 0}, status="error", input_preview="{}", error_code="tool_not_found"),
+                "type": "tool_call_result",
+                "tool_call_id": tc.get("id") or "",
+            }
             tool_content = f"Tool '{tool_name}' not found"
-            events.append({"event": "tool_call", "data": event_data})
+            yield {"event": "tool_call_result", "data": event_data}
             messages.append({"role": "tool", "tool_call_id": tc["id"], "content": tool_content})
             self._persist_intermediate_message(
                 context,
@@ -778,6 +811,20 @@ class WorkflowRunner:
                 meta={**event_data, "node_id": node["id"], "round": round_index, "kind": "tool_result"},
             )
         return web_sources, search_status, tool_name
+
+    def _tool_call_start_event(self, tool: Tool | None, *, tool_name: str, tool_call_id: str, input_preview: str = "") -> dict:
+        return {
+            "type": "tool_call_start",
+            "tool_call_id": tool_call_id,
+            "tool_id": tool.id if tool else None,
+            "tool_name": tool.name if tool else tool_name,
+            "tool_type": tool.type if tool else "unknown",
+            "status": "running",
+            "input_preview": input_preview[:500],
+            "result_preview": "",
+            "latency_ms": 0,
+            "error_code": "",
+        }
 
     def _stream_llm_node(self, agent, node: dict, context: dict):
         draft = context.get("draft", "")

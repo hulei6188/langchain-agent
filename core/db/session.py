@@ -100,6 +100,7 @@ def _run_compat_migrations() -> None:
         _ensure_columns(
             "tools",
             {
+                "schema": "JSON DEFAULT '{}'",
                 "workspace_id": "INTEGER",
                 "user_id": "INTEGER",
                 "type": "VARCHAR(40) DEFAULT 'builtin'",
@@ -119,6 +120,7 @@ def _run_compat_migrations() -> None:
                 "updated_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
             },
         )
+        _ensure_postgres_tools_type_constraint()
         tool_indexes = {index["name"] for index in inspector.get_indexes("tools")}
         if "ix_tools_workspace_id" not in tool_indexes:
             with engine.begin() as connection:
@@ -351,3 +353,42 @@ def _ensure_columns(table_name: str, columns: dict[str, str]) -> None:
             continue
         with engine.begin() as connection:
             connection.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {ddl}"))
+
+
+def _ensure_postgres_tools_type_constraint() -> None:
+    if engine.dialect.name != "postgresql":
+        return
+    expected = {"builtin", "builtin_search", "http", "mcp"}
+    with engine.begin() as connection:
+        rows = connection.execute(
+            text(
+                """
+                SELECT conname, pg_get_constraintdef(oid) AS definition
+                FROM pg_constraint
+                WHERE conrelid = 'tools'::regclass
+                  AND contype = 'c'
+                """
+            )
+        ).mappings().all()
+        has_valid_constraint = False
+        stale_constraints: list[str] = []
+        for row in rows:
+            name = str(row.get("conname") or "").strip()
+            definition = str(row.get("definition") or "").lower()
+            if "type" not in definition:
+                continue
+            if all(f"'{value}'" in definition for value in expected):
+                has_valid_constraint = True
+                continue
+            if name:
+                stale_constraints.append(name)
+        for name in stale_constraints:
+            connection.execute(text(f'ALTER TABLE tools DROP CONSTRAINT IF EXISTS "{name}"'))
+        if not has_valid_constraint:
+            connection.execute(
+                text(
+                    "ALTER TABLE tools "
+                    "ADD CONSTRAINT tools_type_check "
+                    "CHECK (type IN ('builtin', 'builtin_search', 'http', 'mcp'))"
+                )
+            )

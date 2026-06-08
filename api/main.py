@@ -27,6 +27,7 @@ from api.schemas import (
     KnowledgeDocumentBatchCreateRequest,
     KnowledgeDocumentCreateRequest,
     LoginRequest,
+    MCPToolDiscoverRequest,
     MemoryProfileUpdateRequest,
     ModelConfigRequest,
     ModelConfigUpdateRequest,
@@ -128,6 +129,7 @@ from core.services.prompt_templates import (
 from core.services.tools import (
     create_tool,
     delete_tool,
+    discover_mcp_tools,
     get_accessible_tool,
     list_available_tools,
     test_tool,
@@ -166,7 +168,35 @@ PUBLIC_CHAT_ERRORS = (
 )
 
 
+def _version_tuple(value: str) -> tuple[int, ...]:
+    parts: list[int] = []
+    for token in str(value or "").split("."):
+        match = re.match(r"(\d+)", token)
+        if not match:
+            break
+        parts.append(int(match.group(1)))
+    return tuple(parts or [0])
+
+
+def _validate_runtime_dependencies() -> None:
+    import fastapi as fastapi_pkg
+    import starlette as starlette_pkg
+
+    starlette_version = getattr(starlette_pkg, "__version__", "0")
+    if not ((0, 40, 0) <= _version_tuple(starlette_version) < (0, 42, 0)):
+        raise RuntimeError(
+            "Incompatible dependency set detected: "
+            f"fastapi {getattr(fastapi_pkg, '__version__', 'unknown')} requires "
+            f"starlette>=0.40.0,<0.42.0, but found starlette {starlette_version}. "
+            "This usually happens when MCP-related dependencies upgrade Starlette transitively. "
+            "Reinstall with the same interpreter used to start the server, for example: "
+            "`python -m pip install -r requirements.txt` and then "
+            "`python -m uvicorn api.main:app --host 127.0.0.1 --port 8000 --reload`."
+        )
+
+
 settings = get_settings()
+_validate_runtime_dependencies()
 app = FastAPI(title=settings.app_name, version=settings.app_version)
 logger = logging.getLogger(__name__)
 startup_error: str | None = None
@@ -554,6 +584,29 @@ def create_tool_endpoint(request: ToolRequest, membership: WorkspaceMember = Dep
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"tool": tool_payload(tool)}
+
+
+@app.post("/api/tools/mcp/discover")
+def discover_mcp_tools_endpoint(
+    request: MCPToolDiscoverRequest,
+    membership: WorkspaceMember = Depends(get_current_membership),
+    db: Session = Depends(get_db),
+):
+    existing_tool = None
+    if request.tool_id:
+        existing_tool = get_accessible_tool(
+            db,
+            workspace_id=membership.workspace_id,
+            user_id=membership.user_id,
+            tool_id=request.tool_id,
+        )
+        if not existing_tool:
+            raise HTTPException(status_code=404, detail="Tool not found")
+    try:
+        items = discover_mcp_tools(request.model_dump(), existing_tool=existing_tool)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"items": items}
 
 
 @app.patch("/api/tools/{tool_id}")
@@ -1478,6 +1531,16 @@ def stream_chat_events(db: Session, agent: Agent, user_id: int, request: ChatReq
                     reasoning_started_at = time.perf_counter()
                 reasoning += content
                 yield sse_event("reasoning_token", {"content": content})
+            elif event["event"] in {
+                "tool_call_start",
+                "tool_call_result",
+                "tool_call",
+                "search_status",
+                "rag_status",
+                "memory_used",
+                "thinking_status",
+            }:
+                yield sse_event(event["event"], event.get("data", {}) or {})
             elif event["event"] == "step":
                 step = event["step"]
                 for runtime_event in step.get("events", []):
@@ -1628,28 +1691,259 @@ def session_payload(session: ChatSession, db: Session) -> dict:
 def chat_message_payloads(messages: list[Message]) -> list[dict]:
     payloads: list[dict] = []
     pending_reasoning: list[str] = []
+    pending_timeline: list[dict] = []
     for message in messages:
         meta = message.meta or {}
+        if message.role == "user":
+            pending_reasoning = []
+            pending_timeline = []
+            if visible_chat_message(message):
+                payloads.append(message_payload(message))
+            continue
         if message.role == "assistant" and meta.get("is_intermediate"):
             if message.reasoning:
                 pending_reasoning.append(message.reasoning)
+                pending_timeline.append(
+                    {
+                        "id": f"stored-reasoning-{message.id}",
+                        "type": "reasoning",
+                        "content": message.reasoning,
+                    }
+                )
+            continue
+        if message.role == "tool":
+            item = tool_message_timeline_item(message)
+            if item:
+                pending_timeline.append(item)
             continue
         if not visible_chat_message(message):
             continue
-        if message.role == "user":
-            pending_reasoning = []
         payload = message_payload(message)
-        if message.role == "assistant" and pending_reasoning:
+        if message.role == "assistant":
             payload_meta = payload.get("meta") or {}
-            if not payload_meta.get("reasoning_includes_intermediate"):
+            if pending_reasoning and not payload_meta.get("reasoning_includes_intermediate"):
                 payload["reasoning"] = merge_reasoning_parts([*pending_reasoning, payload.get("reasoning") or ""])
+            timeline = [*pending_timeline]
+            final_reasoning = remaining_reasoning(payload.get("reasoning") or message.reasoning or "", pending_reasoning)
+            if final_reasoning:
+                timeline.append(
+                    {
+                        "id": f"stored-final-reasoning-{message.id}",
+                        "type": "reasoning",
+                        "content": final_reasoning,
+                    }
+                )
+            if timeline:
+                payload["reasoningTimeline"] = timeline
             pending_reasoning = []
+            pending_timeline = []
         payloads.append(payload)
     return payloads
 
 
 def merge_reasoning_parts(parts: list[str]) -> str:
     return "\n\n".join(part.strip() for part in parts if part and part.strip())
+
+
+def remaining_reasoning(full_reasoning: str, consumed_parts: list[str]) -> str:
+    remaining = full_reasoning or ""
+    for part in consumed_parts:
+        candidates = [part or "", (part or "").strip()]
+        for candidate in candidates:
+            if not candidate:
+                continue
+            index = remaining.find(candidate)
+            if index >= 0:
+                remaining = remaining[index + len(candidate) :]
+                break
+    return remaining.strip()
+
+
+def tool_message_timeline_item(message: Message) -> dict | None:
+    meta = message.meta or {}
+    if not meta.get("is_intermediate"):
+        return None
+    tool_name = str(meta.get("tool_name") or meta.get("tool") or message.tool_name or message.tool_call_id or "tool")
+    tool_type = str(meta.get("tool_type") or "tool")
+    status = str(meta.get("status") or ("error" if meta.get("error_code") else "success"))
+    is_search = tool_type == "builtin_search" or tool_name == "web_search"
+    raw_input = str(meta.get("input_preview") or "")
+    raw_result = str(meta.get("error") or message.content or meta.get("result_preview") or "")
+    input_summary = summarize_tool_input(raw_input)
+    return {
+        "id": f"stored-tool-{message.id}",
+        "type": "search" if is_search else "tool",
+        "status": status,
+        "toolCallId": message.tool_call_id or str(meta.get("tool_call_id") or ""),
+        "title": "调用联网搜索" if is_search else f"调用 {tool_name}",
+        "meta": " · ".join(part for part in [tool_type, tool_status_label(status)] if part),
+        "latency": timeline_latency(meta.get("latency_ms")),
+        "inputLabel": input_summary["label"],
+        "inputPreview": input_summary["text"],
+        "summary": summarize_tool_result(raw_result, status=status),
+        "rawInput": raw_input,
+        "rawResult": raw_result,
+    }
+
+
+def tool_status_label(status: str) -> str:
+    if status == "error":
+        return "失败"
+    if status == "running":
+        return "运行中"
+    return "完成"
+
+
+def timeline_latency(value) -> str:
+    try:
+        ms = float(value or 0)
+    except (TypeError, ValueError):
+        return ""
+    if ms <= 0:
+        return ""
+    if ms < 1000:
+        return f"{round(ms)}ms"
+    seconds = ms / 1000
+    return f"{seconds:.1f}s" if ms < 10000 else f"{seconds:.0f}s"
+
+
+def compact_timeline_text(value, limit: int = 220) -> str:
+    if value is None:
+        return ""
+    text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+    compact = " ".join(str(text).split())
+    return f"{compact[:limit]}..." if len(compact) > limit else compact
+
+
+def summarize_tool_input(raw_input: str) -> dict:
+    data = parse_json_preview(raw_input)
+    if isinstance(data, dict):
+        query = first_string_value(data, ["query", "q", "keyword", "keywords", "search", "text", "input"])
+        count = first_scalar_value(data, ["count", "limit", "top_k", "max_results", "num_results"])
+        if query:
+            suffix = f" · 数量 {count}" if count else ""
+            return {"label": "查询", "text": compact_timeline_text(f"{query}{suffix}", 120)}
+        keys = [key for key, value in data.items() if value not in (None, "")]
+        if keys:
+            if len(keys) <= 3:
+                preview = " · ".join(f"{key}: {compact_param_value(data.get(key))}" for key in keys)
+            else:
+                preview = f"已传入 {len(keys)} 个参数：" + "、".join(keys[:3])
+            return {"label": "参数", "text": compact_timeline_text(preview, 140)}
+    text = "已传入结构化参数。" if looks_like_json_text(raw_input) else compact_timeline_text(raw_input or "", 120)
+    return {"label": "参数", "text": text}
+
+
+def summarize_tool_result(raw_result: str, *, status: str = "success") -> str:
+    if status == "running":
+        return ""
+    if status == "error":
+        return f"调用失败：{compact_timeline_text(raw_result, 140)}" if raw_result else "调用失败。"
+    data = parse_json_preview(raw_result)
+    items = collect_result_items(data)
+    if items:
+        return summarize_result_items(items, raw_result)
+    fallback_count = count_json_field(raw_result, "snippet") or count_json_field(raw_result, "title")
+    if fallback_count:
+        dates = extract_date_signals(raw_result)
+        parts = [f"搜索到约 {fallback_count} 条结果"]
+        if dates:
+            parts.append(f"结果中出现 {'、'.join(dates[:3])} 等日期")
+        return compact_timeline_text("；".join(parts), 180)
+    if isinstance(data, dict):
+        error = first_string_value(data, ["error", "message", "detail"])
+        if error:
+            return compact_timeline_text(error, 160)
+        keys = [key for key in data.keys() if key]
+        if keys:
+            return f"工具返回 {len(keys)} 个字段：" + "、".join(keys[:4])
+    if isinstance(data, list):
+        return f"工具返回 {len(data)} 条结构化结果。"
+    if looks_like_json_text(raw_result):
+        return "工具返回了结构化结果，原始内容可展开查看。"
+    return compact_timeline_text(raw_result or "", 160)
+
+
+def summarize_result_items(items: list, raw_result: str) -> str:
+    names = []
+    for item in items[:3]:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("title") or item.get("name") or item.get("hostname") or item.get("source") or item.get("url")
+        if name:
+            names.append(str(name))
+    dates = extract_date_signals(raw_result or json.dumps(items, ensure_ascii=False))
+    parts = [f"搜索到 {len(items)} 条结果"]
+    if names:
+        parts.append("包括 " + "、".join(names))
+    if dates:
+        parts.append(f"结果中出现 {'、'.join(dates[:3])} 等日期")
+    return compact_timeline_text("；".join(parts), 180)
+
+
+def parse_json_preview(value):
+    if not value or not isinstance(value, str):
+        return value or None
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        return None
+
+
+def looks_like_json_text(value: str) -> bool:
+    text = str(value or "").strip()
+    return text.startswith("{") or text.startswith("[")
+
+
+def collect_result_items(data) -> list:
+    if isinstance(data, list):
+        return [item for item in data if isinstance(item, dict)]
+    if not isinstance(data, dict):
+        return []
+    for key in ["pages", "items", "results", "data", "documents"]:
+        value = data.get(key)
+        if isinstance(value, list):
+            return [item for item in value if isinstance(item, dict)]
+    return []
+
+
+def first_string_value(data: dict, keys: list[str]) -> str:
+    for key in keys:
+        value = data.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def first_scalar_value(data: dict, keys: list[str]):
+    for key in keys:
+        value = data.get(key)
+        if isinstance(value, (str, int, float)):
+            return value
+    return ""
+
+
+def compact_param_value(value) -> str:
+    if isinstance(value, (str, int, float, bool)):
+        return compact_timeline_text(str(value), 50)
+    if isinstance(value, list):
+        return f"{len(value)} 项"
+    if isinstance(value, dict):
+        return "对象"
+    return ""
+
+
+def count_json_field(value: str, field_name: str) -> int:
+    if not value:
+        return 0
+    return len(re.findall(rf'"{re.escape(field_name)}"\s*:', value))
+
+
+def extract_date_signals(value: str) -> list[str]:
+    if not value:
+        return []
+    matches = re.findall(r"20\d{2}年\d{1,2}月\d{1,2}日|20\d{2}[-/.]\d{1,2}(?:[-/.]\d{1,2})?|20\d{2}年\d{1,2}月?", value)
+    return list(dict.fromkeys(matches))[:5]
 
 
 def message_payload(message: Message) -> dict:
