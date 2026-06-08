@@ -33,7 +33,7 @@ export function MessageList({ messages, feedbackByMessage = {}, submitFeedback =
                 )}
                 {message.pending && !message.content ? (
                   <p className="message-pending">{message.reasoning ? '正在组织回答...' : '思考中...'}</p>
-                ) : (
+                ) : message.meta?.is_intermediate ? null : (
                   <MarkdownContent content={message.content || ''} />
                 )}
               </div>

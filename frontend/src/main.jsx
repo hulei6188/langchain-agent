@@ -1365,13 +1365,21 @@ function App() {
       setMessages((items) => {
         const next = [...items];
         const last = next[next.length - 1];
-        next[next.length - 1] = {
-          ...last,
-          pending: false,
-          reasoningPending: false,
-          reasoningFinishedAt: last?.reasoningPending && last?.reasoningStartedAt && !last?.reasoningFinishedAt ? Date.now() : last?.reasoningFinishedAt,
-          content: (last.content || '') + data.content,
-        };
+        if (last?.role === 'assistant' && last?.meta?.is_intermediate) {
+          // Intermediate assistant — buffer content silently, don't show yet
+          next[next.length - 1] = {
+            ...last,
+            _intermediateContent: (last._intermediateContent || '') + data.content,
+          };
+        } else {
+          next[next.length - 1] = {
+            ...last,
+            pending: false,
+            reasoningPending: false,
+            reasoningFinishedAt: last?.reasoningPending && last?.reasoningStartedAt && !last?.reasoningFinishedAt ? Date.now() : last?.reasoningFinishedAt,
+            content: (last.content || '') + data.content,
+          };
+        }
         return next;
       });
     }
@@ -1418,6 +1426,8 @@ function App() {
               ...last,
               reasoningPending: last.reasoningPending || (last.pending && !last.content),
               reasoningStartedAt: last.reasoningStartedAt || Date.now(),
+              // Mark as intermediate while tool calling is in progress
+              meta: { ...(last.meta || {}), is_intermediate: true },
             }, data, event);
           }
           return next;
@@ -1430,6 +1440,7 @@ function App() {
         const next = [...currentMessages];
         const last = next[next.length - 1];
         if (last?.role === 'assistant') {
+          const finalContent = data.content || last._intermediateContent || last.content || '';
           next[next.length - 1] = {
             ...last,
             id: data.message_id,
@@ -1438,7 +1449,9 @@ function App() {
             reasoningPending: false,
             reasoningFinishedAt: last.reasoningStartedAt && !last.reasoningFinishedAt ? Date.now() : last.reasoningFinishedAt,
             reasoningDurationMs: data.reasoning_duration_ms ?? last.reasoningDurationMs,
-            content: data.content || last.content,
+            content: finalContent,
+            meta: { ...(last.meta || {}), is_intermediate: false },
+            _intermediateContent: undefined,
           };
         }
         return next;
