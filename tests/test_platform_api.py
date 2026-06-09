@@ -2272,9 +2272,9 @@ def test_chat_web_search_toggle_emits_status_and_injects_sources(client, auth_he
             "latency_ms": 11,
             "items": [
                 {
-                    "title": "Lingshu Search Result",
-                    "url": "https://example.com/lingshu-search",
-                    "snippet": "A current web result for Lingshu Agent.",
+                    "title": "AgentBase Search Result",
+                    "url": "https://example.com/agentbase-search",
+                    "snippet": "A current web result for AgentBase.",
                 }
             ],
         }
@@ -2286,7 +2286,7 @@ def test_chat_web_search_toggle_emits_status_and_injects_sources(client, auth_he
     response = client.post(
         f"/api/agents/{agent_id}/chat/stream",
         headers=auth_headers,
-        json={"message": "search current lingshu", "mode": "draft", "search_enabled": True, "rag_enabled": False},
+        json={"message": "search current agentbase", "mode": "draft", "search_enabled": True, "rag_enabled": False},
     )
 
     assert response.status_code == 200
@@ -2294,7 +2294,7 @@ def test_chat_web_search_toggle_emits_status_and_injects_sources(client, auth_he
     assert status_events
     assert status_events[0]["enabled"] is True
     assert status_events[0]["matched_results"] == 1
-    assert status_events[0]["items"][0]["url"] == "https://example.com/lingshu-search"
+    assert status_events[0]["items"][0]["url"] == "https://example.com/agentbase-search"
     assert "event: sources" in response.text
     assert "Web search results for this turn" in response.text
     run_steps = _sse_payloads(response.text, "run_step")

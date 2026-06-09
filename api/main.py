@@ -361,13 +361,13 @@ def health():
     model_probe = _model_probe("chat", enabled=bool(settings.health_model_probe_enabled and not model_mock))
     embedding_probe = _model_probe("embedding", enabled=bool(settings.health_model_probe_enabled and not embedding_mock and embedding_model))
     if model_mock:
-        issues.append("Chat model is running in mock mode because LINGSHU_MOCK_LLM is true.")
+        issues.append("Chat model is running in mock mode because AGENTBASE_MOCK_LLM is true.")
     elif not chat_api_key:
         issues.append("Chat model API key is not configured.")
     elif not model_probe["ok"]:
         issues.append("Chat model gateway probe failed.")
     if embedding_mock:
-        issues.append("Embedding is running in mock mode because LINGSHU_MOCK_LLM is true.")
+        issues.append("Embedding is running in mock mode because AGENTBASE_MOCK_LLM is true.")
     elif not embedding_model or not embedding_api_key:
         issues.append("Embedding is unavailable for real RAG because OPENAI_EMBEDDING_MODEL and a provider API key are required.")
     elif not embedding_probe["ok"]:

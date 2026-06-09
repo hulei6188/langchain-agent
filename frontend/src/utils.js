@@ -2,8 +2,8 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000';
 const MAX_UPLOAD_BYTES = 8 * 1024 * 1024;
 const KNOWLEDGE_FILE_ACCEPT = '.txt,.md,.markdown,.csv,.pdf,.docx';
 const KNOWLEDGE_FILE_EXTENSIONS = ['txt', 'md', 'markdown', 'csv', 'pdf', 'docx'];
-const AUTH_TOKEN_KEY = 'lingshu_token';
-const LEGACY_AUTH_TOKEN_KEY = 'sweeper_token';
+const AUTH_TOKEN_KEY = 'agentbase_token';
+const LEGACY_AUTH_TOKEN_KEY = 'lingshu_token';
 
 class ApiError extends Error {
   constructor(message, status, payload) {
@@ -20,7 +20,7 @@ function isAuthError(error) {
 
 function notifyAuthExpired() {
   if (typeof window !== 'undefined') {
-    window.dispatchEvent(new CustomEvent('lingshu-auth-expired'));
+    window.dispatchEvent(new CustomEvent('agentbase-auth-expired'));
   }
 }
 

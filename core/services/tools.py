@@ -1459,7 +1459,7 @@ def _exec_wikipedia(args: dict) -> dict:
         return {"content": json.dumps({"error": "Query cannot be empty"}), "result_preview": "Error: Empty Query"}
     try:
         url = f"https://{lang}.wikipedia.org/api/rest_v1/page/summary/{urllib.parse.quote(query)}"
-        resp = requests.get(url, headers={"User-Agent": "LingshuAgent/1.0"}, timeout=6)
+        resp = requests.get(url, headers={"User-Agent": "AgentBase/1.0"}, timeout=6)
         if resp.status_code == 200:
             data = resp.json()
             payload = {

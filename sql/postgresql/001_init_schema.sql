@@ -1,4 +1,4 @@
--- Lingshu Agent complete PostgreSQL schema.
+-- AgentBase complete PostgreSQL schema.
 -- Source of truth: docs/storage-design.md, docs/api-design.md,
 -- docs/product-requirements.md, and docs/agent-capability-plan.md.
 --

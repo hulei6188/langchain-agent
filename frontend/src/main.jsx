@@ -137,7 +137,7 @@ import {
   hasTransferFiles,
 } from './utils.js';
 
-const THEME_STORAGE_KEY = 'lingshu_theme';
+const THEME_STORAGE_KEY = 'agentbase_theme';
 
 function App() {
   const [token, setToken] = useState(initialAuthToken);
@@ -252,8 +252,8 @@ function App() {
       logout();
       setError('登录已失效，请重新登录。');
     }
-    window.addEventListener('lingshu-auth-expired', handleAuthExpired);
-    return () => window.removeEventListener('lingshu-auth-expired', handleAuthExpired);
+    window.addEventListener('agentbase-auth-expired', handleAuthExpired);
+    return () => window.removeEventListener('agentbase-auth-expired', handleAuthExpired);
   }, []);
 
   useEffect(() => {
@@ -1686,7 +1686,7 @@ function App() {
     return (
       <main className="auth-shell">
         <section className="auth-panel">
-          <div className="brand-mark"><Sparkles size={22} /> Lingshu Agent</div>
+          <div className="brand-mark"><Sparkles size={22} /> AgentBase</div>
           <h1>创建你的智能体工作台</h1>
           <p>本地账号、智能体聊天主页、我的模型配置和可发布的智能体工作台。</p>
           <form onSubmit={authenticate} className="auth-form">
@@ -2078,7 +2078,7 @@ function HomeView(props) {
       <aside className="chat-sidebar">
         <div className="sidebar-brand">
           <span className="brand-dot"><Sparkles size={18} /></span>
-          <strong>Lingshu Agent</strong>
+          <strong>AgentBase</strong>
           <button
             className="sidebar-toggle"
             type="button"
@@ -6920,7 +6920,7 @@ function toolHasSecret(tool) {
 }
 
 function defaultToolTestInput(tool) {
-  if (toolType(tool) === 'builtin_search') return '{\n  "query": "Lingshu Agent"\n}';
+  if (toolType(tool) === 'builtin_search') return '{\n  "query": "AgentBase"\n}';
   if (toolType(tool) === 'mcp') {
     return JSON.stringify(sampleInputFromSchema(tool?.mcp?.input_schema), null, 2);
   }

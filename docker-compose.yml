@@ -2,9 +2,9 @@
   postgres:
     image: postgres:16-alpine
     environment:
-      POSTGRES_DB: lingshu_agent
-      POSTGRES_USER: lingshu
-      POSTGRES_PASSWORD: lingshu
+      POSTGRES_DB: agentbase
+      POSTGRES_USER: agentbase
+      POSTGRES_PASSWORD: agentbase
     ports:
       - "5433:5432"
     volumes:
@@ -32,11 +32,11 @@
       context: .
       dockerfile: Dockerfile.api
     environment:
-      DATABASE_URL: postgresql+psycopg2://lingshu:lingshu@postgres:5432/lingshu_agent
+      DATABASE_URL: postgresql+psycopg2://agentbase:agentbase@postgres:5432/agentbase
       REDIS_URL: redis://redis:6379/0
-      LINGSHU_VECTOR_BACKEND: milvus
+      AGENTBASE_VECTOR_BACKEND: milvus
       MILVUS_URI: http://milvus:19530
-      MILVUS_COLLECTION: lingshu_chunks
+      MILVUS_COLLECTION: agentbase_chunks
       OPENAI_API_BASE: ${OPENAI_API_BASE:-https://dashscope.aliyuncs.com/compatible-mode/v1}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_MODEL: ${OPENAI_MODEL:-qwen-plus}
