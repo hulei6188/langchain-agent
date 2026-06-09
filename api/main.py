@@ -7,7 +7,7 @@ import re
 import secrets
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from collections.abc import Iterable
 
 from fastapi import Depends, FastAPI, HTTPException, Query
@@ -222,6 +222,7 @@ _health_probe_cache: dict[str, tuple[float, dict]] = {}
 
 # Per-run event log for SSE reconnection after page refresh.
 # Each entry is the raw SSE string (e.g. "event: token\ndata: {...}\n\n").
+_MAX_RUN_EVENTS = 2000
 _run_event_logs: dict[int, list[str]] = {}
 _run_event_lock = threading.Lock()
 
@@ -230,7 +231,11 @@ def _append_run_event(run_id: int, sse_str: str) -> None:
     with _run_event_lock:
         if run_id not in _run_event_logs:
             _run_event_logs[run_id] = []
-        _run_event_logs[run_id].append(sse_str)
+        log = _run_event_logs[run_id]
+        log.append(sse_str)
+        # Cap per-run event buffer to prevent unbounded memory growth
+        if len(log) > _MAX_RUN_EVENTS:
+            _run_event_logs[run_id] = log[-_MAX_RUN_EVENTS:]
 
 
 def _get_run_events_since(run_id: int, index: int) -> tuple[list[str], int]:
@@ -272,8 +277,6 @@ def startup() -> None:
 
 def _cleanup_zombie_runs() -> None:
     """Mark stale running runs as failed after server restart or crash."""
-    from datetime import timedelta
-
     try:
         db = SessionLocal()
         cutoff = datetime.now(timezone.utc) - timedelta(minutes=30)
@@ -1671,6 +1674,25 @@ def chat_stream(agent_id: int, request: ChatRequest, membership: WorkspaceMember
             _execute_workflow_thread(bg_db, bg_params, event_queue)
         except Exception:
             logger.exception("Background workflow thread crashed")
+            # Last-resort: mark the newest running run for this session as failed
+            try:
+                zombie = (
+                    bg_db.query(Run)
+                    .filter(
+                        Run.session_id == bg_params["session_id"],
+                        Run.status == "running",
+                    )
+                    .order_by(Run.started_at.desc())
+                    .first()
+                )
+                if zombie is not None:
+                    zombie.status = "failed"
+                    zombie.completed_at = datetime.now(timezone.utc)
+                    bg_db.commit()
+                    logger.warning("Marked zombie run %s as failed after thread crash", zombie.id)
+            except Exception:
+                bg_db.rollback()
+                logger.exception("Failed to mark zombie run after thread crash")
         finally:
             event_queue.put(None)  # sentinel
             bg_db.close()
@@ -1710,6 +1732,22 @@ def get_session(session_id: int, membership: WorkspaceMember = Depends(get_curre
         raise HTTPException(status_code=404, detail="Session not found")
     require_session_access(session, membership)
     messages = db.query(Message).filter(Message.session_id == session.id).order_by(Message.id.asc()).all()
+    # Clean up stale running runs (>30 min) before returning active_run
+    stale_cutoff = datetime.now(timezone.utc) - timedelta(minutes=30)
+    stale_runs = (
+        db.query(Run)
+        .filter(
+            Run.session_id == session.id,
+            Run.status == "running",
+            Run.started_at < stale_cutoff,
+        )
+        .all()
+    )
+    for stale in stale_runs:
+        stale.status = "failed"
+        stale.completed_at = datetime.now(timezone.utc)
+    if stale_runs:
+        db.commit()
     active_run = (
         db.query(Run)
         .filter(Run.session_id == session.id, Run.status == "running")
@@ -1820,6 +1858,7 @@ def _execute_workflow_thread(db: Session, params: dict, q: queue.Queue) -> None:
         ):
             if event["event"] == "run_started":
                 _tracked_run_id = event["run_id"]
+                run = db.get(Run, _tracked_run_id)
                 _emit("run_started", {"run_id": _tracked_run_id})
             elif event["event"] == "token":
                 if reasoning_started_at is not None and reasoning_duration_ms is None:
@@ -1944,17 +1983,22 @@ def _execute_workflow_thread(db: Session, params: dict, q: queue.Queue) -> None:
                 db.rollback()
         _emit("cancelled", {
             "session_id": chat_session.id,
-            "run_id": run.id if run else None,
+            "run_id": run.id if run else (_tracked_run_id or None),
             "content": answer,
         })
     except Exception as exc:
-        if run is not None:
+        # Resolve run if we have tracked_run_id but run is None
+        resolved_run = run
+        if resolved_run is None and _tracked_run_id is not None:
+            resolved_run = db.get(Run, _tracked_run_id)
+        if resolved_run is not None and resolved_run.status == "running":
             try:
-                run.status = "failed"
-                run.completed_at = datetime.now(timezone.utc)
+                resolved_run.status = "failed"
+                resolved_run.completed_at = datetime.now(timezone.utc)
                 db.commit()
             except Exception:
                 db.rollback()
+                logger.exception("Failed to mark run %s as failed", getattr(resolved_run, 'id', None))
         logger.exception("Agent chat stream failed")
         _emit("error", safe_stream_error(exc))
         # Safety net: persist partial answer
@@ -1976,8 +2020,7 @@ def _execute_workflow_thread(db: Session, params: dict, q: queue.Queue) -> None:
             except Exception:
                 db.rollback()
     finally:
-        if _tracked_run_id is not None:
-            _cleanup_run_events(_tracked_run_id)
+        pass  # Don't immediately clean up event log — keep for reconnection
 
 
 @app.get("/api/runs/{run_id}")
@@ -2020,6 +2063,7 @@ def stream_run_events(run_id: int, membership: WorkspaceMember = Depends(get_cur
 
     def _event_stream() -> Iterable[str]:
         emitted = 0
+        run_finished = False
         # Phase 1: replay buffered events
         while True:
             events, total = _get_run_events_since(run_id, emitted)
@@ -2031,9 +2075,22 @@ def stream_run_events(run_id: int, membership: WorkspaceMember = Depends(get_cur
             try:
                 current = db_sess.get(Run, run_id)
                 if current is None or current.status != "running":
+                    run_finished = True
+                    # Send terminal event if no done/cancelled/error was in the log
+                    final_status = current.status if current else "unknown"
+                    if final_status == "succeeded":
+                        yield sse_event("done", {"run_id": run_id, "status": "succeeded"})
+                    elif final_status == "cancelled":
+                        yield sse_event("cancelled", {"run_id": run_id, "status": "cancelled"})
+                    elif final_status == "failed":
+                        yield sse_event("error", {"message": "Run failed", "run_id": run_id})
+                    else:
+                        yield sse_event("done", {"run_id": run_id, "status": final_status})
                     break
             finally:
                 db_sess.close()
+            if run_finished:
+                break
             time.sleep(0.3)
 
     return StreamingResponse(_event_stream(), media_type="text/event-stream")
