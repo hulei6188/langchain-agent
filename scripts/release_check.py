@@ -38,7 +38,7 @@ def npm_command() -> str:
 
 
 def main(argv: list[str]) -> int:
-    parser = argparse.ArgumentParser(description="Run Lingshu Agent release checks.")
+    parser = argparse.ArgumentParser(description="Run AgentBase release checks.")
     parser.add_argument("--with-frontend", action="store_true", help="run frontend npm build")
     parser.add_argument("--with-rag-eval", action="store_true", help="deprecated; kept for CLI compatibility")
     parser.add_argument("--skip-pytest", action="store_true", help="skip pytest for faster local iteration")

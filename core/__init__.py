@@ -1,3 +1,3 @@
-﻿"""Lingshu Agent platform core."""
+﻿"""AgentBase platform core."""
 
 

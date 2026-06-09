@@ -26,8 +26,8 @@ def client(monkeypatch):
         engine.dispose()
 
     monkeypatch.setenv("DATABASE_URL", database_url)
-    monkeypatch.setenv("LINGSHU_MOCK_LLM", "true")
-    monkeypatch.setenv("LINGSHU_VECTOR_BACKEND", "memory")
+    monkeypatch.setenv("AGENTBASE_MOCK_LLM", "true")
+    monkeypatch.setenv("AGENTBASE_VECTOR_BACKEND", "memory")
     for key in [
         "OPENAI_API_KEY",
         "DASHSCOPE_API_KEY",

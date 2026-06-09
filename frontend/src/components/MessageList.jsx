@@ -4,7 +4,7 @@ import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 import 'katex/dist/katex.min.css';
-import { AlertCircle, Brain, CheckCircle2, FileText, Loader2, Search, ThumbsDown, ThumbsUp, Wrench } from 'lucide-react';
+import { AlertCircle, Brain, CheckCircle2, Clipboard, FileText, Loader2, Search, ThumbsDown, ThumbsUp, Wrench } from 'lucide-react';
 import { AgentAvatar } from './AgentAvatar.jsx';
 
 export function MessageList({ messages, feedbackByMessage = {}, submitFeedback = () => {}, avatar = 'AI' }) {
@@ -55,6 +55,7 @@ export function MessageList({ messages, feedbackByMessage = {}, submitFeedback =
             </>}
             {message.role === 'assistant' && message.id && (
               <div className="feedback-actions">
+                <CopyButton content={message.content || ''} />
                 <button
                   type="button"
                   className={feedbackByMessage[message.id] === 'positive' ? 'selected' : ''}
@@ -329,6 +330,42 @@ export function CodeBlock({ language, code }) {
       )}
       <pre><code>{code}</code></pre>
     </div>
+  );
+}
+
+function CopyButton({ content }) {
+  const [copied, setCopied] = useState(false);
+
+  async function handleCopy() {
+    try {
+      await navigator.clipboard.writeText(content);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // Fallback for older browsers
+      const textarea = document.createElement('textarea');
+      textarea.value = content;
+      textarea.style.position = 'fixed';
+      textarea.style.opacity = '0';
+      document.body.appendChild(textarea);
+      textarea.select();
+      try {
+        document.execCommand('copy');
+        setCopied(true);
+        setTimeout(() => setCopied(false), 2000);
+      } catch { /* ignore */ }
+      document.body.removeChild(textarea);
+    }
+  }
+
+  return (
+    <button
+      type="button"
+      title={copied ? '已复制' : '复制'}
+      onClick={handleCopy}
+    >
+      {copied ? <CheckCircle2 size={14} /> : <Clipboard size={14} />}
+    </button>
   );
 }
 

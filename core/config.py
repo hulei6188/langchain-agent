@@ -7,7 +7,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=(".env", ".env.local"), env_file_encoding="utf-8", extra="ignore")
 
-    app_name: str = "Lingshu Agent"
+    app_name: str = "AgentBase"
     app_version: str = "0.1.0"
     jwt_secret: str = Field(default="change-me-in-production", alias="JWT_SECRET")
     jwt_algorithm: str = "HS256"
@@ -17,7 +17,7 @@ class Settings(BaseSettings):
     cors_origins: str = Field(default="http://127.0.0.1:5174,http://localhost:5174", alias="CORS_ORIGINS")
 
     database_url: str = Field(
-        default="postgresql+psycopg2://lingshu:lingshu@192.168.150.101:5433/lingshu_agent",
+        default="postgresql+psycopg2://agentbase:agentbase@192.168.150.101:5433/agentbase",
         alias="DATABASE_URL",
     )
     redis_url: str | None = Field(default=None, alias="REDIS_URL")
@@ -35,13 +35,13 @@ class Settings(BaseSettings):
     rerank_api_base: str | None = Field(default=None, alias="RERANK_API_BASE")
     rerank_api_key: str | None = Field(default=None, alias="RERANK_API_KEY")
     health_model_probe_enabled: bool = Field(default=True, alias="HEALTH_MODEL_PROBE_ENABLED")
-    mock_llm: bool = Field(default=False, validation_alias=AliasChoices("LINGSHU_MOCK_LLM", "SWEEPER_MOCK_LLM"))
+    mock_llm: bool = Field(default=False, validation_alias=AliasChoices("AGENTBASE_MOCK_LLM", "LINGSHU_MOCK_LLM", "SWEEPER_MOCK_LLM"))
 
     milvus_uri: str = Field(default="http://192.168.150.101:19530", alias="MILVUS_URI")
     milvus_token: str | None = Field(default=None, alias="MILVUS_TOKEN")
-    milvus_collection: str = Field(default="lingshu_chunks", alias="MILVUS_COLLECTION")
+    milvus_collection: str = Field(default="agentbase_chunks", alias="MILVUS_COLLECTION")
     milvus_dimension: int | None = Field(default=None, alias="MILVUS_DIMENSION")
-    vector_backend: str = Field(default="memory", validation_alias=AliasChoices("LINGSHU_VECTOR_BACKEND", "SWEEPER_VECTOR_BACKEND"))
+    vector_backend: str = Field(default="memory", validation_alias=AliasChoices("AGENTBASE_VECTOR_BACKEND", "LINGSHU_VECTOR_BACKEND", "SWEEPER_VECTOR_BACKEND"))
 
     rag_top_k: int = Field(default=4, alias="RAG_TOP_K")
     rag_dense_top_k: int = Field(default=12, alias="RAG_DENSE_TOP_K")
@@ -59,7 +59,7 @@ class Settings(BaseSettings):
     web_search_top_k: int = Field(default=5, alias="WEB_SEARCH_TOP_K")
     web_search_timeout_seconds: int = Field(default=8, alias="WEB_SEARCH_TIMEOUT_SECONDS")
     web_search_max_response_bytes: int = Field(default=512 * 1024, alias="WEB_SEARCH_MAX_RESPONSE_BYTES")
-    web_search_user_agent: str = Field(default="LingshuAgent/0.1 (+https://local.lingshu.agent)", alias="WEB_SEARCH_USER_AGENT")
+    web_search_user_agent: str = Field(default="AgentBase/0.1", alias="WEB_SEARCH_USER_AGENT")
     tavily_api_key: str | None = Field(default=None, alias="TAVILY_API_KEY")
     serpapi_api_key: str | None = Field(default=None, alias="SERPAPI_API_KEY")
 
