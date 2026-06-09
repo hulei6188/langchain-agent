@@ -372,7 +372,7 @@ class OpenAICompatibleProvider:
                     for raw_line in response:
                         if cancel_event is not None and cancel_event.is_set():
                             logger.info("Streaming request cancelled mid-stream")
-                            break
+                            raise _CancelledError()
                         line = raw_line.decode("utf-8", errors="replace").strip()
                         if not line or not line.startswith("data:"):
                             continue
@@ -394,7 +394,7 @@ class OpenAICompatibleProvider:
         except (urllib.error.URLError, TimeoutError, socket.timeout, ssl.SSLError, OSError, ValueError, AttributeError) as exc:
             if cancel_event is not None and cancel_event.is_set():
                 logger.info("Streaming connection closed due to cancellation")
-                return
+                raise _CancelledError()
             raise RuntimeError(
                 f"Model call failed: cannot connect to model gateway {url}. Check OPENAI_API_BASE, proxy, certs and API key. Raw error: {exc}"
             ) from exc

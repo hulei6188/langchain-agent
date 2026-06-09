@@ -225,6 +225,11 @@ class WorkflowRunner:
         """Set the cancel event for this runner."""
         self._cancel_event = event
 
+    def _raise_if_cancelled(self) -> None:
+        """Raise _CancelledError if a cancel has been requested for this run."""
+        if self._cancel_event is not None and self._cancel_event.is_set():
+            raise _CancelledError()
+
     def run(
         self,
         *,
@@ -370,12 +375,10 @@ class WorkflowRunner:
         self._cancel_event = register_run(run.id, self.provider)
 
         steps: list[dict] = []
-        cancelled = False
         try:
             for node in runtime.workflow:
-                if self._cancel_event.is_set():
-                    cancelled = True
-                    break
+                self._raise_if_cancelled()
+
                 try:
                     if node["type"] == "LLM":
                         output = yield from self._stream_llm_node(runtime, node, context)
@@ -384,8 +387,9 @@ class WorkflowRunner:
                     else:
                         output = self._execute_node(runtime, node, context)
                 except _CancelledError:
-                    cancelled = True
-                    break
+                    raise
+
+                self._raise_if_cancelled()
                 if not steps:
                     output.setdefault("events", []).append({"event": "memory_used", "data": context.get("profile_memory_used", {})})
                     output.setdefault("events", []).append({"event": "thinking_status", "data": context.get("thinking_status", {})})
@@ -403,13 +407,6 @@ class WorkflowRunner:
                 }
                 steps.append(step_payload)
                 yield {"event": "step", "step": step_payload}
-
-            if cancelled:
-                run.status = "cancelled"
-                run.completed_at = datetime.utcnow()
-                self.db.commit()
-                yield {"event": "cancelled", "run_id": run.id}
-                return
 
             final_answer = strip_or_block_leaked_tool_markup(context.get("answer") or context.get("draft") or "当前智能体没有生成回答。")
             if context.get("memory_enabled"):
@@ -429,6 +426,11 @@ class WorkflowRunner:
                 "sources": [*context.get("sources", []), *context.get("web_sources", [])],
                 "steps": steps,
             }
+        except _CancelledError:
+            run.status = "cancelled"
+            run.completed_at = datetime.utcnow()
+            self.db.commit()
+            yield {"event": "cancelled", "run_id": run.id}
         finally:
             unregister_run(run.id)
 
@@ -584,8 +586,7 @@ class WorkflowRunner:
             tool_loop_start = time.monotonic()
 
             for _round in range(MAX_TOOL_ROUNDS_PER_RUN):
-                if self._cancel_event is not None and self._cancel_event.is_set():
-                    raise _CancelledError()
+                self._raise_if_cancelled()
                 if total_calls >= max_tool_calls:
                     break
                 if time.monotonic() - tool_loop_start > max_tool_wall_time:
@@ -693,8 +694,7 @@ class WorkflowRunner:
                         tools_used.append(tool_name)
 
             # Max rounds reached — get final answer from accumulated context
-            if self._cancel_event is not None and self._cancel_event.is_set():
-                raise _CancelledError()
+            self._raise_if_cancelled()
             final = self.provider.chat(
                 messages,
                 model=agent.model,
@@ -713,8 +713,7 @@ class WorkflowRunner:
                 "events": events,
             }
         if node_type == "LLM":
-            if self._cancel_event is not None and self._cancel_event.is_set():
-                raise _CancelledError()
+            self._raise_if_cancelled()
             if context.get("draft"):
                 return self._llm_output(agent, context, context["draft"], reasoning=context.get("draft_reasoning") or "")
             messages = self._llm_messages(agent, context)
@@ -756,8 +755,7 @@ class WorkflowRunner:
         tool_loop_start = time.monotonic()
 
         for _round in range(MAX_TOOL_ROUNDS_PER_RUN):
-            if self._cancel_event is not None and self._cancel_event.is_set():
-                break
+            self._raise_if_cancelled()
             if total_calls >= max_tool_calls:
                 break
             if time.monotonic() - tool_loop_start > max_tool_wall_time:
@@ -859,8 +857,7 @@ class WorkflowRunner:
             thinking_enabled=self._thinking_request_value(context),
             cancel_event=self._cancel_event,
         ):
-            if self._cancel_event is not None and self._cancel_event.is_set():
-                break
+            self._raise_if_cancelled()
             if chunk.type == "reasoning":
                 if not context.get("thinking_enabled"):
                     continue
@@ -883,6 +880,7 @@ class WorkflowRunner:
             elif chunk.type == "tool_calls":
                 saw_tool_call = True
                 final_tool_calls = chunk.tool_calls or []
+        self._raise_if_cancelled()
         if not final_tool_calls:
             final_tool_calls = self._finalize_stream_tool_calls(tool_call_builders)
 
@@ -1083,8 +1081,7 @@ class WorkflowRunner:
             if not context.get("draft_streamed"):
                 # Draft already produced by the tool-calling loop — stream as chunked text
                 for index in range(0, len(draft), 24):
-                    if self._cancel_event is not None and self._cancel_event.is_set():
-                        break
+                    self._raise_if_cancelled()
                     yield {"event": "token", "content": draft[index : index + 24]}
             return self._llm_output(agent, context, draft, reasoning=draft_reasoning)
         messages = self._llm_messages(agent, context)
@@ -1101,8 +1098,7 @@ class WorkflowRunner:
             thinking_enabled=self._thinking_request_value(context),
             cancel_event=self._cancel_event,
         ):
-            if self._cancel_event is not None and self._cancel_event.is_set():
-                break
+            self._raise_if_cancelled()
             if chunk.type == "reasoning":
                 if not context.get("thinking_enabled"):
                     continue
@@ -1118,6 +1114,7 @@ class WorkflowRunner:
                 for safe_content in safe_chunks:
                     emitted_live_content = True
                     yield {"event": "token", "content": safe_content}
+        self._raise_if_cancelled()
         raw_draft = "".join(chunks)
         draft = strip_or_block_leaked_tool_markup(raw_draft)
         if draft and draft != raw_draft:
