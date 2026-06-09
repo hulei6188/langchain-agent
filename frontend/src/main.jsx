@@ -173,10 +173,35 @@ function App() {
   const [chatAttachments, setChatAttachments] = useState([]);
   const [uploadingAttachment, setUploadingAttachment] = useState(false);
   const [draft, setDraft] = useState('');
-  const [busy, setBusy] = useState(false);
-  const abortRef = useRef(null);
-  const activeRunRef = useRef(null);
-  const generationRef = useRef(0);
+  // Per-session running state: { [sessionId]: { running: true } }
+  // Only stores what's needed for UI re-renders (button state)
+  const [runningBySessionId, setRunningBySessionId] = useState({});
+  const [newSessionRunning, setNewSessionRunning] = useState(false);
+  // Per-session mutable run state (no re-render needed): { [sessionId]: { runId, controller, genId } }
+  const sessionRunRef = useRef({});
+  // Keep a ref in sync so SSE handlers can check latest activeSessionId
+  const activeSessionIdRef = useRef(activeSessionId);
+  activeSessionIdRef.current = activeSessionId;
+  // Track which session's stream handleSse is currently processing
+  const currentStreamSessionRef = useRef(null);
+  // Track newly-created session ID from done event for finally cleanup
+  const newSessionIdRef = useRef(null);
+  // Derived: busy only when CURRENT session is running
+  const busy = activeSessionId ? !!runningBySessionId[activeSessionId]?.running : newSessionRunning;
+
+  function setSessionRunning(sessionId) {
+    if (!sessionId) return;
+    setRunningBySessionId((prev) => ({ ...prev, [sessionId]: { running: true } }));
+  }
+  function clearSessionRunning(sessionId) {
+    if (!sessionId) return;
+    setRunningBySessionId((prev) => {
+      const next = { ...prev };
+      delete next[sessionId];
+      return next;
+    });
+  }
+
   const [error, setError] = useState('');
   const [toastMsg, setToastMsg] = useState('');
   const [toastTone, setToastTone] = useState('success');
@@ -572,18 +597,18 @@ function App() {
     }
     // If there's an active run, reconnect to its SSE stream
     const activeRun = data.active_run;
-    if (activeRun && activeRun.status === 'running' && !busy) {
+    if (activeRun && activeRun.status === 'running' && !runningBySessionId[sessionId]?.running) {
       reconnectToRun(activeRun.id, sessionId, loaded).catch(() => {});
     }
   }
 
   async function reconnectToRun(runId, sessionId, existingMessages) {
-    setBusy(true);
+    setSessionRunning(sessionId);
     setError('');
-    activeRunRef.current = runId;
     const controller = new AbortController();
-    abortRef.current = controller;
-    const genId = generationRef.current;
+    const prevState = sessionRunRef.current[sessionId] || {};
+    const genId = (prevState.genId || 0) + 1;
+    sessionRunRef.current[sessionId] = { runId, controller, genId };
     // Don't append a duplicate pending message if one already exists
     const lastMsg = existingMessages[existingMessages.length - 1];
     const needPending = !lastMsg || lastMsg.role === 'user'
@@ -605,34 +630,32 @@ function App() {
           reasoningTimeline: [], reasoningPending: false,
         }]);
       }
+      currentStreamSessionRef.current = sessionId;
       while (true) {
-        if (generationRef.current !== genId) break;
+        if (sessionRunRef.current[sessionId]?.genId !== genId) break;
         const { done, value } = await reader.read();
         if (done) { streamEnded = true; break; }
         buffer += decoder.decode(value, { stream: true });
         const parts = buffer.split('\n\n');
         buffer = parts.pop() || '';
         for (const part of parts) {
-          if (generationRef.current !== genId) break;
+          if (sessionRunRef.current[sessionId]?.genId !== genId) break;
           handleSse(part);
         }
       }
     } catch (err) {
       if (err.name === 'AbortError') { /* ignored */ }
     } finally {
-      if (generationRef.current === genId) {
-        setBusy(false);
+      if (sessionRunRef.current[sessionId]?.genId === genId) {
+        clearSessionRunning(sessionId);
         // Reload session messages from DB so final assistant message
         // is properly synced (handles missed done/cancelled events).
         if (streamEnded && activeAgentId) {
           loadSession(sessionId).catch(() => {});
         }
       }
-      if (abortRef.current === controller) {
-        abortRef.current = null;
-      }
-      if (activeRunRef.current === runId) {
-        activeRunRef.current = null;
+      if (sessionRunRef.current[sessionId]?.controller === controller) {
+        delete sessionRunRef.current[sessionId];
       }
     }
   }
@@ -1319,13 +1342,23 @@ function App() {
     }
     setDraft('');
     setHomePrompt('');
-    // Abort any in-flight request (e.g. from a previous stop)
-    if (abortRef.current) {
-      abortRef.current.abort();
+    // Capture session at request start — use this throughout, never activeSessionId directly
+    const capturedSessionId = activeSessionId;
+    newSessionIdRef.current = null;
+    // Use a valid key for sessionRunRef (null is not a valid object key for our logic)
+    const runKey = capturedSessionId || `__new__${Date.now()}`;
+    // Abort previous in-flight request for THIS session only
+    const prevRun = sessionRunRef.current[runKey];
+    if (prevRun?.controller) {
+      prevRun.controller.abort();
     }
-    // Increment generation to invalidate stale SSE events
-    generationRef.current += 1;
-    setBusy(true);
+    // Increment per-session generation to invalidate stale SSE events
+    const newGenId = (prevRun?.genId || 0) + 1;
+    // Set running state for this session
+    setRunningBySessionId((prev) => ({ ...prev, [runKey]: { running: true } }));
+    if (!capturedSessionId) {
+      setNewSessionRunning(true);
+    }
     setError('');
     setChatAttachments([]);
     setMessages((items) => [
@@ -1344,8 +1377,7 @@ function App() {
     ]);
     setToolDebugEvents([]);
     const controller = new AbortController();
-    abortRef.current = controller;
-    activeRunRef.current = null;
+    sessionRunRef.current[runKey] = { runId: null, controller, genId: newGenId };
     try {
       const response = await fetch(`${API_BASE}/api/agents/${activeAgentId}/chat/stream`, {
         signal: controller.signal,
@@ -1374,17 +1406,18 @@ function App() {
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let buffer = '';
-      const genId = generationRef.current;
+      const genId = newGenId;
+      currentStreamSessionRef.current = runKey;
       while (true) {
-        // Stop processing if a new generation has started
-        if (generationRef.current !== genId) break;
+        // Stop processing if a new generation has started for this session
+        if (sessionRunRef.current[runKey]?.genId !== genId) break;
         const { done, value } = await reader.read();
         if (done) break;
         buffer += decoder.decode(value, { stream: true });
         const parts = buffer.split('\n\n');
         buffer = parts.pop() || '';
         for (const part of parts) {
-          if (generationRef.current !== genId) break;
+          if (sessionRunRef.current[runKey]?.genId !== genId) break;
           handleSse(part);
         }
       }
@@ -1415,16 +1448,30 @@ function App() {
         });
       }
     } finally {
-      abortRef.current = null;
-      activeRunRef.current = null;
-      setBusy(false);
+      // Clean up per-session state — use runKey, not current activeSessionId
+      const finalKey = newSessionIdRef.current || runKey;
+      if (sessionRunRef.current[finalKey]?.genId === newGenId) {
+        clearSessionRunning(finalKey);
+        setNewSessionRunning(false);
+      }
+      // Clean up ref entries
+      if (sessionRunRef.current[finalKey]?.controller === controller) {
+        delete sessionRunRef.current[finalKey];
+      }
+      if (finalKey !== runKey && sessionRunRef.current[runKey]?.controller === controller) {
+        delete sessionRunRef.current[runKey];
+      }
+      newSessionIdRef.current = null;
       if (activeAgentId) loadSessions(activeAgentId).catch((err) => setError(errorMessage(err)));
       setChatAttachments([]);
     }
   }
 
   async function stopGeneration() {
-    const runId = activeRunRef.current;
+    // Only stop the CURRENT session's run — read from per-session state
+    const lookupKey = activeSessionId || newSessionIdRef.current;
+    const sessionState = lookupKey ? sessionRunRef.current[lookupKey] : null;
+    const runId = sessionState?.runId;
     if (runId) {
       // Notify backend to cancel — it will close the SSE stream cleanly
       fetch(`${API_BASE}/api/runs/${runId}/cancel`, {
@@ -1434,7 +1481,10 @@ function App() {
     }
     // Don't abort the fetch here — let the backend send the cancelled SSE event
     // which properly persists the partial response. The stream will end naturally.
-    setBusy(false);
+    if (lookupKey) {
+      clearSessionRunning(lookupKey);
+    }
+    setNewSessionRunning(false);
     setMessages((items) => {
       const next = [...items];
       const last = next[next.length - 1];
@@ -1478,10 +1528,30 @@ function App() {
     const dataLine = raw.match(/^data: (.+)$/m)?.[1];
     const data = dataLine ? JSON.parse(dataLine) : {};
     if (event === 'run_started') {
-      activeRunRef.current = data.run_id || null;
+      const sid = currentStreamSessionRef.current;
+      if (sid && sessionRunRef.current[sid]) {
+        sessionRunRef.current[sid].runId = data.run_id || null;
+      }
     }
     if (event === 'cancelled') {
-      setActiveSessionId(data.session_id || null);
+      // Only set activeSessionId if user hasn't switched sessions away
+      const currentSid = activeSessionIdRef.current;
+      const streamSid = currentStreamSessionRef.current;
+      if (!currentSid || currentSid === data.session_id || streamSid === data.session_id) {
+        setActiveSessionId(data.session_id || null);
+      }
+      // Clear per-session running state
+      if (data.session_id) {
+        clearSessionRunning(data.session_id);
+      }
+      if (streamSid && streamSid !== data.session_id) {
+        clearSessionRunning(streamSid);
+      }
+      setNewSessionRunning(false);
+      // If temp key, transition so finally block can clean up properly
+      if (streamSid?.startsWith('__new__') && data.session_id) {
+        newSessionIdRef.current = data.session_id;
+      }
       setMessages((currentMessages) => {
         const next = [...currentMessages];
         const last = next[next.length - 1];
@@ -1565,7 +1635,25 @@ function App() {
       }
     }
     if (event === 'done') {
-      setActiveSessionId(data.session_id || null);
+      // Only set activeSessionId if user hasn't switched sessions away
+      const currentSid = activeSessionIdRef.current;
+      const streamSid = currentStreamSessionRef.current;
+      if (!currentSid || currentSid === data.session_id || streamSid === data.session_id) {
+        setActiveSessionId(data.session_id || null);
+      }
+      // If temp key (new session), transition from __new__ key to real session ID
+      if (streamSid?.startsWith('__new__') && data.session_id) {
+        setRunningBySessionId((prev) => {
+          const next = { ...prev };
+          delete next[streamSid];
+          next[data.session_id] = { running: true };
+          return next;
+        });
+        sessionRunRef.current[data.session_id] = sessionRunRef.current[streamSid];
+        delete sessionRunRef.current[streamSid];
+        currentStreamSessionRef.current = data.session_id;
+        newSessionIdRef.current = data.session_id;
+      }
       setMessages((currentMessages) => {
         const next = [...currentMessages];
         const last = next[next.length - 1];
