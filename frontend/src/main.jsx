@@ -570,6 +570,74 @@ function App() {
       setView('home');
       setActiveNav('chat');
     }
+    // If there's an active run, reconnect to its SSE stream
+    const activeRun = data.active_run;
+    if (activeRun && loaded.length > 0 && !busy) {
+      const lastMsg = loaded[loaded.length - 1];
+      // Only reconnect if the last assistant message looks incomplete
+      if (lastMsg?.role === 'user' || (lastMsg?.role === 'assistant' && lastMsg?.meta?.cancelled)) {
+        // Either no assistant reply yet, or was cancelled — don't reconnect
+      } else if (lastMsg?.role === 'assistant' && !lastMsg?.meta?.cancelled && !lastMsg?.meta?.is_intermediate) {
+        // Assistant message exists and looks complete — don't reconnect
+      } else if (activeRun) {
+        // Reconnect to the running stream
+        reconnectToRun(activeRun.id, sessionId, loaded).catch(() => {});
+      }
+    }
+  }
+
+  async function reconnectToRun(runId, sessionId, existingMessages) {
+    setBusy(true);
+    setError('');
+    activeRunRef.current = runId;
+    const controller = new AbortController();
+    abortRef.current = controller;
+    const genId = generationRef.current;
+    // Don't append a duplicate pending message if one already exists
+    const lastMsg = existingMessages[existingMessages.length - 1];
+    const needPending = !lastMsg || lastMsg.role === 'user'
+      || (lastMsg.role === 'assistant' && lastMsg.meta?.cancelled);
+    try {
+      const response = await fetch(`${API_BASE}/api/runs/${runId}/events`, {
+        signal: controller.signal,
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!response.ok) { setBusy(false); return; }
+      if (!response.body) { setBusy(false); return; }
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      if (needPending) {
+        setMessages([...existingMessages, {
+          role: 'assistant', content: '', pending: true, reasoning: '',
+          reasoningTimeline: [], reasoningPending: false,
+        }]);
+      }
+      while (true) {
+        if (generationRef.current !== genId) break;
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const parts = buffer.split('\n\n');
+        buffer = parts.pop() || '';
+        for (const part of parts) {
+          if (generationRef.current !== genId) break;
+          handleSse(part);
+        }
+      }
+    } catch (err) {
+      if (err.name === 'AbortError') { /* ignored */ }
+    } finally {
+      if (generationRef.current === genId) {
+        setBusy(false);
+      }
+      if (abortRef.current === controller) {
+        abortRef.current = null;
+      }
+      if (activeRunRef.current === runId) {
+        activeRunRef.current = null;
+      }
+    }
   }
 
   async function renameSession() {
