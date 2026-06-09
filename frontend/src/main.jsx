@@ -174,6 +174,9 @@ function App() {
   const [uploadingAttachment, setUploadingAttachment] = useState(false);
   const [draft, setDraft] = useState('');
   const [busy, setBusy] = useState(false);
+  const abortRef = useRef(null);
+  const activeRunRef = useRef(null);
+  const generationRef = useRef(0);
   const [error, setError] = useState('');
   const [toastMsg, setToastMsg] = useState('');
   const [toastTone, setToastTone] = useState('success');
@@ -1251,6 +1254,12 @@ function App() {
     }
     setDraft('');
     setHomePrompt('');
+    // Abort any in-flight request (e.g. from a previous stop)
+    if (abortRef.current) {
+      abortRef.current.abort();
+    }
+    // Increment generation to invalidate stale SSE events
+    generationRef.current += 1;
     setBusy(true);
     setError('');
     setChatAttachments([]);
@@ -1269,8 +1278,12 @@ function App() {
       },
     ]);
     setToolDebugEvents([]);
+    const controller = new AbortController();
+    abortRef.current = controller;
+    activeRunRef.current = null;
     try {
       const response = await fetch(`${API_BASE}/api/agents/${activeAgentId}/chat/stream`, {
+        signal: controller.signal,
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({
@@ -1296,16 +1309,25 @@ function App() {
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let buffer = '';
+      const genId = generationRef.current;
       while (true) {
+        // Stop processing if a new generation has started
+        if (generationRef.current !== genId) break;
         const { done, value } = await reader.read();
         if (done) break;
         buffer += decoder.decode(value, { stream: true });
         const parts = buffer.split('\n\n');
         buffer = parts.pop() || '';
-        for (const part of parts) handleSse(part);
+        for (const part of parts) {
+          if (generationRef.current !== genId) break;
+          handleSse(part);
+        }
       }
     } catch (err) {
-      if (isAuthError(err)) {
+      // Don't show error for user-initiated abort
+      if (err.name === 'AbortError') {
+        // Already handled by stopGeneration or cancelled event
+      } else if (isAuthError(err)) {
         logout();
         setError('登录已失效，请重新登录。');
       } else {
@@ -1328,10 +1350,39 @@ function App() {
         });
       }
     } finally {
+      abortRef.current = null;
+      activeRunRef.current = null;
       setBusy(false);
       if (activeAgentId) loadSessions(activeAgentId).catch((err) => setError(errorMessage(err)));
       setChatAttachments([]);
     }
+  }
+
+  async function stopGeneration() {
+    const runId = activeRunRef.current;
+    if (runId) {
+      // Notify backend to cancel — it will close the SSE stream cleanly
+      fetch(`${API_BASE}/api/runs/${runId}/cancel`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      }).catch(() => {});
+    }
+    // Don't abort the fetch here — let the backend send the cancelled SSE event
+    // which properly persists the partial response. The stream will end naturally.
+    setBusy(false);
+    setMessages((items) => {
+      const next = [...items];
+      const last = next[next.length - 1];
+      if (last?.role === 'assistant' && last.pending) {
+        next[next.length - 1] = {
+          ...last,
+          pending: false,
+          reasoningPending: false,
+          reasoningFinishedAt: last.reasoningStartedAt && !last.reasoningFinishedAt ? Date.now() : last.reasoningFinishedAt,
+        };
+      }
+      return next;
+    });
   }
 
   async function uploadChatAttachment(file) {
@@ -1361,6 +1412,30 @@ function App() {
     const event = raw.match(/^event: (.+)$/m)?.[1];
     const dataLine = raw.match(/^data: (.+)$/m)?.[1];
     const data = dataLine ? JSON.parse(dataLine) : {};
+    if (event === 'run_started') {
+      activeRunRef.current = data.run_id || null;
+    }
+    if (event === 'cancelled') {
+      setActiveSessionId(data.session_id || null);
+      setMessages((currentMessages) => {
+        const next = [...currentMessages];
+        const last = next[next.length - 1];
+        if (last?.role === 'assistant') {
+          next[next.length - 1] = {
+            ...last,
+            id: data.message_id,
+            run_id: data.run_id,
+            pending: false,
+            reasoningPending: false,
+            reasoningFinishedAt: last.reasoningStartedAt && !last.reasoningFinishedAt ? Date.now() : last.reasoningFinishedAt,
+            content: data.content || last.content || '',
+            meta: { ...(last.meta || {}), cancelled: true },
+          };
+        }
+        return next;
+      });
+      return;
+    }
     if (event === 'token') {
       setMessages((items) => {
         const next = [...items];
@@ -1690,6 +1765,7 @@ function App() {
     token,
     userModels,
     webSearchRuntime,
+    onStopGeneration: stopGeneration,
   };
 
   const builderProps = {
@@ -1792,6 +1868,7 @@ function HomeView(props) {
     me,
     members,
     messages,
+    onStopGeneration,
     openBuilder,
     promptTemplates,
     requestDeleteConfirm,
@@ -2150,6 +2227,7 @@ function HomeView(props) {
             uploadChatAttachment={uploadChatAttachment}
             uploadingAttachment={uploadingAttachment}
             updateChatVariable={updateChatVariable}
+            onStopGeneration={onStopGeneration}
           />
         )}
 

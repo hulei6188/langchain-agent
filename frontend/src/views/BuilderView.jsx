@@ -152,6 +152,7 @@ export function BuilderView(props) {
     memoryProfileError,
     memoryProfileLoading,
     memoryProfileSaving,
+    onStopGeneration,
     removeSuggestedQuestion,
     removeVariable,
     renameSession,
@@ -1123,6 +1124,8 @@ export function BuilderView(props) {
             placeholder={CHAT_COPY.sendMessage}
             onSubmit={sendMessage}
             submitDisabled={busy || uploadingAttachment || !!modelWarning || !activeAgentId || (!draft.trim() && !chatAttachments.length)}
+            busy={busy}
+            onStopGeneration={onStopGeneration}
             includeNewChat
             onNewChat={startNewChat}
             attachmentAccept={attachmentAccept}

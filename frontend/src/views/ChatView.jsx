@@ -1,5 +1,6 @@
 import React, { useRef, useState, useEffect } from 'react';
 import {
+  Square,
   SquarePen,
   ImagePlus,
   FileText,
@@ -89,6 +90,7 @@ export function ChatView({
   feedbackByMessage,
   homePrompt,
   messages,
+  onStopGeneration,
   sendMessage,
   sendSuggestedQuestion,
   setChatAttachments,
@@ -150,6 +152,7 @@ export function ChatView({
         feedbackByMessage={feedbackByMessage}
         homePrompt={homePrompt}
         messages={messages}
+        onStopGeneration={onStopGeneration}
         sendMessage={sendMessage}
         sendSuggestedQuestion={sendSuggestedQuestion}
         setChatAttachments={setChatAttachments}
@@ -184,6 +187,7 @@ function ChatHomeV2({
   feedbackByMessage,
   homePrompt,
   messages,
+  onStopGeneration,
   sendMessage,
   sendSuggestedQuestion,
   setChatAttachments,
@@ -269,6 +273,8 @@ function ChatHomeV2({
             placeholder={`${CHAT_COPY.sendPrefix} ${activeAgent?.name || agentForm.name || CHAT_COPY.fallbackAgent} ${CHAT_COPY.sendSuffix}`}
             onSubmit={(event) => sendMessage(event, homePrompt)}
             submitDisabled={busy || uploadingAttachment || !!modelWarning || (!homePrompt.trim() && !chatAttachments.length)}
+            busy={busy}
+            onStopGeneration={onStopGeneration}
             attachmentAccept={attachmentAccept}
             attachmentDisabled={attachmentDisabled}
             attachmentHint={attachmentHint}
@@ -306,6 +312,7 @@ export function ChatComposer({
   attachmentDisabled,
   attachmentHint,
   attachments = [],
+  busy = false,
   className,
   currentModel,
   includeNewChat = false,
@@ -314,6 +321,7 @@ export function ChatComposer({
   onChange,
   onFileDrop,
   onNewChat,
+  onStopGeneration,
   onSubmit,
   onToggleRag,
   onToggleSearch,
@@ -455,9 +463,15 @@ export function ChatComposer({
               style={{ display: 'none' }}
             />
           </label>
-          <button type="submit" className="composer-send-button" disabled={submitDisabled}>
-            <Send size={18} />
-          </button>
+          {busy ? (
+            <button type="button" className="composer-stop-button" title="停止生成" onClick={onStopGeneration}>
+              <Square size={18} />
+            </button>
+          ) : (
+            <button type="submit" className="composer-send-button" disabled={submitDisabled}>
+              <Send size={18} />
+            </button>
+          )}
         </div>
       </div>
     </form>

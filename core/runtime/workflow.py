@@ -4,6 +4,7 @@ from datetime import datetime
 import json
 import logging
 import re
+import threading
 import time
 from types import SimpleNamespace
 
@@ -29,7 +30,8 @@ from core.db.models import (
     Upload,
     WorkflowDefinition,
 )
-from core.integrations.llm import ChatResponse, OpenAICompatibleProvider
+from core.integrations.llm import ChatResponse, OpenAICompatibleProvider, _CancelledError
+from core.runtime.cancel import register_run, unregister_run, is_cancelled
 from core.services.agents import get_agent_detail, normalize_memory, normalize_rag, normalize_tool_policy
 from core.services.rag import retrieve
 from core.services.memory import format_profile_memory, get_memory_profile, memory_used_event
@@ -217,6 +219,11 @@ class WorkflowRunner:
     def __init__(self, db: Session) -> None:
         self.db = db
         self.provider = OpenAICompatibleProvider()
+        self._cancel_event: threading.Event | None = None
+
+    def set_cancel_event(self, event: threading.Event) -> None:
+        """Set the cancel event for this runner."""
+        self._cancel_event = event
 
     def run(
         self,
@@ -357,50 +364,73 @@ class WorkflowRunner:
             attachments=attachments,
             current_message_id=current_message_id,
         )
-        steps: list[dict] = []
-        for node in runtime.workflow:
-            if node["type"] == "LLM":
-                output = yield from self._stream_llm_node(runtime, node, context)
-            elif node["type"] == "Tool":
-                output = yield from self._stream_tool_node(runtime, node, context)
-            else:
-                output = self._execute_node(runtime, node, context)
-            if not steps:
-                output.setdefault("events", []).append({"event": "memory_used", "data": context.get("profile_memory_used", {})})
-                output.setdefault("events", []).append({"event": "thinking_status", "data": context.get("thinking_status", {})})
-                output.setdefault("events", []).append({"event": "search_status", "data": self._search_status_event(context.get("search_status", {}))})
-            events = output.pop("events", [])
-            context.update(output)
-            step = self._persist_step(run, node, user_message, output)
-            step_payload = {
-                "id": step.id,
-                "node_id": step.node_id,
-                "node_type": step.node_type,
-                "status": step.status,
-                "output": output,
-                "events": events,
-            }
-            steps.append(step_payload)
-            yield {"event": "step", "step": step_payload}
+        # Emit run_id immediately so frontend can cancel
+        yield {"event": "run_started", "run_id": run.id}
+        # Register for cancellation
+        self._cancel_event = register_run(run.id, self.provider)
 
-        final_answer = strip_or_block_leaked_tool_markup(context.get("answer") or context.get("draft") or "当前智能体没有生成回答。")
-        if context.get("memory_enabled"):
-            self._update_session_memory(
-                chat_session.id,
-                user_message,
-                final_answer,
-                int(runtime.settings.get("memory", {}).get("max_messages", 12)),
-            )
-        run.status = "succeeded"
-        run.completed_at = datetime.utcnow()
-        self.db.commit()
-        yield {
-            "event": "complete",
-            "run": run,
-            "answer": final_answer,
-            "sources": [*context.get("sources", []), *context.get("web_sources", [])],
-            "steps": steps,
-        }
+        steps: list[dict] = []
+        cancelled = False
+        try:
+            for node in runtime.workflow:
+                if self._cancel_event.is_set():
+                    cancelled = True
+                    break
+                try:
+                    if node["type"] == "LLM":
+                        output = yield from self._stream_llm_node(runtime, node, context)
+                    elif node["type"] == "Tool":
+                        output = yield from self._stream_tool_node(runtime, node, context)
+                    else:
+                        output = self._execute_node(runtime, node, context)
+                except _CancelledError:
+                    cancelled = True
+                    break
+                if not steps:
+                    output.setdefault("events", []).append({"event": "memory_used", "data": context.get("profile_memory_used", {})})
+                    output.setdefault("events", []).append({"event": "thinking_status", "data": context.get("thinking_status", {})})
+                    output.setdefault("events", []).append({"event": "search_status", "data": self._search_status_event(context.get("search_status", {}))})
+                events = output.pop("events", [])
+                context.update(output)
+                step = self._persist_step(run, node, user_message, output)
+                step_payload = {
+                    "id": step.id,
+                    "node_id": step.node_id,
+                    "node_type": step.node_type,
+                    "status": step.status,
+                    "output": output,
+                    "events": events,
+                }
+                steps.append(step_payload)
+                yield {"event": "step", "step": step_payload}
+
+            if cancelled:
+                run.status = "cancelled"
+                run.completed_at = datetime.utcnow()
+                self.db.commit()
+                yield {"event": "cancelled", "run_id": run.id}
+                return
+
+            final_answer = strip_or_block_leaked_tool_markup(context.get("answer") or context.get("draft") or "当前智能体没有生成回答。")
+            if context.get("memory_enabled"):
+                self._update_session_memory(
+                    chat_session.id,
+                    user_message,
+                    final_answer,
+                    int(runtime.settings.get("memory", {}).get("max_messages", 12)),
+                )
+            run.status = "succeeded"
+            run.completed_at = datetime.utcnow()
+            self.db.commit()
+            yield {
+                "event": "complete",
+                "run": run,
+                "answer": final_answer,
+                "sources": [*context.get("sources", []), *context.get("web_sources", [])],
+                "steps": steps,
+            }
+        finally:
+            unregister_run(run.id)
 
     def _start_run(
         self,
@@ -554,6 +584,8 @@ class WorkflowRunner:
             tool_loop_start = time.monotonic()
 
             for _round in range(MAX_TOOL_ROUNDS_PER_RUN):
+                if self._cancel_event is not None and self._cancel_event.is_set():
+                    raise _CancelledError()
                 if total_calls >= max_tool_calls:
                     break
                 if time.monotonic() - tool_loop_start > max_tool_wall_time:
@@ -565,6 +597,7 @@ class WorkflowRunner:
                     runtime_config=agent.runtime_config,
                     tools=tool_schemas,
                     thinking_enabled=self._thinking_request_value(context),
+                    cancel_event=self._cancel_event,
                 )
                 response = _coerce_dsml_tool_calls(response, stage=f"tool node non-stream round {_round}")
                 if response.content and not response.tool_calls:
@@ -660,12 +693,15 @@ class WorkflowRunner:
                         tools_used.append(tool_name)
 
             # Max rounds reached — get final answer from accumulated context
+            if self._cancel_event is not None and self._cancel_event.is_set():
+                raise _CancelledError()
             final = self.provider.chat(
                 messages,
                 model=agent.model,
                 temperature=agent.temperature,
                 runtime_config=agent.runtime_config,
                 thinking_enabled=self._thinking_request_value(context),
+                cancel_event=self._cancel_event,
             )
             return {
                 "draft": strip_or_block_leaked_tool_markup(final.content or ""),
@@ -677,6 +713,8 @@ class WorkflowRunner:
                 "events": events,
             }
         if node_type == "LLM":
+            if self._cancel_event is not None and self._cancel_event.is_set():
+                raise _CancelledError()
             if context.get("draft"):
                 return self._llm_output(agent, context, context["draft"], reasoning=context.get("draft_reasoning") or "")
             messages = self._llm_messages(agent, context)
@@ -686,6 +724,7 @@ class WorkflowRunner:
                 temperature=agent.temperature,
                 runtime_config=agent.runtime_config,
                 thinking_enabled=self._thinking_request_value(context),
+                cancel_event=self._cancel_event,
             ).content or ""
             draft = strip_or_block_leaked_tool_markup(draft)
             return self._llm_output(agent, context, draft)
@@ -717,6 +756,8 @@ class WorkflowRunner:
         tool_loop_start = time.monotonic()
 
         for _round in range(MAX_TOOL_ROUNDS_PER_RUN):
+            if self._cancel_event is not None and self._cancel_event.is_set():
+                break
             if total_calls >= max_tool_calls:
                 break
             if time.monotonic() - tool_loop_start > max_tool_wall_time:
@@ -816,7 +857,10 @@ class WorkflowRunner:
             runtime_config=agent.runtime_config,
             tools=tools,
             thinking_enabled=self._thinking_request_value(context),
+            cancel_event=self._cancel_event,
         ):
+            if self._cancel_event is not None and self._cancel_event.is_set():
+                break
             if chunk.type == "reasoning":
                 if not context.get("thinking_enabled"):
                     continue
@@ -1039,6 +1083,8 @@ class WorkflowRunner:
             if not context.get("draft_streamed"):
                 # Draft already produced by the tool-calling loop — stream as chunked text
                 for index in range(0, len(draft), 24):
+                    if self._cancel_event is not None and self._cancel_event.is_set():
+                        break
                     yield {"event": "token", "content": draft[index : index + 24]}
             return self._llm_output(agent, context, draft, reasoning=draft_reasoning)
         messages = self._llm_messages(agent, context)
@@ -1053,7 +1099,10 @@ class WorkflowRunner:
             temperature=agent.temperature,
             runtime_config=agent.runtime_config,
             thinking_enabled=self._thinking_request_value(context),
+            cancel_event=self._cancel_event,
         ):
+            if self._cancel_event is not None and self._cancel_event.is_set():
+                break
             if chunk.type == "reasoning":
                 if not context.get("thinking_enabled"):
                     continue
