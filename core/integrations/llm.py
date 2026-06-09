@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import hashlib
+import http.client
 import json
+import logging
 import socket
 import ssl
+import threading
 import urllib.error
 import urllib.request
 from collections.abc import Iterable
@@ -11,8 +14,15 @@ from dataclasses import dataclass, field
 
 from core.config import get_settings
 
+logger = logging.getLogger(__name__)
+
 DASHSCOPE_COMPATIBLE_BASE = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 OPENAI_COMPATIBLE_DEFAULT_BASE = DASHSCOPE_COMPATIBLE_BASE
+
+
+class _CancelledError(Exception):
+    """Raised when a chat request is cancelled mid-flight."""
+    pass
 
 
 @dataclass
@@ -35,6 +45,30 @@ class OpenAICompatibleProvider:
     def __init__(self) -> None:
         self.last_chat_mock = False
         self.last_embed_mock = False
+        self._active_response: http.client.HTTPResponse | None = None
+
+    def cancel_active_request(self) -> None:
+        """Close the active streaming HTTP connection to unblock reads.
+
+        Called from the cancellation registry when a run is cancelled.
+        Safe to call from any thread.
+
+        We close the underlying socket directly so the reading thread gets
+        a clean OSError instead of an AttributeError (which would happen
+        if we called response.close() which sets response.fp = None).
+        """
+        resp = self._active_response
+        if resp is not None:
+            self._active_response = None
+            try:
+                # response.fp is a socket.SocketIO; closing it shuts down
+                # the TCP socket and causes the blocked readline() to raise
+                # OSError in the streaming thread.
+                fp = getattr(resp, 'fp', None)
+                if fp is not None and hasattr(fp, 'close'):
+                    fp.close()
+            except Exception:
+                pass
 
     def chat(
         self,
@@ -45,7 +79,10 @@ class OpenAICompatibleProvider:
         runtime_config: dict | None = None,
         tools: list[dict] | None = None,
         thinking_enabled: bool | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> ChatResponse:
+        if cancel_event is not None and cancel_event.is_set():
+            raise _CancelledError()
         settings = get_settings()
         api_key = self._api_key(settings, runtime_config, purpose="chat")
         if settings.mock_llm:
@@ -114,6 +151,7 @@ class OpenAICompatibleProvider:
         runtime_config: dict | None = None,
         tools: list[dict] | None = None,
         thinking_enabled: bool | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> Iterable[ChatStreamChunk]:
         settings = get_settings()
         api_key = self._api_key(settings, runtime_config, purpose="chat")
@@ -131,6 +169,8 @@ class OpenAICompatibleProvider:
                 yield ChatStreamChunk(type="tool_calls", tool_calls=text.tool_calls)
                 return
             for index in range(0, len(text.content or ""), 24):
+                if cancel_event is not None and cancel_event.is_set():
+                    return
                 yield ChatStreamChunk(type="content", content=(text.content or "")[index : index + 24])
             return
         if not api_key:
@@ -153,7 +193,7 @@ class OpenAICompatibleProvider:
         # When tools are present, stream normally — the caller (agent loop)
         # uses non-streaming chat() for tool-call decisions, so stream is
         # only for the final answer phase.
-        yield from self._post_json_stream(url, payload, api_key)
+        yield from self._post_json_stream(url, payload, api_key, cancel_event=cancel_event)
 
     def requires_reasoning_replay(self, *, model: str | None = None, runtime_config: dict | None = None) -> bool:
         settings = get_settings()
@@ -314,7 +354,7 @@ class OpenAICompatibleProvider:
         normalized_base = (api_base or "").lower()
         return "api.deepseek.com" in normalized_base
 
-    def _post_json_stream(self, url: str, payload: dict, api_key: str) -> Iterable[ChatStreamChunk]:
+    def _post_json_stream(self, url: str, payload: dict, api_key: str, *, cancel_event: threading.Event | None = None) -> Iterable[ChatStreamChunk]:
         request = urllib.request.Request(
             url,
             data=json.dumps(payload).encode("utf-8"),
@@ -327,24 +367,34 @@ class OpenAICompatibleProvider:
         )
         try:
             with urllib.request.urlopen(request, timeout=120) as response:
-                for raw_line in response:
-                    line = raw_line.decode("utf-8", errors="replace").strip()
-                    if not line or not line.startswith("data:"):
-                        continue
-                    payload_text = line.removeprefix("data:").strip()
-                    if payload_text == "[DONE]":
-                        break
-                    try:
-                        data = json.loads(payload_text)
-                    except json.JSONDecodeError:
-                        continue
-                    yield from self._stream_chunks(data)
+                self._active_response = response
+                try:
+                    for raw_line in response:
+                        if cancel_event is not None and cancel_event.is_set():
+                            logger.info("Streaming request cancelled mid-stream")
+                            raise _CancelledError()
+                        line = raw_line.decode("utf-8", errors="replace").strip()
+                        if not line or not line.startswith("data:"):
+                            continue
+                        payload_text = line.removeprefix("data:").strip()
+                        if payload_text == "[DONE]":
+                            break
+                        try:
+                            data = json.loads(payload_text)
+                        except json.JSONDecodeError:
+                            continue
+                        yield from self._stream_chunks(data)
+                finally:
+                    self._active_response = None
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")[:800]
             raise RuntimeError(
                 f"Model call failed: HTTP {exc.code}. Check OPENAI_API_BASE, API key and model name. {detail}"
             ) from exc
-        except (urllib.error.URLError, TimeoutError, socket.timeout, ssl.SSLError, OSError) as exc:
+        except (urllib.error.URLError, TimeoutError, socket.timeout, ssl.SSLError, OSError, ValueError, AttributeError) as exc:
+            if cancel_event is not None and cancel_event.is_set():
+                logger.info("Streaming connection closed due to cancellation")
+                raise _CancelledError()
             raise RuntimeError(
                 f"Model call failed: cannot connect to model gateway {url}. Check OPENAI_API_BASE, proxy, certs and API key. Raw error: {exc}"
             ) from exc

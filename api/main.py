@@ -78,6 +78,7 @@ from core.db.models import (
 from core.db.session import engine, get_db, init_db
 from core.integrations.llm import DASHSCOPE_COMPATIBLE_BASE, OPENAI_COMPATIBLE_DEFAULT_BASE, OpenAICompatibleProvider
 from core.integrations.vector_store import vector_store
+from core.runtime.cancel import cancel_run
 from core.runtime.workflow import WorkflowRunner, default_workflow
 from core.security.auth import create_access_token, hash_password, verify_password
 from core.security.api_keys import secret_storage_ready
@@ -1656,6 +1657,7 @@ def delete_session(session_id: int, membership: WorkspaceMember = Depends(get_cu
 
 def stream_chat_events(db: Session, agent: Agent, user_id: int, request: ChatRequest) -> Iterable[str]:
     run = None
+    assistant_saved = False  # Track whether we already persisted the assistant message
     try:
         session = get_or_create_session(db, agent, user_id, request.session_id, request.message, is_debug=getattr(request, "is_debug", False))
         user_message = Message(session_id=session.id, role="user", content=request.message, sources=[])
@@ -1682,9 +1684,13 @@ def stream_chat_events(db: Session, agent: Agent, user_id: int, request: ChatReq
             attachments=request.attachments,
             current_message_id=user_message.id,
         ):
-            if event["event"] == "token":
+            if event["event"] == "run_started":
+                run_id = event["run_id"]
+                yield sse_event("run_started", {"run_id": run_id})
+            elif event["event"] == "token":
                 if reasoning_started_at is not None and reasoning_duration_ms is None:
                     reasoning_duration_ms = int((time.perf_counter() - reasoning_started_at) * 1000)
+                answer += event.get("content", "")
                 yield sse_event("token", {"content": event.get("content", "")})
             elif event["event"] == "reasoning_token":
                 content = event.get("content", "")
@@ -1717,6 +1723,34 @@ def stream_chat_events(db: Session, agent: Agent, user_id: int, request: ChatReq
                         continue
                     yield sse_event(runtime_event_name, runtime_event_data)
                 yield sse_event("run_step", step)
+            elif event["event"] == "cancelled":
+                run = db.get(Run, event["run_id"])
+                if reasoning_started_at is not None and reasoning_duration_ms is None:
+                    reasoning_duration_ms = int((time.perf_counter() - reasoning_started_at) * 1000)
+                # Save partial response
+                assistant = Message(
+                    session_id=session.id,
+                    role="assistant",
+                    content=answer,
+                    reasoning=reasoning,
+                    reasoning_duration_ms=reasoning_duration_ms,
+                    sources=sources,
+                    meta={"cancelled": True},
+                )
+                db.add(assistant)
+                db.commit()
+                db.refresh(assistant)
+                assistant_saved = True
+                yield sse_event(
+                    "cancelled",
+                    {
+                        "session_id": session.id,
+                        "message_id": assistant.id,
+                        "run_id": event["run_id"],
+                        "content": answer,
+                    },
+                )
+                return
             elif event["event"] == "complete":
                 run = event["run"]
                 answer = event["answer"]
@@ -1750,6 +1784,7 @@ def stream_chat_events(db: Session, agent: Agent, user_id: int, request: ChatReq
         db.add(assistant)
         db.commit()
         db.refresh(assistant)
+        assistant_saved = True
         yield sse_event(
             "done",
             {
@@ -1770,6 +1805,26 @@ def stream_chat_events(db: Session, agent: Agent, user_id: int, request: ChatReq
                 db.rollback()
         logger.exception("Agent chat stream failed")
         yield sse_event("error", safe_stream_error(exc))
+    finally:
+        # Safety net: persist partial answer if stream exited before saving
+        if not assistant_saved and answer:
+            try:
+                if reasoning_started_at is not None and reasoning_duration_ms is None:
+                    reasoning_duration_ms = int((time.perf_counter() - reasoning_started_at) * 1000)
+                assistant = Message(
+                    session_id=session.id,
+                    role="assistant",
+                    content=answer,
+                    reasoning=reasoning,
+                    reasoning_duration_ms=reasoning_duration_ms,
+                    sources=sources,
+                    meta={"cancelled": True, "partial": True},
+                )
+                db.add(assistant)
+                db.commit()
+            except Exception:
+                db.rollback()
+                logger.exception("Failed to save partial answer on stream exit")
 
 
 @app.get("/api/runs/{run_id}")
@@ -1781,6 +1836,19 @@ def get_run(run_id: int, membership: WorkspaceMember = Depends(get_current_membe
     if session:
         require_session_access(session, membership)
     return {"run": {"id": run.id, "status": run.status, "agent_id": run.agent_id, "session_id": run.session_id}}
+
+
+@app.post("/api/runs/{run_id}/cancel")
+def cancel_run_endpoint(run_id: int, membership: WorkspaceMember = Depends(get_current_membership), db: Session = Depends(get_db)):
+    run = db.get(Run, run_id)
+    if not run or run.workspace_id != membership.workspace_id:
+        raise HTTPException(status_code=404, detail="Run not found")
+    session = db.get(ChatSession, run.session_id)
+    if session:
+        require_session_access(session, membership)
+    if cancel_run(run_id):
+        return {"cancelled": True, "run_id": run_id}
+    return {"cancelled": False, "run_id": run_id, "message": "Run not active or already completed"}
 
 
 @app.get("/api/runs/{run_id}/steps")

@@ -4615,6 +4615,20 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
 .rich-composer .composer-send-button:not(:disabled):hover {
   background: #263244;
 }
+.rich-composer .composer-stop-button {
+  width: 34px;
+  height: 34px;
+  display: inline-grid;
+  place-items: center;
+  border-radius: 50%;
+  border: none;
+  cursor: pointer;
+  background: #dc2626;
+  color: #fff;
+}
+.rich-composer .composer-stop-button:hover {
+  background: #b91c1c;
+}
 .rich-composer button:disabled,
 .rich-composer .attachment-button.disabled {
   opacity: .45;
@@ -5252,6 +5266,13 @@ body.dark .agent-card > span,
 body.dark .rich-composer .composer-send-button {
   background: #eef2ff;
   color: #111827;
+}
+body.dark .rich-composer .composer-stop-button {
+  background: #ef4444;
+  color: #fff;
+}
+body.dark .rich-composer .composer-stop-button:hover {
+  background: #dc2626;
 }
 body.dark .message.user .message-body {
   background: #242938;
