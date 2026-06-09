@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 import logging
+import queue
 import re
 import secrets
+import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from collections.abc import Iterable
 
 from fastapi import Depends, FastAPI, HTTPException, Query
@@ -75,8 +77,8 @@ from core.db.models import (
     WorkspaceInvite,
     WorkspaceMember,
 )
-from core.db.session import engine, get_db, init_db
-from core.integrations.llm import DASHSCOPE_COMPATIBLE_BASE, OPENAI_COMPATIBLE_DEFAULT_BASE, OpenAICompatibleProvider
+from core.db.session import SessionLocal, engine, get_db, init_db
+from core.integrations.llm import DASHSCOPE_COMPATIBLE_BASE, OPENAI_COMPATIBLE_DEFAULT_BASE, OpenAICompatibleProvider, _CancelledError
 from core.integrations.vector_store import vector_store
 from core.runtime.cancel import cancel_run
 from core.runtime.workflow import WorkflowRunner, default_workflow
@@ -218,6 +220,35 @@ logger = logging.getLogger(__name__)
 startup_error: str | None = None
 _health_probe_cache: dict[str, tuple[float, dict]] = {}
 
+# Per-run event log for SSE reconnection after page refresh.
+# Each entry is the raw SSE string (e.g. "event: token\ndata: {...}\n\n").
+_MAX_RUN_EVENTS = 2000
+_run_event_logs: dict[int, list[str]] = {}
+_run_event_lock = threading.Lock()
+
+
+def _append_run_event(run_id: int, sse_str: str) -> None:
+    with _run_event_lock:
+        if run_id not in _run_event_logs:
+            _run_event_logs[run_id] = []
+        log = _run_event_logs[run_id]
+        log.append(sse_str)
+        # Cap per-run event buffer to prevent unbounded memory growth
+        if len(log) > _MAX_RUN_EVENTS:
+            _run_event_logs[run_id] = log[-_MAX_RUN_EVENTS:]
+
+
+def _get_run_events_since(run_id: int, index: int) -> tuple[list[str], int]:
+    with _run_event_lock:
+        log = _run_event_logs.get(run_id, [])
+        events = log[index:]
+        return events, len(log)
+
+
+def _cleanup_run_events(run_id: int) -> None:
+    with _run_event_lock:
+        _run_event_logs.pop(run_id, None)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origin_list or ["http://127.0.0.1:5174", "http://localhost:5174"],
@@ -237,10 +268,34 @@ def startup() -> None:
         )
     try:
         init_db()
+        _cleanup_zombie_runs()
         startup_error = None
     except Exception as exc:
         startup_error = str(exc)[:500]
         logger.exception("Database initialization failed; API started in degraded mode")
+
+
+def _cleanup_zombie_runs() -> None:
+    """Mark stale running runs as failed after server restart or crash."""
+    try:
+        db = SessionLocal()
+        cutoff = datetime.now(timezone.utc) - timedelta(minutes=30)
+        zombie_runs = (
+            db.query(Run)
+            .filter(Run.status == "running", Run.started_at < cutoff)
+            .all()
+        )
+        if zombie_runs:
+            for run in zombie_runs:
+                run.status = "failed"
+                run.completed_at = datetime.now(timezone.utc)
+            db.commit()
+            logger.info("Cleaned up %d zombie runs (stuck running >30min)", len(zombie_runs))
+    except Exception:
+        db.rollback()
+        logger.exception("Failed to clean up zombie runs")
+    finally:
+        db.close()
 
 
 def sse_event(event: str, data: dict) -> str:
@@ -1588,7 +1643,71 @@ def chat_stream(agent_id: int, request: ChatRequest, membership: WorkspaceMember
     print(f"[DEBUG CHAT] agent_id: {agent_id} | mode: {request.mode} | session_id: {request.session_id}")
     agent = require_workspace_agent(db, membership.workspace_id, agent_id)
     require_agent_read_access(agent, membership)
-    return StreamingResponse(stream_chat_events(db, agent, current_user.id, request), media_type="text/event-stream")
+
+    session = get_or_create_session(db, agent, current_user.id, request.session_id, request.message, is_debug=getattr(request, "is_debug", False))
+    user_message = Message(session_id=session.id, role="user", content=request.message, sources=[])
+    db.add(user_message)
+    db.commit()
+
+    event_queue: queue.Queue = queue.Queue()
+
+    # Capture everything the background thread needs (don't pass ORM objects across threads)
+    bg_params = {
+        "agent_id": agent.id,
+        "agent_workspace_id": agent.workspace_id,
+        "session_id": session.id,
+        "user_id": current_user.id,
+        "user_message": request.message,
+        "user_message_id": user_message.id,
+        "mode": request.mode,
+        "variables": request.variables,
+        "rag_enabled": request.rag_enabled,
+        "rag_options": request.rag_options.model_dump(exclude_none=True) if request.rag_options else None,
+        "thinking_enabled": request.thinking_enabled,
+        "search_enabled": request.search_enabled,
+        "attachments": request.attachments,
+    }
+
+    def _run_workflow_bg() -> None:
+        bg_db = SessionLocal()
+        try:
+            _execute_workflow_thread(bg_db, bg_params, event_queue)
+        except Exception:
+            logger.exception("Background workflow thread crashed")
+            # Last-resort: mark the newest running run for this session as failed
+            try:
+                zombie = (
+                    bg_db.query(Run)
+                    .filter(
+                        Run.session_id == bg_params["session_id"],
+                        Run.status == "running",
+                    )
+                    .order_by(Run.started_at.desc())
+                    .first()
+                )
+                if zombie is not None:
+                    zombie.status = "failed"
+                    zombie.completed_at = datetime.now(timezone.utc)
+                    bg_db.commit()
+                    logger.warning("Marked zombie run %s as failed after thread crash", zombie.id)
+            except Exception:
+                bg_db.rollback()
+                logger.exception("Failed to mark zombie run after thread crash")
+        finally:
+            event_queue.put(None)  # sentinel
+            bg_db.close()
+
+    thread = threading.Thread(target=_run_workflow_bg, name=f"wf-{session.id}", daemon=True)
+    thread.start()
+
+    def _sse_generator() -> Iterable[str]:
+        while True:
+            item = event_queue.get()
+            if item is None:  # sentinel — workflow finished
+                break
+            yield item
+
+    return StreamingResponse(_sse_generator(), media_type="text/event-stream")
 
 
 @app.get("/api/agents/{agent_id}/sessions")
@@ -1613,7 +1732,40 @@ def get_session(session_id: int, membership: WorkspaceMember = Depends(get_curre
         raise HTTPException(status_code=404, detail="Session not found")
     require_session_access(session, membership)
     messages = db.query(Message).filter(Message.session_id == session.id).order_by(Message.id.asc()).all()
-    return {"session": session_payload(session, db), "messages": chat_message_payloads(messages)}
+    # Clean up stale running runs (>30 min) before returning active_run
+    stale_cutoff = datetime.now(timezone.utc) - timedelta(minutes=30)
+    stale_runs = (
+        db.query(Run)
+        .filter(
+            Run.session_id == session.id,
+            Run.status == "running",
+            Run.started_at < stale_cutoff,
+        )
+        .all()
+    )
+    for stale in stale_runs:
+        stale.status = "failed"
+        stale.completed_at = datetime.now(timezone.utc)
+    if stale_runs:
+        db.commit()
+    active_run = (
+        db.query(Run)
+        .filter(Run.session_id == session.id, Run.status == "running")
+        .order_by(Run.started_at.desc())
+        .first()
+    )
+    active_run_payload = None
+    if active_run:
+        active_run_payload = {
+            "id": active_run.id,
+            "status": active_run.status,
+            "started_at": active_run.started_at.isoformat() if active_run.started_at else None,
+        }
+    return {
+        "session": session_payload(session, db),
+        "messages": chat_message_payloads(messages),
+        "active_run": active_run_payload,
+    }
 
 
 @app.patch("/api/sessions/{session_id}")
@@ -1655,49 +1807,70 @@ def delete_session(session_id: int, membership: WorkspaceMember = Depends(get_cu
     return {"deleted": True}
 
 
-def stream_chat_events(db: Session, agent: Agent, user_id: int, request: ChatRequest) -> Iterable[str]:
-    run = None
-    assistant_saved = False  # Track whether we already persisted the assistant message
+def _execute_workflow_thread(db: Session, params: dict, q: queue.Queue) -> None:
+    """Execute the workflow in a background thread with its own DB session.
+
+    Puts SSE event strings onto *q*.  Puts ``None`` as a sentinel when done.
+    All DB writes happen here, so the run lifecycle is independent of the
+    SSE connection.
+    """
+    agent = db.get(Agent, params["agent_id"])
+    if not agent:
+        q.put(sse_event("error", {"message": "Agent not found"}))
+        return
+    chat_session = db.get(ChatSession, params["session_id"])
+    if not chat_session:
+        q.put(sse_event("error", {"message": "Session not found"}))
+        return
+
+    runner = WorkflowRunner(db)
+    _tracked_run_id: int | None = None
+
+    def _emit(event_name: str, data: dict | None = None) -> None:
+        """Push an SSE event to the queue AND the replay log."""
+        sse_str = sse_event(event_name, data or {})
+        q.put(sse_str)
+        if _tracked_run_id is not None:
+            _append_run_event(_tracked_run_id, sse_str)
+    answer = ""
+    sources: list[dict] = []
+    reasoning = ""
+    reasoning_started_at: float | None = None
+    reasoning_duration_ms: int | None = None
+    run: Run | None = None
+    assistant_saved = False
+    used_tools = False
+    requires_reasoning_replay = False
+
     try:
-        session = get_or_create_session(db, agent, user_id, request.session_id, request.message, is_debug=getattr(request, "is_debug", False))
-        user_message = Message(session_id=session.id, role="user", content=request.message, sources=[])
-        db.add(user_message)
-        db.commit()
-        runner = WorkflowRunner(db)
-        answer = ""
-        sources = []
-        reasoning = ""
-        reasoning_started_at = None
-        reasoning_duration_ms = None
-        used_tools = False
-        requires_reasoning_replay = False
         for event in runner.run_events(
             agent=agent,
-            chat_session=session,
-            user_message=request.message,
-            mode=request.mode,
-            variables=request.variables,
-            rag_enabled=request.rag_enabled,
-            rag_options=request.rag_options.model_dump(exclude_none=True) if request.rag_options else None,
-            thinking_enabled=request.thinking_enabled,
-            search_enabled=request.search_enabled,
-            attachments=request.attachments,
-            current_message_id=user_message.id,
+            chat_session=chat_session,
+            user_message=params["user_message"],
+            mode=params["mode"],
+            variables=params["variables"],
+            rag_enabled=params["rag_enabled"],
+            rag_options=params["rag_options"],
+            thinking_enabled=params["thinking_enabled"],
+            search_enabled=params["search_enabled"],
+            attachments=params["attachments"],
+            current_message_id=params["user_message_id"],
         ):
             if event["event"] == "run_started":
-                run_id = event["run_id"]
-                yield sse_event("run_started", {"run_id": run_id})
+                _tracked_run_id = event["run_id"]
+                run = db.get(Run, _tracked_run_id)
+                _emit("run_started", {"run_id": _tracked_run_id})
             elif event["event"] == "token":
                 if reasoning_started_at is not None and reasoning_duration_ms is None:
                     reasoning_duration_ms = int((time.perf_counter() - reasoning_started_at) * 1000)
                 answer += event.get("content", "")
-                yield sse_event("token", {"content": event.get("content", "")})
+                _emit("token", {"content": event.get("content", "")})
             elif event["event"] == "reasoning_token":
                 content = event.get("content", "")
                 if reasoning_started_at is None:
                     reasoning_started_at = time.perf_counter()
                 reasoning += content
-                yield sse_event("reasoning_token", {"content": content})
+                _emit("reasoning_token", {"content": content})
             elif event["event"] in {
                 "tool_call_start",
                 "tool_call_result",
@@ -1707,7 +1880,7 @@ def stream_chat_events(db: Session, agent: Agent, user_id: int, request: ChatReq
                 "memory_used",
                 "thinking_status",
             }:
-                yield sse_event(event["event"], event.get("data", {}) or {})
+                _emit(event["event"], event.get("data", {}) or {})
             elif event["event"] == "step":
                 step = event["step"]
                 for runtime_event in step.get("events", []):
@@ -1719,17 +1892,16 @@ def stream_chat_events(db: Session, agent: Agent, user_id: int, request: ChatReq
                             if reasoning_started_at is None:
                                 reasoning_started_at = time.perf_counter()
                             reasoning += content
-                        yield sse_event("reasoning_token", {"content": content})
+                        _emit("reasoning_token", {"content": content})
                         continue
-                    yield sse_event(runtime_event_name, runtime_event_data)
-                yield sse_event("run_step", step)
+                    _emit(runtime_event_name, runtime_event_data)
+                _emit("run_step", step)
             elif event["event"] == "cancelled":
                 run = db.get(Run, event["run_id"])
                 if reasoning_started_at is not None and reasoning_duration_ms is None:
                     reasoning_duration_ms = int((time.perf_counter() - reasoning_started_at) * 1000)
-                # Save partial response
                 assistant = Message(
-                    session_id=session.id,
+                    session_id=chat_session.id,
                     role="assistant",
                     content=answer,
                     reasoning=reasoning,
@@ -1741,15 +1913,12 @@ def stream_chat_events(db: Session, agent: Agent, user_id: int, request: ChatReq
                 db.commit()
                 db.refresh(assistant)
                 assistant_saved = True
-                yield sse_event(
-                    "cancelled",
-                    {
-                        "session_id": session.id,
-                        "message_id": assistant.id,
-                        "run_id": event["run_id"],
-                        "content": answer,
-                    },
-                )
+                _emit("cancelled", {
+                    "session_id": chat_session.id,
+                    "message_id": assistant.id,
+                    "run_id": event["run_id"],
+                    "content": answer,
+                })
                 return
             elif event["event"] == "complete":
                 run = event["run"]
@@ -1764,12 +1933,13 @@ def stream_chat_events(db: Session, agent: Agent, user_id: int, request: ChatReq
                     bool((step.get("output") or {}).get("reasoning_replay_required"))
                     for step in event.get("steps", [])
                 )
+
         if reasoning_started_at is not None and reasoning_duration_ms is None:
             reasoning_duration_ms = int((time.perf_counter() - reasoning_started_at) * 1000)
         if sources:
-            yield sse_event("sources", {"items": sources})
+            _emit("sources", {"items": sources})
         assistant = Message(
-            session_id=session.id,
+            session_id=chat_session.id,
             role="assistant",
             content=answer,
             reasoning=reasoning,
@@ -1785,34 +1955,21 @@ def stream_chat_events(db: Session, agent: Agent, user_id: int, request: ChatReq
         db.commit()
         db.refresh(assistant)
         assistant_saved = True
-        yield sse_event(
-            "done",
-            {
-                "session_id": session.id,
-                "message_id": assistant.id,
-                "run_id": run.id,
-                "content": answer,
-                "reasoning_duration_ms": reasoning_duration_ms,
-            },
-        )
-    except Exception as exc:
-        if run is not None:
-            try:
-                run.status = "failed"
-                run.completed_at = __import__("datetime").datetime.utcnow()
-                db.commit()
-            except Exception:
-                db.rollback()
-        logger.exception("Agent chat stream failed")
-        yield sse_event("error", safe_stream_error(exc))
-    finally:
-        # Safety net: persist partial answer if stream exited before saving
+        _emit("done", {
+            "session_id": chat_session.id,
+            "message_id": assistant.id,
+            "run_id": run.id,
+            "content": answer,
+            "reasoning_duration_ms": reasoning_duration_ms,
+        })
+    except _CancelledError:
+        # Workflow was cancelled — run status already set by run_events()
         if not assistant_saved and answer:
             try:
                 if reasoning_started_at is not None and reasoning_duration_ms is None:
                     reasoning_duration_ms = int((time.perf_counter() - reasoning_started_at) * 1000)
                 assistant = Message(
-                    session_id=session.id,
+                    session_id=chat_session.id,
                     role="assistant",
                     content=answer,
                     reasoning=reasoning,
@@ -1824,7 +1981,46 @@ def stream_chat_events(db: Session, agent: Agent, user_id: int, request: ChatReq
                 db.commit()
             except Exception:
                 db.rollback()
-                logger.exception("Failed to save partial answer on stream exit")
+        _emit("cancelled", {
+            "session_id": chat_session.id,
+            "run_id": run.id if run else (_tracked_run_id or None),
+            "content": answer,
+        })
+    except Exception as exc:
+        # Resolve run if we have tracked_run_id but run is None
+        resolved_run = run
+        if resolved_run is None and _tracked_run_id is not None:
+            resolved_run = db.get(Run, _tracked_run_id)
+        if resolved_run is not None and resolved_run.status == "running":
+            try:
+                resolved_run.status = "failed"
+                resolved_run.completed_at = datetime.now(timezone.utc)
+                db.commit()
+            except Exception:
+                db.rollback()
+                logger.exception("Failed to mark run %s as failed", getattr(resolved_run, 'id', None))
+        logger.exception("Agent chat stream failed")
+        _emit("error", safe_stream_error(exc))
+        # Safety net: persist partial answer
+        if not assistant_saved and answer:
+            try:
+                if reasoning_started_at is not None and reasoning_duration_ms is None:
+                    reasoning_duration_ms = int((time.perf_counter() - reasoning_started_at) * 1000)
+                assistant = Message(
+                    session_id=chat_session.id,
+                    role="assistant",
+                    content=answer,
+                    reasoning=reasoning,
+                    reasoning_duration_ms=reasoning_duration_ms,
+                    sources=sources,
+                    meta={"cancelled": True, "partial": True},
+                )
+                db.add(assistant)
+                db.commit()
+            except Exception:
+                db.rollback()
+    finally:
+        pass  # Don't immediately clean up event log — keep for reconnection
 
 
 @app.get("/api/runs/{run_id}")
@@ -1849,6 +2045,55 @@ def cancel_run_endpoint(run_id: int, membership: WorkspaceMember = Depends(get_c
     if cancel_run(run_id):
         return {"cancelled": True, "run_id": run_id}
     return {"cancelled": False, "run_id": run_id, "message": "Run not active or already completed"}
+
+
+@app.get("/api/runs/{run_id}/events")
+def stream_run_events(run_id: int, membership: WorkspaceMember = Depends(get_current_membership), db: Session = Depends(get_db)):
+    """Reconnect to an in-progress run's SSE event stream after page refresh.
+
+    Replays buffered events then streams new events as they arrive.
+    If the run is already finished, returns buffered events and closes.
+    """
+    run = db.get(Run, run_id)
+    if not run or run.workspace_id != membership.workspace_id:
+        raise HTTPException(status_code=404, detail="Run not found")
+    session = db.get(ChatSession, run.session_id)
+    if session:
+        require_session_access(session, membership)
+
+    def _event_stream() -> Iterable[str]:
+        emitted = 0
+        run_finished = False
+        # Phase 1: replay buffered events
+        while True:
+            events, total = _get_run_events_since(run_id, emitted)
+            for sse_str in events:
+                yield sse_str
+                emitted += 1
+            # Check if run is still active
+            db_sess = SessionLocal()
+            try:
+                current = db_sess.get(Run, run_id)
+                if current is None or current.status != "running":
+                    run_finished = True
+                    # Send terminal event if no done/cancelled/error was in the log
+                    final_status = current.status if current else "unknown"
+                    if final_status == "succeeded":
+                        yield sse_event("done", {"run_id": run_id, "status": "succeeded"})
+                    elif final_status == "cancelled":
+                        yield sse_event("cancelled", {"run_id": run_id, "status": "cancelled"})
+                    elif final_status == "failed":
+                        yield sse_event("error", {"message": "Run failed", "run_id": run_id})
+                    else:
+                        yield sse_event("done", {"run_id": run_id, "status": final_status})
+                    break
+            finally:
+                db_sess.close()
+            if run_finished:
+                break
+            time.sleep(0.3)
+
+    return StreamingResponse(_event_stream(), media_type="text/event-stream")
 
 
 @app.get("/api/runs/{run_id}/steps")
