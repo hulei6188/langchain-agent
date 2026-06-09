@@ -182,10 +182,10 @@ function App() {
   // Keep a ref in sync so SSE handlers can check latest activeSessionId
   const activeSessionIdRef = useRef(activeSessionId);
   activeSessionIdRef.current = activeSessionId;
-  // Track which session's stream handleSse is currently processing
-  const currentStreamSessionRef = useRef(null);
   // Track newly-created session ID from done event for finally cleanup
   const newSessionIdRef = useRef(null);
+  // Track the temp __new__ runKey so stopGeneration can find it before the real session ID arrives
+  const activeNewRunKeyRef = useRef(null);
   // Derived: busy only when CURRENT session is running
   const busy = activeSessionId ? !!runningBySessionId[activeSessionId]?.running : newSessionRunning;
 
@@ -630,7 +630,7 @@ function App() {
           reasoningTimeline: [], reasoningPending: false,
         }]);
       }
-      currentStreamSessionRef.current = sessionId;
+      const ctx = { sessionKey: sessionId, genId, realSessionId: sessionId, isNewSession: false };
       while (true) {
         if (sessionRunRef.current[sessionId]?.genId !== genId) break;
         const { done, value } = await reader.read();
@@ -640,7 +640,7 @@ function App() {
         buffer = parts.pop() || '';
         for (const part of parts) {
           if (sessionRunRef.current[sessionId]?.genId !== genId) break;
-          handleSse(part);
+          handleSse(part, ctx);
         }
       }
     } catch (err) {
@@ -1347,6 +1347,10 @@ function App() {
     newSessionIdRef.current = null;
     // Use a valid key for sessionRunRef (null is not a valid object key for our logic)
     const runKey = capturedSessionId || `__new__${Date.now()}`;
+    // Track temp key so stopGeneration can find it before real session ID arrives
+    if (!capturedSessionId) {
+      activeNewRunKeyRef.current = runKey;
+    }
     // Abort previous in-flight request for THIS session only
     const prevRun = sessionRunRef.current[runKey];
     if (prevRun?.controller) {
@@ -1407,7 +1411,7 @@ function App() {
       const decoder = new TextDecoder();
       let buffer = '';
       const genId = newGenId;
-      currentStreamSessionRef.current = runKey;
+      const ctx = { sessionKey: runKey, genId, realSessionId: capturedSessionId, isNewSession: !capturedSessionId };
       while (true) {
         // Stop processing if a new generation has started for this session
         if (sessionRunRef.current[runKey]?.genId !== genId) break;
@@ -1418,7 +1422,7 @@ function App() {
         buffer = parts.pop() || '';
         for (const part of parts) {
           if (sessionRunRef.current[runKey]?.genId !== genId) break;
-          handleSse(part);
+          handleSse(part, ctx);
         }
       }
     } catch (err) {
@@ -1462,6 +1466,7 @@ function App() {
         delete sessionRunRef.current[runKey];
       }
       newSessionIdRef.current = null;
+      activeNewRunKeyRef.current = null;
       if (activeAgentId) loadSessions(activeAgentId).catch((err) => setError(errorMessage(err)));
       setChatAttachments([]);
     }
@@ -1469,7 +1474,7 @@ function App() {
 
   async function stopGeneration() {
     // Only stop the CURRENT session's run — read from per-session state
-    const lookupKey = activeSessionId || newSessionIdRef.current;
+    const lookupKey = activeSessionId || newSessionIdRef.current || activeNewRunKeyRef.current;
     const sessionState = lookupKey ? sessionRunRef.current[lookupKey] : null;
     const runId = sessionState?.runId;
     if (runId) {
@@ -1523,54 +1528,66 @@ function App() {
     }
   }
 
-  function handleSse(raw) {
+  // Helper: is this stream's session currently displayed in the UI?
+  function _streamIsVisible(realSessionId, isNewSession) {
+    const currentView = activeSessionIdRef.current;
+    if (!currentView) return isNewSession;
+    if (isNewSession) return false;
+    return String(currentView) === String(realSessionId);
+  }
+
+  function handleSse(raw, ctx) {
+    const { sessionKey, genId, realSessionId, isNewSession } = ctx || {};
+    // Abandon if a new generation started for this session
+    if (sessionKey && sessionRunRef.current[sessionKey]?.genId !== genId) return;
+
     const event = raw.match(/^event: (.+)$/m)?.[1];
     const dataLine = raw.match(/^data: (.+)$/m)?.[1];
     const data = dataLine ? JSON.parse(dataLine) : {};
+    const visible = _streamIsVisible(realSessionId, isNewSession);
+
     if (event === 'run_started') {
-      const sid = currentStreamSessionRef.current;
-      if (sid && sessionRunRef.current[sid]) {
-        sessionRunRef.current[sid].runId = data.run_id || null;
+      if (sessionKey && sessionRunRef.current[sessionKey]) {
+        sessionRunRef.current[sessionKey].runId = data.run_id || null;
       }
     }
     if (event === 'cancelled') {
-      // Only set activeSessionId if user hasn't switched sessions away
-      const currentSid = activeSessionIdRef.current;
-      const streamSid = currentStreamSessionRef.current;
-      if (!currentSid || currentSid === data.session_id || streamSid === data.session_id) {
-        setActiveSessionId(data.session_id || null);
-      }
-      // Clear per-session running state
-      if (data.session_id) {
-        clearSessionRunning(data.session_id);
-      }
-      if (streamSid && streamSid !== data.session_id) {
-        clearSessionRunning(streamSid);
-      }
+      // Always clean up running state for this session
+      if (data.session_id) clearSessionRunning(data.session_id);
+      if (sessionKey && sessionKey !== data.session_id) clearSessionRunning(sessionKey);
       setNewSessionRunning(false);
       // If temp key, transition so finally block can clean up properly
-      if (streamSid?.startsWith('__new__') && data.session_id) {
+      if (sessionKey?.startsWith?.('__new__') && data.session_id) {
         newSessionIdRef.current = data.session_id;
       }
-      setMessages((currentMessages) => {
-        const next = [...currentMessages];
-        const last = next[next.length - 1];
-        if (last?.role === 'assistant') {
-          next[next.length - 1] = {
-            ...last,
-            id: data.message_id,
-            run_id: data.run_id,
-            pending: false,
-            reasoningPending: false,
-            reasoningFinishedAt: last.reasoningStartedAt && !last.reasoningFinishedAt ? Date.now() : last.reasoningFinishedAt,
-            content: data.content || last.content || '',
-            meta: { ...(last.meta || {}), cancelled: true },
-          };
+      // Only update UI if this session is currently visible
+      if (visible) {
+        // Set activeSessionId: new session gets the ID, existing keeps it
+        if (!realSessionId && data.session_id) {
+          setActiveSessionId(data.session_id);
         }
-        return next;
-      });
+        setMessages((currentMessages) => {
+          const next = [...currentMessages];
+          const last = next[next.length - 1];
+          if (last?.role === 'assistant') {
+            next[next.length - 1] = {
+              ...last,
+              id: data.message_id,
+              run_id: data.run_id,
+              pending: false,
+              reasoningPending: false,
+              reasoningFinishedAt: last.reasoningStartedAt && !last.reasoningFinishedAt ? Date.now() : last.reasoningFinishedAt,
+              content: data.content || last.content || '',
+              meta: { ...(last.meta || {}), cancelled: true },
+            };
+          }
+          return next;
+        });
+      }
       return;
     }
+    // All remaining events below only modify messages — skip if not visible
+    if (!visible) return;
     if (event === 'token') {
       setMessages((items) => {
         const next = [...items];
@@ -1635,64 +1652,66 @@ function App() {
       }
     }
     if (event === 'done') {
-      // Only set activeSessionId if user hasn't switched sessions away
-      const currentSid = activeSessionIdRef.current;
-      const streamSid = currentStreamSessionRef.current;
-      if (!currentSid || currentSid === data.session_id || streamSid === data.session_id) {
-        setActiveSessionId(data.session_id || null);
-      }
-      // If temp key (new session), transition from __new__ key to real session ID
-      if (streamSid?.startsWith('__new__') && data.session_id) {
+      // Always clean up running state and transition temp keys
+      if (sessionKey?.startsWith?.('__new__') && data.session_id) {
         setRunningBySessionId((prev) => {
           const next = { ...prev };
-          delete next[streamSid];
+          delete next[sessionKey];
           next[data.session_id] = { running: true };
           return next;
         });
-        sessionRunRef.current[data.session_id] = sessionRunRef.current[streamSid];
-        delete sessionRunRef.current[streamSid];
-        currentStreamSessionRef.current = data.session_id;
+        sessionRunRef.current[data.session_id] = sessionRunRef.current[sessionKey];
+        delete sessionRunRef.current[sessionKey];
         newSessionIdRef.current = data.session_id;
       }
-      setMessages((currentMessages) => {
-        const next = [...currentMessages];
-        const last = next[next.length - 1];
-        if (last?.role === 'assistant') {
-          const finalContent = data.content || last._intermediateContent || last.content || '';
-          next[next.length - 1] = {
-            ...last,
-            id: data.message_id,
-            run_id: data.run_id,
-            pending: false,
-            reasoningPending: false,
-            reasoningFinishedAt: last.reasoningStartedAt && !last.reasoningFinishedAt ? Date.now() : last.reasoningFinishedAt,
-            reasoningDurationMs: data.reasoning_duration_ms ?? last.reasoningDurationMs,
-            content: finalContent,
-            meta: { ...(last.meta || {}), is_intermediate: false },
-            _intermediateContent: undefined,
-          };
+      // Only update UI if this session is currently visible
+      if (visible) {
+        // Set activeSessionId: new session gets the ID, existing keeps it
+        if (!realSessionId && data.session_id) {
+          setActiveSessionId(data.session_id);
         }
-        return next;
-      });
+        setMessages((currentMessages) => {
+          const next = [...currentMessages];
+          const last = next[next.length - 1];
+          if (last?.role === 'assistant') {
+            const finalContent = data.content || last._intermediateContent || last.content || '';
+            next[next.length - 1] = {
+              ...last,
+              id: data.message_id,
+              run_id: data.run_id,
+              pending: false,
+              reasoningPending: false,
+              reasoningFinishedAt: last.reasoningStartedAt && !last.reasoningFinishedAt ? Date.now() : last.reasoningFinishedAt,
+              reasoningDurationMs: data.reasoning_duration_ms ?? last.reasoningDurationMs,
+              content: finalContent,
+              meta: { ...(last.meta || {}), is_intermediate: false },
+              _intermediateContent: undefined,
+            };
+          }
+          return next;
+        });
+      }
     }
     if (event === 'error') {
-      const detail = errorMessage(data.detail || data.message || '智能体运行失败');
-      setError(detail);
-      setMessages((items) => {
-        const next = [...items];
-        const last = next[next.length - 1];
-        if (last?.role === 'assistant') {
-          next[next.length - 1] = {
-            ...last,
-            pending: false,
-            reasoningPending: false,
-            reasoningFinishedAt: last.reasoningStartedAt && !last.reasoningFinishedAt ? Date.now() : last.reasoningFinishedAt,
-            error: true,
-            content: detail,
-          };
-        }
-        return next;
-      });
+      if (visible) {
+        const detail = errorMessage(data.detail || data.message || '智能体运行失败');
+        setError(detail);
+        setMessages((items) => {
+          const next = [...items];
+          const last = next[next.length - 1];
+          if (last?.role === 'assistant') {
+            next[next.length - 1] = {
+              ...last,
+              pending: false,
+              reasoningPending: false,
+              reasoningFinishedAt: last.reasoningStartedAt && !last.reasoningFinishedAt ? Date.now() : last.reasoningFinishedAt,
+              error: true,
+              content: detail,
+            };
+          }
+          return next;
+        });
+      }
     }
   }
 
