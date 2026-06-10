@@ -118,6 +118,9 @@ function formatThinkingDuration(startedAt, finishedAt, now, durationMs) {
 function MessageReasoning({ content, timeline = [], toolCalls = [], pending, startedAt, finishedAt, durationMs }) {
   const [open, setOpen] = useState(true);
   const [now, setNow] = useState(() => Date.now());
+  // 记录用户手动展开的工具调用 ID
+  // 使用 Set 确保流式更新不会重置用户的展开/折叠选择
+  const [expandedToolIds, setExpandedToolIds] = useState(new Set());
 
   useEffect(() => {
     if (pending) setOpen(true);
@@ -129,6 +132,22 @@ function MessageReasoning({ content, timeline = [], toolCalls = [], pending, sta
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(timer);
   }, [pending, startedAt]);
+
+  function handleToolToggle(toolCallId, isOpen) {
+    setExpandedToolIds((prev) => {
+      const next = new Set(prev);
+      if (isOpen) {
+        next.add(toolCallId);
+      } else {
+        next.delete(toolCallId);
+      }
+      return next;
+    });
+  }
+
+  function isToolExpanded(toolCallId) {
+    return toolCallId ? expandedToolIds.has(toolCallId) : false;
+  }
 
   const duration = formatThinkingDuration(startedAt, finishedAt, now, pending ? null : durationMs);
   const statusText = pending ? '思考中' : '已思考';
@@ -148,7 +167,12 @@ function MessageReasoning({ content, timeline = [], toolCalls = [], pending, sta
       <div className="message-reasoning-content">
         <ol className="reasoning-timeline">
           {timelineItems.map((item, index) => (
-            <ReasoningTimelineItem item={item} key={item.id || `${item.type}-${index}`} />
+            <ReasoningTimelineItem
+              item={item}
+              key={item.id || `${item.type}-${index}`}
+              expanded={isToolExpanded(item.toolCallId)}
+              onToggle={(isOpen) => handleToolToggle(item.toolCallId, isOpen)}
+            />
           ))}
         </ol>
       </div>
@@ -156,7 +180,7 @@ function MessageReasoning({ content, timeline = [], toolCalls = [], pending, sta
   );
 }
 
-function ReasoningTimelineItem({ item }) {
+function ReasoningTimelineItem({ item, expanded = false, onToggle }) {
   if (item.type === 'tool' || item.type === 'search') {
     const rawInput = item.rawInput || item.inputRaw || '';
     const rawResult = item.rawResult || item.resultRaw || '';
@@ -179,7 +203,11 @@ function ReasoningTimelineItem({ item }) {
         <span className="reasoning-timeline-node" aria-hidden="true">{icon}</span>
         <div className="reasoning-timeline-main">
           {hasDetail ? (
-            <details className="reasoning-tool-detail" open={item.status === 'running'}>
+            <details
+              className="reasoning-tool-detail"
+              open={expanded}
+              onToggle={(e) => onToggle?.(e.currentTarget.open)}
+            >
               <summary className="reasoning-tool-summary-row">
                 <span className="reasoning-tool-summary-left">
                   <strong>{item.title || '调用工具'}</strong>
