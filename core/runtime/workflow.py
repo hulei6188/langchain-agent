@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 import json
 import logging
@@ -631,10 +632,10 @@ class WorkflowRunner:
                         tool_calls=calls_this_round,
                         meta={"node_id": node["id"], "round": _round, "kind": "tool_calls"},
                     )
-                    # Limit tool_calls per round to remaining budget
+                    # 并发执行同一轮的所有工具调用
+                    _session_key = str(context.get("session_id") or "")
+                    jobs = []
                     for tc in calls_this_round:
-                        if time.monotonic() - tool_loop_start > max_tool_wall_time:
-                            break
                         func = tc["function"]
                         tool_name = func["name"]
                         try:
@@ -642,11 +643,38 @@ class WorkflowRunner:
                         except json.JSONDecodeError:
                             tool_args = {"input": func.get("arguments") or ""}
                         matching = next((t for t in bound_tools if t.name == tool_name), None)
-                        started = time.monotonic()
-                        if matching:
+                        jobs.append({
+                            "tc": tc, "tool_name": tool_name, "tool_args": tool_args,
+                            "matching": matching, "_session_key": _session_key,
+                        })
+
+                    # 使用线程池并发执行所有工具调用
+                    with ThreadPoolExecutor(max_workers=min(len(jobs), 8)) as executor:
+                        future_to_job = {executor.submit(self._execute_single_tool_safe, job): job for job in jobs}
+                        job_results = {}
+                        for future in as_completed(future_to_job):
+                            job = future_to_job[future]
                             try:
-                                result = execute_tool(matching, {"input": tool_args, "_session_key": str(context.get("session_id") or "")})
-                                result["latency_ms"] = result.get("latency_ms", int((time.monotonic() - started) * 1000))
+                                job_results[id(job)] = future.result()
+                            except Exception:
+                                job_results[id(job)] = {"error": "thread_error", "content": "Error: tool execution failed", "result_preview": "", "latency_ms": 0}
+
+                    # 按原始顺序处理结果，确保副作用线程安全
+                    for job in jobs:
+                        tc = job["tc"]
+                        tool_name = job["tool_name"]
+                        tool_args = job["tool_args"]
+                        matching = job["matching"]
+                        result = job_results.get(id(job), {})
+
+                        if matching:
+                            if result.get("error"):
+                                event_data = tool_call_event(matching, result, status="error", input_preview=json.dumps(tool_args, ensure_ascii=False), error_code="tool_error")
+                                tool_content = result.get("content") or f"Error: {result['error']}"
+                                events.append({"event": "tool_call", "data": event_data})
+                                messages.append({"role": "tool", "tool_call_id": tc["id"], "content": tool_content})
+                                self._persist_intermediate_message(context, role="tool", content=tool_content, tool_call_id=tc["id"], tool_name=tool_name, meta={**event_data, "node_id": node["id"], "round": _round, "kind": "tool_result"})
+                            else:
                                 tool_content = result.get("content") or result.get("result_preview") or ""
                                 event_data = tool_call_event(matching, result, input_preview=json.dumps(tool_args, ensure_ascii=False))
                                 events.append({"event": "tool_call", "data": event_data})
@@ -654,42 +682,15 @@ class WorkflowRunner:
                                     web_sources, search_status = self._merge_web_search_tool_result(web_sources, search_status, result)
                                     events.append({"event": "search_status", "data": self._search_status_event(search_status)})
                                 messages.append({"role": "tool", "tool_call_id": tc["id"], "content": tool_content})
-                                self._persist_intermediate_message(
-                                    context,
-                                    role="tool",
-                                    content=tool_content,
-                                    tool_call_id=tc["id"],
-                                    tool_name=tool_name,
-                                    meta={**event_data, "node_id": node["id"], "round": _round, "kind": "tool_result"},
-                                )
-                            except ValueError as exc:
-                                error_result = {"tool": tool_name, "content": "", "result_preview": "", "latency_ms": int((time.monotonic() - started) * 1000), "error": str(exc)}
-                                event_data = tool_call_event(matching, error_result, status="error", input_preview=json.dumps(tool_args, ensure_ascii=False), error_code="tool_error")
-                                tool_content = f"Error: {exc}"
-                                events.append({"event": "tool_call", "data": event_data})
-                                messages.append({"role": "tool", "tool_call_id": tc["id"], "content": tool_content})
-                                self._persist_intermediate_message(
-                                    context,
-                                    role="tool",
-                                    content=tool_content,
-                                    tool_call_id=tc["id"],
-                                    tool_name=tool_name,
-                                    meta={**event_data, "node_id": node["id"], "round": _round, "kind": "tool_result"},
-                                )
+                                self._persist_intermediate_message(context, role="tool", content=tool_content, tool_call_id=tc["id"], tool_name=tool_name, meta={**event_data, "node_id": node["id"], "round": _round, "kind": "tool_result"})
                         else:
                             unknown_tool = type("_", (), {"id": None, "name": tool_name, "type": "unknown"})()
                             event_data = tool_call_event(unknown_tool, {"tool": tool_name, "content": "", "result_preview": "", "latency_ms": 0}, status="error", input_preview="{}", error_code="tool_not_found")
                             tool_content = f"Tool '{tool_name}' not found"
                             events.append({"event": "tool_call", "data": event_data})
                             messages.append({"role": "tool", "tool_call_id": tc["id"], "content": tool_content})
-                            self._persist_intermediate_message(
-                                context,
-                                role="tool",
-                                content=tool_content,
-                                tool_call_id=tc["id"],
-                                tool_name=tool_name,
-                                meta={**event_data, "node_id": node["id"], "round": _round, "kind": "tool_result"},
-                            )
+                            self._persist_intermediate_message(context, role="tool", content=tool_content, tool_call_id=tc["id"], tool_name=tool_name, meta={**event_data, "node_id": node["id"], "round": _round, "kind": "tool_result"})
+
                         total_calls += 1
                         tools_used.append(tool_name)
 
@@ -798,19 +799,92 @@ class WorkflowRunner:
                     tool_calls=calls_this_round,
                     meta={"node_id": node["id"], "round": _round, "kind": "tool_calls"},
                 )
+                # 并发执行同一轮的所有工具调用（流式模式）
+                _session_key = str(context.get("session_id") or "")
+                stream_jobs = []
                 for tc in calls_this_round:
-                    if time.monotonic() - tool_loop_start > max_tool_wall_time:
-                        break
-                    web_sources, search_status, tool_name = yield from self._execute_stream_tool_call(
-                        tc,
-                        bound_tools,
-                        messages,
-                        web_sources,
-                        search_status,
-                        context,
-                        node,
-                        _round,
+                    func = tc["function"]
+                    tool_name = func["name"]
+                    try:
+                        tool_args = json.loads(func.get("arguments") or "{}")
+                    except json.JSONDecodeError:
+                        tool_args = {"input": func.get("arguments") or ""}
+                    matching = next((t for t in bound_tools if t.name == tool_name), None)
+                    stream_jobs.append({
+                        "tc": tc, "tool_name": tool_name, "tool_args": tool_args,
+                        "matching": matching, "_session_key": _session_key,
+                    })
+
+                # 先发送所有 tool_call_start 事件
+                for job in stream_jobs:
+                    tc = job["tc"]
+                    matching = job["matching"]
+                    tool_name = job["tool_name"]
+                    tool_args = job["tool_args"]
+                    start_data = self._tool_call_start_event(
+                        matching, tool_name=tool_name,
+                        tool_call_id=tc.get("id") or "",
+                        input_preview=json.dumps(tool_args, ensure_ascii=False),
                     )
+                    yield {"event": "tool_call_start", "data": start_data}
+
+                # 使用线程池并发执行所有工具调用
+                with ThreadPoolExecutor(max_workers=min(len(stream_jobs), 8)) as executor:
+                    future_to_job = {executor.submit(self._execute_single_tool_safe, job): job for job in stream_jobs}
+                    stream_results = {}
+                    for future in as_completed(future_to_job):
+                        job = future_to_job[future]
+                        try:
+                            stream_results[id(job)] = future.result()
+                        except Exception:
+                            stream_results[id(job)] = {"error": "thread_error", "content": "Error: tool execution failed", "result_preview": "", "latency_ms": 0}
+
+                # 按原始顺序处理结果
+                for job in stream_jobs:
+                    tc = job["tc"]
+                    tool_name = job["tool_name"]
+                    tool_args = job["tool_args"]
+                    matching = job["matching"]
+                    result = stream_results.get(id(job), {})
+
+                    if matching:
+                        if result.get("error"):
+                            event_data = {
+                                **tool_call_event(matching, result, status="error", input_preview=json.dumps(tool_args, ensure_ascii=False), error_code="tool_error"),
+                                "type": "tool_call_result",
+                                "tool_call_id": tc.get("id") or "",
+                            }
+                            tool_content = result.get("content") or f"Error: {result['error']}"
+                            yield {"event": "tool_call_result", "data": event_data}
+                            messages.append({"role": "tool", "tool_call_id": tc["id"], "content": tool_content})
+                            self._persist_intermediate_message(context, role="tool", content=tool_content, tool_call_id=tc["id"], tool_name=tool_name, meta={**event_data, "node_id": node["id"], "round": _round, "kind": "tool_result"})
+                        else:
+                            tool_content = result.get("content") or result.get("result_preview") or ""
+                            event_data = {
+                                **tool_call_event(matching, result, input_preview=json.dumps(tool_args, ensure_ascii=False)),
+                                "type": "tool_call_result",
+                                "tool_call_id": tc.get("id") or "",
+                            }
+                            yield {"event": "tool_call_result", "data": event_data}
+                            if matching.type == "builtin_search":
+                                web_sources, search_status = self._merge_web_search_tool_result(web_sources, search_status, result)
+                                search_event = self._search_status_event(search_status)
+                                search_event["tool_call_id"] = tc.get("id") or ""
+                                yield {"event": "search_status", "data": search_event}
+                            messages.append({"role": "tool", "tool_call_id": tc["id"], "content": tool_content})
+                            self._persist_intermediate_message(context, role="tool", content=tool_content, tool_call_id=tc["id"], tool_name=tool_name, meta={**event_data, "node_id": node["id"], "round": _round, "kind": "tool_result"})
+                    else:
+                        unknown_tool = type("_", (), {"id": None, "name": tool_name, "type": "unknown"})()
+                        event_data = {
+                            **tool_call_event(unknown_tool, {"tool": tool_name, "content": "", "result_preview": "", "latency_ms": 0}, status="error", input_preview="{}", error_code="tool_not_found"),
+                            "type": "tool_call_result",
+                            "tool_call_id": tc.get("id") or "",
+                        }
+                        tool_content = f"Tool '{tool_name}' not found"
+                        yield {"event": "tool_call_result", "data": event_data}
+                        messages.append({"role": "tool", "tool_call_id": tc["id"], "content": tool_content})
+                        self._persist_intermediate_message(context, role="tool", content=tool_content, tool_call_id=tc["id"], tool_name=tool_name, meta={**event_data, "node_id": node["id"], "round": _round, "kind": "tool_result"})
+
                     total_calls += 1
                     tools_used.append(tool_name)
             else:
@@ -1071,6 +1145,27 @@ class WorkflowRunner:
             "latency_ms": 0,
             "error_code": "",
         }
+
+    @staticmethod
+    def _execute_single_tool_safe(job: dict) -> dict:
+        """在子线程中安全执行单个工具调用，捕获异常并返回错误结果。"""
+        matching = job.get("matching")
+        tool_name = job["tool_name"]
+        tool_args = job["tool_args"]
+        session_key = job.get("_session_key", "")
+
+        if not matching:
+            return {"tool_name": tool_name, "error": "tool_not_found", "content": f"Tool '{tool_name}' not found", "result_preview": "", "latency_ms": 0}
+
+        started = time.monotonic()
+        try:
+            result = execute_tool(matching, {"input": tool_args, "_session_key": session_key})
+            result["latency_ms"] = result.get("latency_ms", int((time.monotonic() - started) * 1000))
+            return result
+        except ValueError as exc:
+            return {"tool_name": tool_name, "error": str(exc), "content": f"Error: {exc}", "result_preview": "", "latency_ms": int((time.monotonic() - started) * 1000)}
+        except Exception as exc:
+            return {"tool_name": tool_name, "error": str(exc), "content": f"Error: {exc}", "result_preview": "", "latency_ms": int((time.monotonic() - started) * 1000)}
 
     def _stream_llm_node(self, agent, node: dict, context: dict):
         draft = strip_or_block_leaked_tool_markup(context.get("draft", ""))
