@@ -160,32 +160,67 @@ function ReasoningTimelineItem({ item }) {
   if (item.type === 'tool' || item.type === 'search') {
     const rawInput = item.rawInput || item.inputRaw || '';
     const rawResult = item.rawResult || item.resultRaw || '';
-    const icon = item.type === 'search'
-      ? <Search size={15} />
+    const isSearch = item.type === 'search';
+    const icon = isSearch
+      ? <Search size={14} />
       : item.status === 'error'
-        ? <AlertCircle size={15} />
+        ? <AlertCircle size={14} />
         : item.status === 'running'
-          ? <Loader2 size={15} />
-          : <Wrench size={15} />;
+          ? <Loader2 size={14} />
+          : <Wrench size={14} />;
+    const statusIcon = item.status === 'success'
+      ? <CheckCircle2 size={12} />
+      : item.status === 'error'
+        ? <AlertCircle size={12} />
+        : null;
+    const hasDetail = item.inputPreview || item.summary || rawInput || rawResult;
     return (
       <li className={`reasoning-timeline-item is-${item.type} status-${item.status || 'success'}`}>
         <span className="reasoning-timeline-node" aria-hidden="true">{icon}</span>
         <div className="reasoning-timeline-main">
-          <div className="reasoning-tool-title">
-            <strong>{item.title || '调用工具'}</strong>
-            {item.status === 'success' && <CheckCircle2 size={13} />}
-          </div>
-          <div className="reasoning-tool-meta">
-            {item.meta && <span>{item.meta}</span>}
-            {item.latency && <span>{item.latency}</span>}
-          </div>
-          {item.inputPreview && <p className="reasoning-tool-input"><span>{item.inputLabel || '参数'}：</span>{item.inputPreview}</p>}
-          {item.summary && <p className="reasoning-tool-summary"><span>结果摘要：</span>{item.summary}</p>}
-          {(rawInput || rawResult) && (
-            <div className="reasoning-tool-raw-list">
-              <ToolRawDetails label="查看原始参数" value={rawInput} />
-              <ToolRawDetails label="查看原始结果" value={rawResult} />
-            </div>
+          {hasDetail ? (
+            <details className="reasoning-tool-detail" open={item.status === 'running'}>
+              <summary className="reasoning-tool-summary-row">
+                <span className="reasoning-tool-summary-left">
+                  <strong>{item.title || '调用工具'}</strong>
+                  {statusIcon}
+                </span>
+                <span className="reasoning-tool-summary-right">
+                  {item.latency && <span className="reasoning-tool-latency">{item.latency}</span>}
+                </span>
+              </summary>
+              <div className="reasoning-tool-body">
+                {item.inputPreview && (
+                  <div className="reasoning-tool-input">
+                    <span>{item.inputLabel || '参数'}：</span>
+                    <code>{item.inputPreview}</code>
+                  </div>
+                )}
+                {item.summary && (
+                  <div className="reasoning-tool-summary">
+                    <span>结果：</span>
+                    <span className="reasoning-tool-summary-text">{item.summary}</span>
+                  </div>
+                )}
+                {(rawInput || rawResult) && (
+                  <div className="reasoning-tool-raw-list">
+                    <ToolRawDetails label="原始参数" value={rawInput} />
+                    <ToolRawDetails label="原始结果" value={rawResult} />
+                  </div>
+                )}
+              </div>
+            </details>
+          ) : (
+            <>
+              <div className="reasoning-tool-title">
+                <strong>{item.title || '调用工具'}</strong>
+                {item.status === 'success' && <CheckCircle2 size={13} />}
+              </div>
+              <div className="reasoning-tool-meta">
+                {item.meta && <span>{item.meta}</span>}
+                {item.latency && <span>{item.latency}</span>}
+              </div>
+            </>
           )}
         </div>
       </li>
