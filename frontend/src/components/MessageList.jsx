@@ -118,6 +118,9 @@ function formatThinkingDuration(startedAt, finishedAt, now, durationMs) {
 function MessageReasoning({ content, timeline = [], toolCalls = [], pending, startedAt, finishedAt, durationMs }) {
   const [open, setOpen] = useState(true);
   const [now, setNow] = useState(() => Date.now());
+  // 记录用户手动展开的工具调用 ID
+  // 使用 Set 确保流式更新不会重置用户的展开/折叠选择
+  const [expandedToolIds, setExpandedToolIds] = useState(new Set());
 
   useEffect(() => {
     if (pending) setOpen(true);
@@ -129,6 +132,22 @@ function MessageReasoning({ content, timeline = [], toolCalls = [], pending, sta
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(timer);
   }, [pending, startedAt]);
+
+  function handleToolToggle(toolCallId, isOpen) {
+    setExpandedToolIds((prev) => {
+      const next = new Set(prev);
+      if (isOpen) {
+        next.add(toolCallId);
+      } else {
+        next.delete(toolCallId);
+      }
+      return next;
+    });
+  }
+
+  function isToolExpanded(toolCallId) {
+    return toolCallId ? expandedToolIds.has(toolCallId) : false;
+  }
 
   const duration = formatThinkingDuration(startedAt, finishedAt, now, pending ? null : durationMs);
   const statusText = pending ? '思考中' : '已思考';
@@ -148,7 +167,12 @@ function MessageReasoning({ content, timeline = [], toolCalls = [], pending, sta
       <div className="message-reasoning-content">
         <ol className="reasoning-timeline">
           {timelineItems.map((item, index) => (
-            <ReasoningTimelineItem item={item} key={item.id || `${item.type}-${index}`} />
+            <ReasoningTimelineItem
+              item={item}
+              key={item.id || `${item.type}-${index}`}
+              expanded={isToolExpanded(item.toolCallId)}
+              onToggle={(isOpen) => handleToolToggle(item.toolCallId, isOpen)}
+            />
           ))}
         </ol>
       </div>
@@ -156,36 +180,75 @@ function MessageReasoning({ content, timeline = [], toolCalls = [], pending, sta
   );
 }
 
-function ReasoningTimelineItem({ item }) {
+function ReasoningTimelineItem({ item, expanded = false, onToggle }) {
   if (item.type === 'tool' || item.type === 'search') {
     const rawInput = item.rawInput || item.inputRaw || '';
     const rawResult = item.rawResult || item.resultRaw || '';
-    const icon = item.type === 'search'
-      ? <Search size={15} />
+    const isSearch = item.type === 'search';
+    const icon = isSearch
+      ? <Search size={14} />
       : item.status === 'error'
-        ? <AlertCircle size={15} />
+        ? <AlertCircle size={14} />
         : item.status === 'running'
-          ? <Loader2 size={15} />
-          : <Wrench size={15} />;
+          ? <Loader2 size={14} />
+          : <Wrench size={14} />;
+    const statusIcon = item.status === 'success'
+      ? <CheckCircle2 size={12} />
+      : item.status === 'error'
+        ? <AlertCircle size={12} />
+        : null;
+    const hasDetail = item.inputPreview || item.summary || rawInput || rawResult;
     return (
       <li className={`reasoning-timeline-item is-${item.type} status-${item.status || 'success'}`}>
         <span className="reasoning-timeline-node" aria-hidden="true">{icon}</span>
         <div className="reasoning-timeline-main">
-          <div className="reasoning-tool-title">
-            <strong>{item.title || '调用工具'}</strong>
-            {item.status === 'success' && <CheckCircle2 size={13} />}
-          </div>
-          <div className="reasoning-tool-meta">
-            {item.meta && <span>{item.meta}</span>}
-            {item.latency && <span>{item.latency}</span>}
-          </div>
-          {item.inputPreview && <p className="reasoning-tool-input"><span>{item.inputLabel || '参数'}：</span>{item.inputPreview}</p>}
-          {item.summary && <p className="reasoning-tool-summary"><span>结果摘要：</span>{item.summary}</p>}
-          {(rawInput || rawResult) && (
-            <div className="reasoning-tool-raw-list">
-              <ToolRawDetails label="查看原始参数" value={rawInput} />
-              <ToolRawDetails label="查看原始结果" value={rawResult} />
-            </div>
+          {hasDetail ? (
+            <details
+              className="reasoning-tool-detail"
+              open={expanded}
+              onToggle={(e) => onToggle?.(e.currentTarget.open)}
+            >
+              <summary className="reasoning-tool-summary-row">
+                <span className="reasoning-tool-summary-left">
+                  <strong>{item.title || '调用工具'}</strong>
+                  {statusIcon}
+                </span>
+                <span className="reasoning-tool-summary-right">
+                  {item.latency && <span className="reasoning-tool-latency">{item.latency}</span>}
+                </span>
+              </summary>
+              <div className="reasoning-tool-body">
+                {item.inputPreview && (
+                  <div className="reasoning-tool-input">
+                    <span>{item.inputLabel || '参数'}：</span>
+                    <code>{item.inputPreview}</code>
+                  </div>
+                )}
+                {item.summary && (
+                  <div className="reasoning-tool-summary">
+                    <span>结果：</span>
+                    <span className="reasoning-tool-summary-text">{item.summary}</span>
+                  </div>
+                )}
+                {(rawInput || rawResult) && (
+                  <div className="reasoning-tool-raw-list">
+                    <ToolRawDetails label="原始参数" value={rawInput} />
+                    <ToolRawDetails label="原始结果" value={rawResult} />
+                  </div>
+                )}
+              </div>
+            </details>
+          ) : (
+            <>
+              <div className="reasoning-tool-title">
+                <strong>{item.title || '调用工具'}</strong>
+                {item.status === 'success' && <CheckCircle2 size={13} />}
+              </div>
+              <div className="reasoning-tool-meta">
+                {item.meta && <span>{item.meta}</span>}
+                {item.latency && <span>{item.latency}</span>}
+              </div>
+            </>
           )}
         </div>
       </li>

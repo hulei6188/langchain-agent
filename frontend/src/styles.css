@@ -4133,6 +4133,60 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
   margin-right: 7px;
   color: #98a2b3;
 }
+.reasoning-tool-detail {
+  min-width: 0;
+}
+.reasoning-tool-detail[open] .reasoning-tool-summary-row {
+  margin-bottom: 6px;
+}
+.reasoning-tool-summary-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
+}
+.reasoning-tool-summary-row::-webkit-details-marker {
+  display: none;
+}
+.reasoning-tool-summary-left {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.reasoning-tool-summary-left strong {
+  color: #344054;
+  font-size: 13.5px;
+  font-weight: 750;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.reasoning-tool-summary-left svg {
+  flex: 0 0 auto;
+  color: #16a34a;
+}
+.reasoning-tool-summary-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+.reasoning-tool-latency {
+  color: #667085;
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+.reasoning-tool-body {
+  display: grid;
+  gap: 5px;
+  padding-left: 2px;
+}
 .reasoning-timeline-main p {
   margin: 3px 0 0;
   color: #667085;
@@ -4144,16 +4198,35 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
   align-items: baseline;
 }
 .reasoning-tool-input span,
-.reasoning-tool-summary span {
+.reasoning-tool-summary > span:first-child {
   flex: 0 0 auto;
   color: #475467;
   font-weight: 650;
+  font-size: 11.5px;
+}
+.reasoning-tool-input code {
+  display: block;
+  max-height: 80px;
+  overflow: auto;
+  padding: 6px 8px;
+  border-radius: 5px;
+  background: #f1f2f4;
+  color: #344054;
+  font-size: 11.5px;
+  font-family: inherit;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.reasoning-tool-summary-text {
+  color: #667085;
+  font-size: 12px;
+  word-break: break-word;
 }
 .reasoning-tool-raw-list {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
-  margin-top: 6px;
+  margin-top: 4px;
 }
 .reasoning-tool-raw {
   min-width: min(100%, 220px);
@@ -4164,7 +4237,7 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
   align-items: center;
   width: fit-content;
   color: #667085;
-  font-size: 12px;
+  font-size: 11.5px;
   cursor: pointer;
   user-select: none;
 }
@@ -5417,9 +5490,22 @@ body.dark .reasoning-tool-meta,
 body.dark .reasoning-timeline-main p {
   color: #8f98aa;
 }
+body.dark .reasoning-tool-summary-left strong {
+  color: #d8dbe6;
+}
+body.dark .reasoning-tool-latency {
+  color: #8f98aa;
+}
 body.dark .reasoning-tool-input span,
-body.dark .reasoning-tool-summary span {
+body.dark .reasoning-tool-summary > span:first-child {
   color: #c2c9d8;
+}
+body.dark .reasoning-tool-input code {
+  background: #1c2030;
+  color: #d8dbe6;
+}
+body.dark .reasoning-tool-summary-text {
+  color: #8f98aa;
 }
 body.dark .reasoning-tool-raw summary {
   color: #8f98aa;
