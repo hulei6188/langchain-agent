@@ -96,8 +96,8 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
   min-height: 0;
   display: grid;
   grid-template-rows: auto auto auto 1fr auto;
-  gap: 14px;
-  padding: 14px;
+  gap: 8px;
+  padding: 10px 10px 10px 12px;
   border-right: 1px solid #eceef4;
   background: #f8f9fb;
   overflow: hidden;
@@ -115,8 +115,8 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
 .sidebar-brand {
   display: flex;
   align-items: center;
-  gap: 10px;
-  height: 36px;
+  gap: 8px;
+  height: 30px;
 }
 
 .sidebar-brand strong {
@@ -174,12 +174,13 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
   width: 100%;
   display: flex;
   align-items: center;
-  gap: 10px;
-  border-radius: 10px;
-  padding: 10px 11px;
+  gap: 8px;
+  border-radius: 8px;
+  padding: 7px 10px;
   background: transparent;
   color: #344054;
   text-align: left;
+  font-size: 14px;
 }
 
 .new-chat {
@@ -188,41 +189,88 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
   font-weight: 700;
 }
 
-.main-nav { display: grid; gap: 4px; }
+.main-nav { display: grid; gap: 2px; }
 .main-nav button.active,
 .main-nav button:hover,
 .session-row.active,
 .session-row:hover { background: #eef0f4; color: #111827; }
+
+.more-menu-container { position: relative; }
+.more-menu-trigger {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-radius: 8px;
+  padding: 7px 10px;
+  background: transparent;
+  color: #344054;
+  font-size: 14px;
+  text-align: left;
+}
+.more-menu-trigger:hover,
+.more-menu-trigger.active { background: #eef0f4; color: #111827; }
+.more-menu-backdrop { position: fixed; inset: 0; z-index: 25; }
+.more-menu-dropdown {
+  position: absolute;
+  left: 0;
+  top: 100%;
+  margin-top: 4px;
+  min-width: 130px;
+  display: grid;
+  gap: 2px;
+  padding: 6px;
+  border: 1px solid #dfe3ea;
+  border-radius: 10px;
+  background: #fff;
+  box-shadow: 0 14px 30px rgba(15, 23, 42, .16);
+  z-index: 30;
+}
+.more-menu-dropdown button {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: transparent;
+  color: #344054;
+  font-size: 14px;
+  text-align: left;
+}
+.more-menu-dropdown button:hover,
+.more-menu-dropdown button.active { background: #eef0f4; color: #111827; }
 
 .sidebar-section { min-height: 0; overflow: hidden; display: grid; grid-template-rows: auto 1fr; }
 .sidebar-heading {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 6px 4px;
+  padding: 4px 4px;
   color: #667085;
   font-size: 12px;
   font-weight: 700;
 }
-.sidebar-heading button { width: 26px; height: 26px; border-radius: 8px; background: transparent; color: #667085; }
-.session-list { min-height: 0; overflow: auto; display: grid; align-content: start; gap: 4px; }
+.sidebar-heading button { width: 24px; height: 24px; border-radius: 6px; background: transparent; color: #667085; }
+.session-list { min-height: 0; overflow: auto; display: grid; align-content: start; gap: 2px; }
 .session-row {
   position: relative;
   min-width: 0;
-  min-height: 40px;
+  min-height: 34px;
   display: grid;
   grid-template-columns: minmax(0, 1fr) 30px;
   align-items: center;
-  border-radius: 10px;
+  border-radius: 8px;
   color: #344054;
+  font-size: 14px;
 }
 .session-main {
   min-width: 0;
-  height: 40px;
+  height: 34px;
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 10px 6px 10px 11px;
+  gap: 7px;
+  padding: 6px 4px 6px 9px;
   background: transparent;
   color: inherit;
   text-align: left;
@@ -5021,6 +5069,7 @@ body.dark .auth-panel,
 body.dark .sidebar-user,
 body.dark .account-menu,
 body.dark .session-menu,
+body.dark .more-menu-dropdown,
 body.dark .mode-toggle,
 body.dark .quick-prompts button,
 body.dark .agent-card,
@@ -5056,6 +5105,10 @@ body.dark .coze-modal-row {
 body.dark .new-chat:hover,
 body.dark .main-nav button.active,
 body.dark .main-nav button:hover,
+body.dark .more-menu-trigger:hover,
+body.dark .more-menu-trigger.active,
+body.dark .more-menu-dropdown,
+body.dark .more-menu-dropdown button,
 body.dark .session-row.active,
 body.dark .session-row:hover,
 body.dark .theme-toggle-button:hover,
@@ -5064,6 +5117,8 @@ body.dark .sidebar-toggle:hover,
 body.dark .sidebar-reopen-button:hover,
 body.dark .account-menu-group button:hover,
 body.dark .session-menu button:hover,
+body.dark .more-menu-dropdown button:hover,
+body.dark .more-menu-dropdown button.active,
 body.dark .quick-prompts button:hover,
 body.dark .profile-dialog-close:hover,
 body.dark .ghost-icon:hover,
@@ -5215,6 +5270,8 @@ body.dark .resource-list::-webkit-scrollbar-thumb:hover {
 }
 
 body.dark .main-nav button,
+body.dark .more-menu-trigger,
+body.dark .more-menu-dropdown button,
 body.dark .brand-mark,
 body.dark .session-row,
 body.dark .session-main,
