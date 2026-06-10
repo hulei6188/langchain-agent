@@ -2026,6 +2026,7 @@ function App() {
 
 function HomeView(props) {
   const [sidebarHidden, setSidebarHidden] = useState(false);
+  const [moreMenuOpen, setMoreMenuOpen] = useState(false);
   const {
     activeAgent,
     activeAgentId,
@@ -2245,12 +2246,41 @@ function HomeView(props) {
           <NavButton icon={<Bot size={17} />} label="智能体" active={activeNav === 'agents'} onClick={() => setActiveNav('agents')} />
           <NavButton icon={<Boxes size={17} />} label="市场" active={activeNav === 'market'} onClick={() => setActiveNav('market')} />
           <NavButton icon={<ServerCog size={17} />} label="我的模型" active={activeNav === 'my-models'} onClick={() => setActiveNav('my-models')} />
-          <NavButton icon={<Layers size={17} />} label="资源库" active={activeNav === 'resources'} onClick={() => setActiveNav('resources')} />
           <NavButton icon={<Wand2 size={17} />} label="工具" active={activeNav === 'tools'} onClick={() => setActiveNav('tools')} />
           <NavButton icon={<Sparkles size={17} />} label="技能" active={activeNav === 'skills'} onClick={() => setActiveNav('skills')} />
-          {canManage && <NavButton icon={<Shield size={17} />} label="审核" active={activeNav === 'reviews'} onClick={() => setActiveNav('reviews')} />}
-          {canManage && <NavButton icon={<KeyRound size={17} />} label="成员" active={activeNav === 'members'} onClick={() => setActiveNav('members')} />}
-          <NavButton icon={<Database size={17} />} label="知识库" active={activeNav === 'knowledge'} onClick={() => setActiveNav('knowledge')} />
+          <div className="more-menu-container">
+            <button
+              type="button"
+              className={`more-menu-trigger ${['resources', 'knowledge', 'reviews', 'members'].includes(activeNav) ? 'active' : ''}`}
+              onClick={() => setMoreMenuOpen(!moreMenuOpen)}
+            >
+              <MoreHorizontal size={17} />
+              更多
+            </button>
+            {moreMenuOpen && (
+              <>
+                <div className="more-menu-backdrop" onClick={() => setMoreMenuOpen(false)} />
+                <div className="more-menu-dropdown">
+                  <button type="button" className={activeNav === 'resources' ? 'active' : ''} onClick={() => { setActiveNav('resources'); setMoreMenuOpen(false); }}>
+                    <Layers size={16} />资源库
+                  </button>
+                  <button type="button" className={activeNav === 'knowledge' ? 'active' : ''} onClick={() => { setActiveNav('knowledge'); setMoreMenuOpen(false); }}>
+                    <Database size={16} />知识库
+                  </button>
+                  {canManage && (
+                    <button type="button" className={activeNav === 'reviews' ? 'active' : ''} onClick={() => { setActiveNav('reviews'); setMoreMenuOpen(false); }}>
+                      <Shield size={16} />审核
+                    </button>
+                  )}
+                  {canManage && (
+                    <button type="button" className={activeNav === 'members' ? 'active' : ''} onClick={() => { setActiveNav('members'); setMoreMenuOpen(false); }}>
+                      <KeyRound size={16} />成员
+                    </button>
+                  )}
+                </div>
+              </>
+            )}
+          </div>
         </nav>
         <div className="sidebar-section">
           <div className="sidebar-heading">
