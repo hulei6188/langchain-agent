@@ -161,10 +161,12 @@ from core.services.user_models import (
     delete_user_model_config,
     get_owned_user_model,
     list_user_model_configs,
+    resolve_user_model_config,
     test_user_model_config,
     test_user_model_payload,
     update_user_model_config,
     user_model_payload,
+    user_model_runtime_config,
 )
 from core.services.web_search import search_web, web_search_status
 
@@ -1956,7 +1958,9 @@ def _execute_workflow_thread(db: Session, params: dict, q: queue.Queue) -> None:
         db.refresh(assistant)
         assistant_saved = True
         # Auto-generate session title BEFORE emitting done so frontend receives it immediately
-        _auto_title_session(db, chat_session, params["user_message"], answer)
+        # Resolve the agent's runtime config so the title uses the same model provider
+        title_runtime_config = _resolve_title_runtime_config(db, agent, params["user_id"])
+        _auto_title_session(db, chat_session, params["user_message"], answer, runtime_config=title_runtime_config)
         _emit("done", {
             "session_id": chat_session.id,
             "message_id": assistant.id,
@@ -2614,7 +2618,18 @@ def apply_model_selection(db: Session, payload: dict, *, user_id: int) -> dict:
     return payload
 
 
-def _auto_title_session(db: Session, chat_session: ChatSession, user_message: str, answer: str) -> None:
+def _resolve_title_runtime_config(db: Session, agent: Agent, user_id: int) -> dict | None:
+    """Resolve the runtime config for the agent's model to use for auto-titling."""
+    try:
+        user_model_config = resolve_user_model_config(db, user_id=user_id, config_id=agent.user_model_config_id)
+        if user_model_config:
+            return user_model_runtime_config(user_model_config)
+    except Exception:
+        logger.exception("Failed to resolve runtime config for auto-title, using defaults")
+    return None
+
+
+def _auto_title_session(db: Session, chat_session: ChatSession, user_message: str, answer: str, runtime_config: dict | None = None) -> None:
     """Auto-generate a session title using the LLM based on the first exchange."""
     if chat_session.title and chat_session.title != "新会话":
         return  # Already has a meaningful title
@@ -2632,6 +2647,7 @@ def _auto_title_session(db: Session, chat_session: ChatSession, user_message: st
         response = provider.chat(
             messages=[{"role": "user", "content": title_prompt}],
             temperature=0.3,
+            runtime_config=runtime_config,
         )
         title = (response.content or "").strip()
         # Clean up common LLM artifacts
