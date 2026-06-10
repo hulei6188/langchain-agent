@@ -599,7 +599,7 @@ function App() {
     }
     // If there's an active run, reconnect to its SSE stream
     const activeRun = data.active_run;
-    if (activeRun && activeRun.status === 'running' && !runningBySessionId[sessionId]?.running) {
+    if (activeRun && activeRun.status === 'running') {
       reconnectToRun(activeRun.id, sessionId, loaded).catch(() => {});
     }
   }
@@ -609,6 +609,7 @@ function App() {
     setError('');
     const controller = new AbortController();
     const prevState = sessionRunRef.current[sessionId] || {};
+    prevState.controller?.abort();
     const genId = (prevState.genId || 0) + 1;
     sessionRunRef.current[sessionId] = { runId, controller, genId };
     // Don't append a duplicate pending message if one already exists
@@ -1547,6 +1548,25 @@ function App() {
     return String(currentView) === String(realSessionId);
   }
 
+  function ensureAssistantTail(items, defaults = {}) {
+    const next = [...items];
+    const last = next[next.length - 1];
+    if (last?.role === 'assistant') {
+      return { next, last, index: next.length - 1 };
+    }
+    const assistant = {
+      role: 'assistant',
+      content: '',
+      pending: true,
+      reasoning: '',
+      reasoningTimeline: [],
+      reasoningPending: false,
+      ...defaults,
+    };
+    next.push(assistant);
+    return { next, last: assistant, index: next.length - 1 };
+  }
+
   function handleSse(raw, ctx) {
     const { sessionKey, genId, realSessionId, isNewSession } = ctx || {};
     // Abandon if a new generation started for this session
@@ -1592,89 +1612,21 @@ function App() {
           setActiveSessionId(data.session_id);
         }
         setMessages((currentMessages) => {
-          const next = [...currentMessages];
-          const last = next[next.length - 1];
-          if (last?.role === 'assistant') {
-            next[next.length - 1] = {
-              ...last,
-              id: data.message_id,
-              run_id: data.run_id,
-              pending: false,
-              reasoningPending: false,
-              reasoningFinishedAt: last.reasoningStartedAt && !last.reasoningFinishedAt ? Date.now() : last.reasoningFinishedAt,
-              content: data.content || last.content || '',
-              meta: { ...(last.meta || {}), cancelled: true },
-            };
-          }
+          const { next, last, index } = ensureAssistantTail(currentMessages);
+          next[index] = {
+            ...last,
+            id: data.message_id || last.id,
+            run_id: data.run_id || last.run_id,
+            pending: false,
+            reasoningPending: false,
+            reasoningFinishedAt: last.reasoningStartedAt && !last.reasoningFinishedAt ? Date.now() : last.reasoningFinishedAt,
+            content: data.content || last.content || '',
+            meta: { ...(last.meta || {}), cancelled: true },
+          };
           return next;
         });
       }
       return;
-    }
-    // All remaining events below only modify messages — skip if not visible
-    if (!visible) return;
-    if (event === 'token') {
-      setMessages((items) => {
-        const next = [...items];
-        const last = next[next.length - 1];
-        next[next.length - 1] = {
-          ...last,
-          pending: false,
-          reasoningPending: false,
-          reasoningFinishedAt: last?.reasoningPending && last?.reasoningStartedAt && !last?.reasoningFinishedAt ? Date.now() : last?.reasoningFinishedAt,
-          content: (last.content || '') + data.content,
-        };
-        return next;
-      });
-    }
-    if (event === 'reasoning_token') {
-      setMessages((items) => {
-        const next = [...items];
-        const last = next[next.length - 1];
-        if (last?.role === 'assistant') {
-          next[next.length - 1] = appendReasoningTimelineItem({
-            ...last,
-            reasoningPending: true,
-            reasoningStartedAt: last.reasoningStartedAt || Date.now(),
-            reasoning: (last.reasoning || '') + (data.content || ''),
-          }, data.content || '');
-        }
-        return next;
-      });
-    }
-    if (event === 'sources') {
-      const items = data.items || [];
-      setSources(items);
-      setMessages((currentMessages) => {
-        const next = [...currentMessages];
-        const last = next[next.length - 1];
-        if (last?.role === 'assistant') next[next.length - 1] = { ...last, sources: items };
-        return next;
-      });
-    }
-    if (['rag_status', 'tool_call', 'tool_call_start', 'tool_call_result', 'memory_used', 'thinking_status', 'search_status'].includes(event)) {
-      setToolDebugEvents((items) => [
-        ...items,
-        {
-          event,
-          received_at: new Date().toLocaleTimeString(),
-          ...data,
-        },
-      ].slice(-30));
-      if (['tool_call', 'tool_call_start', 'tool_call_result', 'search_status'].includes(event)) {
-        setMessages((items) => {
-          const next = [...items];
-          const last = next[next.length - 1];
-          if (last?.role === 'assistant') {
-            next[next.length - 1] = appendToolTimelineItem({
-              ...last,
-              reasoningPending: last.reasoningPending || (last.pending && !last.content),
-              reasoningStartedAt: last.reasoningStartedAt || Date.now(),
-            }, data, event);
-          }
-          return next;
-        });
-      }
     }
     if (event === 'done') {
       // Always clean up running state and transition temp keys
@@ -1709,23 +1661,84 @@ function App() {
           setActiveSessionId(data.session_id);
         }
         setMessages((currentMessages) => {
-          const next = [...currentMessages];
-          const last = next[next.length - 1];
-          if (last?.role === 'assistant') {
-            const finalContent = data.content || last._intermediateContent || last.content || '';
-            next[next.length - 1] = {
-              ...last,
-              id: data.message_id,
-              run_id: data.run_id,
-              pending: false,
-              reasoningPending: false,
-              reasoningFinishedAt: last.reasoningStartedAt && !last.reasoningFinishedAt ? Date.now() : last.reasoningFinishedAt,
-              reasoningDurationMs: data.reasoning_duration_ms ?? last.reasoningDurationMs,
-              content: finalContent,
-              meta: { ...(last.meta || {}), is_intermediate: false },
-              _intermediateContent: undefined,
-            };
-          }
+          const { next, last, index } = ensureAssistantTail(currentMessages);
+          const finalContent = data.content || last._intermediateContent || last.content || '';
+          next[index] = {
+            ...last,
+            id: data.message_id || last.id,
+            run_id: data.run_id || last.run_id,
+            pending: false,
+            reasoningPending: false,
+            reasoningFinishedAt: last.reasoningStartedAt && !last.reasoningFinishedAt ? Date.now() : last.reasoningFinishedAt,
+            reasoningDurationMs: data.reasoning_duration_ms ?? last.reasoningDurationMs,
+            content: finalContent,
+            meta: { ...(last.meta || {}), is_intermediate: false },
+            _intermediateContent: undefined,
+          };
+          return next;
+        });
+      }
+      return;
+    }
+    // All remaining events below only modify messages — skip if not visible
+    if (!visible) return;
+    if (event === 'token') {
+      setMessages((items) => {
+        const { next, last, index } = ensureAssistantTail(items);
+        next[index] = {
+          ...last,
+          pending: false,
+          reasoningPending: false,
+          reasoningFinishedAt: last?.reasoningPending && last?.reasoningStartedAt && !last?.reasoningFinishedAt ? Date.now() : last?.reasoningFinishedAt,
+          content: (last.content || '') + data.content,
+        };
+        return next;
+      });
+    }
+    if (event === 'reasoning_token') {
+      setMessages((items) => {
+        const { next, last, index } = ensureAssistantTail(items, {
+          reasoningPending: true,
+          reasoningStartedAt: Date.now(),
+        });
+        next[index] = appendReasoningTimelineItem({
+          ...last,
+          reasoningPending: true,
+          reasoningStartedAt: last.reasoningStartedAt || Date.now(),
+          reasoning: (last.reasoning || '') + (data.content || ''),
+        }, data.content || '');
+        return next;
+      });
+    }
+    if (event === 'sources') {
+      const items = data.items || [];
+      setSources(items);
+      setMessages((currentMessages) => {
+        const { next, last, index } = ensureAssistantTail(currentMessages);
+        next[index] = { ...last, sources: items };
+        return next;
+      });
+    }
+    if (['rag_status', 'tool_call', 'tool_call_start', 'tool_call_result', 'memory_used', 'thinking_status', 'search_status'].includes(event)) {
+      setToolDebugEvents((items) => [
+        ...items,
+        {
+          event,
+          received_at: new Date().toLocaleTimeString(),
+          ...data,
+        },
+      ].slice(-30));
+      if (['tool_call', 'tool_call_start', 'tool_call_result', 'search_status'].includes(event)) {
+        setMessages((items) => {
+          const { next, last, index } = ensureAssistantTail(items, {
+            reasoningPending: true,
+            reasoningStartedAt: Date.now(),
+          });
+          next[index] = appendToolTimelineItem({
+            ...last,
+            reasoningPending: last.reasoningPending || (last.pending && !last.content),
+            reasoningStartedAt: last.reasoningStartedAt || Date.now(),
+          }, data, event);
           return next;
         });
       }
@@ -1735,18 +1748,15 @@ function App() {
         const detail = errorMessage(data.detail || data.message || '智能体运行失败');
         setError(detail);
         setMessages((items) => {
-          const next = [...items];
-          const last = next[next.length - 1];
-          if (last?.role === 'assistant') {
-            next[next.length - 1] = {
-              ...last,
-              pending: false,
-              reasoningPending: false,
-              reasoningFinishedAt: last.reasoningStartedAt && !last.reasoningFinishedAt ? Date.now() : last.reasoningFinishedAt,
-              error: true,
-              content: detail,
-            };
-          }
+          const { next, last, index } = ensureAssistantTail(items);
+          next[index] = {
+            ...last,
+            pending: false,
+            reasoningPending: false,
+            reasoningFinishedAt: last.reasoningStartedAt && !last.reasoningFinishedAt ? Date.now() : last.reasoningFinishedAt,
+            error: true,
+            content: detail,
+          };
           return next;
         });
       }

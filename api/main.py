@@ -304,6 +304,13 @@ def sse_event(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
+def sse_event_name(sse_str: str) -> str:
+    for line in str(sse_str or "").splitlines():
+        if line.startswith("event:"):
+            return line.partition(":")[2].strip()
+    return ""
+
+
 def safe_stream_error(exc: Exception) -> dict:
     message = str(exc)
     if any(public_error in message for public_error in PUBLIC_CHAT_ERRORS):
@@ -2049,9 +2056,17 @@ def cancel_run_endpoint(run_id: int, membership: WorkspaceMember = Depends(get_c
     session = db.get(ChatSession, run.session_id)
     if session:
         require_session_access(session, membership)
-    if cancel_run(run_id):
-        return {"cancelled": True, "run_id": run_id}
-    return {"cancelled": False, "run_id": run_id, "message": "Run not active or already completed"}
+    signalled = cancel_run(run_id)
+    marked = False
+    if run.status == "running":
+        run.status = "cancelled"
+        run.completed_at = datetime.now(timezone.utc)
+        db.commit()
+        db.refresh(run)
+        marked = True
+    if signalled or marked or run.status == "cancelled":
+        return {"cancelled": True, "run_id": run_id, "status": run.status}
+    return {"cancelled": False, "run_id": run_id, "status": run.status, "message": "Run not active or already completed"}
 
 
 @app.get("/api/runs/{run_id}/events")
@@ -2070,11 +2085,13 @@ def stream_run_events(run_id: int, membership: WorkspaceMember = Depends(get_cur
 
     def _event_stream() -> Iterable[str]:
         emitted = 0
-        run_finished = False
+        terminal_seen = False
         # Phase 1: replay buffered events
         while True:
             events, total = _get_run_events_since(run_id, emitted)
             for sse_str in events:
+                if sse_event_name(sse_str) in {"done", "cancelled", "error"}:
+                    terminal_seen = True
                 yield sse_str
                 emitted += 1
             # Check if run is still active
@@ -2082,22 +2099,21 @@ def stream_run_events(run_id: int, membership: WorkspaceMember = Depends(get_cur
             try:
                 current = db_sess.get(Run, run_id)
                 if current is None or current.status != "running":
-                    run_finished = True
                     # Send terminal event if no done/cancelled/error was in the log
-                    final_status = current.status if current else "unknown"
-                    if final_status == "succeeded":
-                        yield sse_event("done", {"run_id": run_id, "status": "succeeded"})
-                    elif final_status == "cancelled":
-                        yield sse_event("cancelled", {"run_id": run_id, "status": "cancelled"})
-                    elif final_status == "failed":
-                        yield sse_event("error", {"message": "Run failed", "run_id": run_id})
-                    else:
-                        yield sse_event("done", {"run_id": run_id, "status": final_status})
+                    if not terminal_seen:
+                        final_status = current.status if current else "unknown"
+                        terminal_payload = {"run_id": run_id, "session_id": run.session_id, "status": final_status}
+                        if final_status == "succeeded":
+                            yield sse_event("done", terminal_payload)
+                        elif final_status == "cancelled":
+                            yield sse_event("cancelled", terminal_payload)
+                        elif final_status == "failed":
+                            yield sse_event("error", {**terminal_payload, "message": "Run failed"})
+                        else:
+                            yield sse_event("done", terminal_payload)
                     break
             finally:
                 db_sess.close()
-            if run_finished:
-                break
             time.sleep(0.3)
 
     return StreamingResponse(_event_stream(), media_type="text/event-stream")
