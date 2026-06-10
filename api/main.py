@@ -2056,17 +2056,9 @@ def cancel_run_endpoint(run_id: int, membership: WorkspaceMember = Depends(get_c
     session = db.get(ChatSession, run.session_id)
     if session:
         require_session_access(session, membership)
-    signalled = cancel_run(run_id)
-    marked = False
-    if run.status == "running":
-        run.status = "cancelled"
-        run.completed_at = datetime.now(timezone.utc)
-        db.commit()
-        db.refresh(run)
-        marked = True
-    if signalled or marked or run.status == "cancelled":
-        return {"cancelled": True, "run_id": run_id, "status": run.status}
-    return {"cancelled": False, "run_id": run_id, "status": run.status, "message": "Run not active or already completed"}
+    if cancel_run(run_id):
+        return {"cancelled": True, "run_id": run_id}
+    return {"cancelled": False, "run_id": run_id, "message": "Run not active or already completed"}
 
 
 @app.get("/api/runs/{run_id}/events")
