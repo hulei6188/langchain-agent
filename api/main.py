@@ -1859,7 +1859,7 @@ def _execute_workflow_thread(db: Session, params: dict, q: queue.Queue) -> None:
             if event["event"] == "run_started":
                 _tracked_run_id = event["run_id"]
                 run = db.get(Run, _tracked_run_id)
-                _emit("run_started", {"run_id": _tracked_run_id})
+                _emit("run_started", {"run_id": _tracked_run_id, "session_id": chat_session.id})
             elif event["event"] == "token":
                 if reasoning_started_at is not None and reasoning_duration_ms is None:
                     reasoning_duration_ms = int((time.perf_counter() - reasoning_started_at) * 1000)
@@ -1955,12 +1955,15 @@ def _execute_workflow_thread(db: Session, params: dict, q: queue.Queue) -> None:
         db.commit()
         db.refresh(assistant)
         assistant_saved = True
+        # Auto-generate session title BEFORE emitting done so frontend receives it immediately
+        _auto_title_session(db, chat_session, params["user_message"], answer)
         _emit("done", {
             "session_id": chat_session.id,
             "message_id": assistant.id,
             "run_id": run.id,
             "content": answer,
             "reasoning_duration_ms": reasoning_duration_ms,
+            "title": chat_session.title,
         })
     except _CancelledError:
         # Workflow was cancelled — run status already set by run_events()
@@ -2611,6 +2614,37 @@ def apply_model_selection(db: Session, payload: dict, *, user_id: int) -> dict:
     return payload
 
 
+def _auto_title_session(db: Session, chat_session: ChatSession, user_message: str, answer: str) -> None:
+    """Auto-generate a session title using the LLM based on the first exchange."""
+    if chat_session.title and chat_session.title != "新会话":
+        return  # Already has a meaningful title
+    try:
+        provider = OpenAICompatibleProvider()
+        title_prompt = (
+            "你是一个会话标题生成助手。请根据用户和助手之间的对话内容，生成一个简洁的会话标题。\n"
+            "要求：\n"
+            "- 标题长度不超过20个字\n"
+            "- 只返回标题本身，不要加引号或其他说明\n"
+            "- 标题应反映用户问题的核心主题\n\n"
+            f"用户：{user_message[:200]}\n"
+            f"助手：{answer[:300]}"
+        )
+        response = provider.chat(
+            messages=[{"role": "user", "content": title_prompt}],
+            temperature=0.3,
+        )
+        title = (response.content or "").strip()
+        # Clean up common LLM artifacts
+        title = title.replace('"', '').replace('「', '').replace('」', '').replace('\n', ' ')
+        title = title.strip()[:60]
+        if title:
+            chat_session.title = title
+            db.commit()
+            logger.info("Auto-titled session %d to: %s", chat_session.id, title)
+    except Exception:
+        logger.exception("Failed to auto-title session %d", chat_session.id)
+
+
 def get_or_create_session(db: Session, agent: Agent, user_id: int, session_id: int | None, title_seed: str, is_debug: bool = False) -> ChatSession:
     if session_id:
         session = db.get(ChatSession, session_id)
@@ -2620,7 +2654,7 @@ def get_or_create_session(db: Session, agent: Agent, user_id: int, session_id: i
         workspace_id=agent.workspace_id,
         agent_id=agent.id,
         user_id=user_id,
-        title=title_seed[:60] or "新对话",
+        title="新会话",
         is_debug=is_debug,
     )
     db.add(session)
