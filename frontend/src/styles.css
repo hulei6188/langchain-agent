@@ -97,7 +97,7 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
   display: grid;
   grid-template-rows: auto auto 1fr auto;
   gap: 8px;
-  padding: 10px 10px 10px 12px;
+  padding: 18px 10px 10px 12px;
   border-right: 1px solid #eceef4;
   background: #f8f9fb;
   overflow: hidden;
@@ -116,8 +116,6 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
   display: flex;
   align-items: center;
   gap: 8px;
-  height: 30px;
-  padding-top: 8px;
   padding-bottom: 16px;
 }
 
