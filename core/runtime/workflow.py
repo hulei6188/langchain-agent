@@ -196,14 +196,25 @@ def _buffer_stream_content(
     if suppress_content_stream:
         return pending, True, []
     pending += content
-    marker_index = _normalize_dsml_markup(pending).find(DSML_TOOL_CALL_START_MARKER)
+    normalized = _normalize_dsml_markup(pending)
+    marker_index = normalized.find(DSML_TOOL_CALL_START_MARKER)
     if marker_index >= 0:
         safe_prefix = pending[:marker_index]
         return "", True, [safe_prefix] if safe_prefix else []
-    if len(pending) <= DSML_STREAM_GUARD_TAIL_CHARS:
-        return pending, False, []
-    safe_content = pending[:-DSML_STREAM_GUARD_TAIL_CHARS]
-    return pending[-DSML_STREAM_GUARD_TAIL_CHARS:], False, [safe_content] if safe_content else []
+
+    # Keep only the suffix that could become the start marker after the next chunk.
+    # The previous implementation kept a fixed marker-length tail for every chunk,
+    # which made normal streaming appear in larger delayed bursts.
+    tail_length = 0
+    max_tail = min(len(normalized), DSML_STREAM_GUARD_TAIL_CHARS)
+    for length in range(max_tail, 0, -1):
+        if DSML_TOOL_CALL_START_MARKER.startswith(normalized[-length:]):
+            tail_length = length
+            break
+    if tail_length <= 0:
+        return "", False, [pending] if pending else []
+    safe_content = pending[:-tail_length]
+    return pending[-tail_length:], False, [safe_content] if safe_content else []
 
 
 def default_workflow() -> list[dict]:
