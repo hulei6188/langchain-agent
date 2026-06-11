@@ -262,6 +262,7 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
   display: grid;
   align-content: start;
   gap: 2px;
+  padding-top: 6px;
   scrollbar-width: thin;
   scrollbar-color: transparent transparent;
 }
