@@ -936,7 +936,7 @@ def _execute_mcp_tool(tool: Tool, context: dict) -> dict:
             if not command:
                 raise ValueError("MCP stdio tool requires a command")
             # Per-chat-session pooling key — isolates browser state
-            session_key = str(context.get("_session_key") or "").strip() or None
+            session_key = str(context.get("_session_key") or context.get("session_id") or "").strip() or None
             result = call_stdio_mcp_tool(
                 command,
                 args=mcp.get("args") or [],

@@ -176,7 +176,7 @@ function App() {
   // Per-session running state: { [sessionId]: { running: true } }
   // Only stores what's needed for UI re-renders (button state)
   const [runningBySessionId, setRunningBySessionId] = useState({});
-  const [newSessionRunning, setNewSessionRunning] = useState(false);
+  const [activeNewRunKey, setActiveNewRunKey] = useState('');
   // Per-session mutable run state (no re-render needed): { [sessionId]: { runId, controller, genId } }
   const sessionRunRef = useRef({});
   // Keep a ref in sync so SSE handlers can check latest activeSessionId
@@ -189,7 +189,7 @@ function App() {
   // Track the temp __new__ runKey so stopGeneration can find it before the real session ID arrives
   const activeNewRunKeyRef = useRef(null);
   // Derived: busy only when CURRENT session is running
-  const busy = activeSessionId ? !!runningBySessionId[activeSessionId]?.running : newSessionRunning;
+  const busy = activeSessionId ? !!runningBySessionId[activeSessionId]?.running : !!(activeNewRunKey && runningBySessionId[activeNewRunKey]?.running);
 
   function setSessionRunning(sessionId) {
     if (!sessionId) return;
@@ -444,6 +444,8 @@ function App() {
     setMembers([]);
     setSessions([]);
     setActiveSessionId(null);
+    setActiveNewRunKey('');
+    activeNewRunKeyRef.current = null;
     setSessionTitleDraft('');
     setMessages([]);
     setSources([]);
@@ -509,6 +511,8 @@ function App() {
     setSearchEnabled(false);
     setChatVariables(initVariableValues(agent.variables || []));
     setActiveSessionId(null);
+    setActiveNewRunKey('');
+    activeNewRunKeyRef.current = null;
     setMessages([]);
     setSources([]);
     setToolDebugEvents([]);
@@ -587,6 +591,8 @@ function App() {
   async function loadSession(sessionId, options = {}) {
     const data = await api(`/api/sessions/${sessionId}`, { token });
     setActiveSessionId(sessionId);
+    setActiveNewRunKey('');
+    activeNewRunKeyRef.current = null;
     setSessionTitleDraft(data.session?.title || '');
     const loaded = data.messages || [];
     setMessages(loaded);
@@ -694,6 +700,8 @@ function App() {
     await api(`/api/sessions/${sessionId}`, { token, method: 'DELETE' });
     if (sessionId === activeSessionId) {
       setActiveSessionId(null);
+      setActiveNewRunKey('');
+      activeNewRunKeyRef.current = null;
       setSessionTitleDraft('');
       setMessages([]);
       setSources([]);
@@ -1249,6 +1257,8 @@ function App() {
     setAgents(remaining);
     setActiveAgentId(nextId);
     setActiveSessionId(null);
+    setActiveNewRunKey('');
+    activeNewRunKeyRef.current = null;
     setSessionTitleDraft('');
     setMessages([]);
     setSources([]);
@@ -1268,6 +1278,8 @@ function App() {
 
   function startNewChat() {
     setActiveSessionId(null);
+    setActiveNewRunKey('');
+    activeNewRunKeyRef.current = null;
     setSessionTitleDraft('');
     newSessionPlaceholderIdRef.current = null;
     setMessages([]);
@@ -1314,6 +1326,8 @@ function App() {
     setSources([]);
     setToolDebugEvents([]);
     setActiveSessionId(null);
+    setActiveNewRunKey('');
+    activeNewRunKeyRef.current = null;
     setError('');
   }, [chatMode]);
 
@@ -1351,9 +1365,18 @@ function App() {
     newSessionIdRef.current = null;
     // Use a valid key for sessionRunRef (null is not a valid object key for our logic)
     const runKey = capturedSessionId || `__new__${Date.now()}`;
+    let placeholderId = null;
+    let streamCtx = null;
+    const requestIsVisible = () => {
+      if (capturedSessionId) {
+        return String(activeSessionIdRef.current || '') === String(capturedSessionId);
+      }
+      return activeNewRunKeyRef.current === runKey;
+    };
     // Track temp key so stopGeneration can find it before real session ID arrives
     if (!capturedSessionId) {
       activeNewRunKeyRef.current = runKey;
+      setActiveNewRunKey(runKey);
     }
     // Abort previous in-flight request for THIS session only
     const prevRun = sessionRunRef.current[runKey];
@@ -1365,9 +1388,8 @@ function App() {
     // Set running state for this session
     setRunningBySessionId((prev) => ({ ...prev, [runKey]: { running: true } }));
     if (!capturedSessionId) {
-      setNewSessionRunning(true);
       // Immediately show a placeholder session in the sidebar
-      const placeholderId = -Date.now();
+      placeholderId = -Date.now();
       newSessionPlaceholderIdRef.current = placeholderId;
       setSessions((prev) => [
         { id: placeholderId, agent_id: activeAgentId, title: '新会话', message_count: 0, created_at: new Date().toISOString(), updated_at: new Date().toISOString() },
@@ -1400,7 +1422,7 @@ function App() {
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({
           message: text || '请分析附件内容。',
-          session_id: activeSessionId || null,
+          session_id: capturedSessionId || null,
           mode: viewRef.current === 'builder' ? chatModeRef.current : 'published',
           is_debug: viewRef.current === 'builder',
           rag_enabled: effectiveRagEnabled,
@@ -1422,7 +1444,7 @@ function App() {
       const decoder = new TextDecoder();
       let buffer = '';
       const genId = newGenId;
-      const ctx = { sessionKey: runKey, genId, realSessionId: capturedSessionId, isNewSession: !capturedSessionId };
+      streamCtx = { sessionKey: runKey, genId, realSessionId: capturedSessionId, isNewSession: !capturedSessionId, placeholderId, resolvedSessionId: null };
       while (true) {
         // Stop processing if a new generation has started for this session
         if (sessionRunRef.current[runKey]?.genId !== genId) break;
@@ -1433,7 +1455,7 @@ function App() {
         buffer = parts.pop() || '';
         for (const part of parts) {
           if (sessionRunRef.current[runKey]?.genId !== genId) break;
-          handleSse(part, ctx);
+          handleSse(part, streamCtx);
         }
       }
     } catch (err) {
@@ -1444,6 +1466,7 @@ function App() {
         logout();
         setError('登录已失效，请重新登录。');
       } else {
+        if (!requestIsVisible()) return;
         const message = errorMessage(err);
         setError(message);
         setMessages((items) => {
@@ -1464,10 +1487,10 @@ function App() {
       }
     } finally {
       // Clean up per-session state — use runKey, not current activeSessionId
-      const finalKey = newSessionIdRef.current || runKey;
+      const visibleAtCleanup = requestIsVisible();
+      const finalKey = streamCtx?.resolvedSessionId || runKey;
       if (sessionRunRef.current[finalKey]?.genId === newGenId) {
         clearSessionRunning(finalKey);
-        setNewSessionRunning(false);
       }
       // Clean up ref entries
       if (sessionRunRef.current[finalKey]?.controller === controller) {
@@ -1476,11 +1499,20 @@ function App() {
       if (finalKey !== runKey && sessionRunRef.current[runKey]?.controller === controller) {
         delete sessionRunRef.current[runKey];
       }
-      newSessionIdRef.current = null;
-      newSessionPlaceholderIdRef.current = null;
-      activeNewRunKeyRef.current = null;
+      if (newSessionIdRef.current === finalKey) {
+        newSessionIdRef.current = null;
+      }
+      if (placeholderId && newSessionPlaceholderIdRef.current === placeholderId) {
+        newSessionPlaceholderIdRef.current = null;
+      }
+      if (activeNewRunKeyRef.current === runKey) {
+        activeNewRunKeyRef.current = null;
+        setActiveNewRunKey('');
+      }
       if (activeAgentId) loadSessions(activeAgentId).catch((err) => setError(errorMessage(err)));
-      setChatAttachments([]);
+      if (visibleAtCleanup) {
+        setChatAttachments([]);
+      }
     }
   }
 
@@ -1501,7 +1533,10 @@ function App() {
     if (lookupKey) {
       clearSessionRunning(lookupKey);
     }
-    setNewSessionRunning(false);
+    if (activeNewRunKeyRef.current === lookupKey) {
+      activeNewRunKeyRef.current = null;
+      setActiveNewRunKey('');
+    }
     setMessages((items) => {
       const next = [...items];
       const last = next[next.length - 1];
@@ -1541,9 +1576,9 @@ function App() {
   }
 
   // Helper: is this stream's session currently displayed in the UI?
-  function _streamIsVisible(realSessionId, isNewSession) {
+  function _streamIsVisible(realSessionId, isNewSession, sessionKey) {
     const currentView = activeSessionIdRef.current;
-    if (!currentView) return isNewSession;
+    if (!currentView) return isNewSession && activeNewRunKeyRef.current === sessionKey;
     if (isNewSession) return false;
     return String(currentView) === String(realSessionId);
   }
@@ -1575,35 +1610,41 @@ function App() {
     const event = raw.match(/^event: (.+)$/m)?.[1];
     const dataLine = raw.match(/^data: (.+)$/m)?.[1];
     const data = dataLine ? JSON.parse(dataLine) : {};
-    const visible = _streamIsVisible(realSessionId, isNewSession);
+    const visible = _streamIsVisible(realSessionId, isNewSession, sessionKey);
 
     if (event === 'run_started') {
       if (sessionKey && sessionRunRef.current[sessionKey]) {
         sessionRunRef.current[sessionKey].runId = data.run_id || null;
       }
       // Replace placeholder session ID with real session ID as early as possible
-      if (data.session_id && newSessionPlaceholderIdRef.current) {
+      if (data.session_id && ctx?.placeholderId) {
         setSessions((prev) =>
-          prev.map((s) => (s.id === newSessionPlaceholderIdRef.current ? { ...s, id: data.session_id } : s))
+          prev.map((s) => (s.id === ctx.placeholderId ? { ...s, id: data.session_id } : s))
         );
-        newSessionPlaceholderIdRef.current = null;
+        if (newSessionPlaceholderIdRef.current === ctx.placeholderId) {
+          newSessionPlaceholderIdRef.current = null;
+        }
       }
     }
     if (event === 'cancelled') {
       // Always clean up running state for this session
       if (data.session_id) clearSessionRunning(data.session_id);
       if (sessionKey && sessionKey !== data.session_id) clearSessionRunning(sessionKey);
-      setNewSessionRunning(false);
       // If temp key, transition so finally block can clean up properly
       if (sessionKey?.startsWith?.('__new__') && data.session_id) {
-        newSessionIdRef.current = data.session_id;
+        ctx.resolvedSessionId = data.session_id;
+        if (activeNewRunKeyRef.current === sessionKey) {
+          newSessionIdRef.current = data.session_id;
+        }
       }
       // Replace placeholder session in sidebar with real session ID
-      if (data.session_id && newSessionPlaceholderIdRef.current) {
+      if (data.session_id && ctx?.placeholderId) {
         setSessions((prev) =>
-          prev.map((s) => (s.id === newSessionPlaceholderIdRef.current ? { ...s, id: data.session_id } : s))
+          prev.map((s) => (s.id === ctx.placeholderId ? { ...s, id: data.session_id } : s))
         );
-        newSessionPlaceholderIdRef.current = null;
+        if (newSessionPlaceholderIdRef.current === ctx.placeholderId) {
+          newSessionPlaceholderIdRef.current = null;
+        }
       }
       // Only update UI if this session is currently visible
       if (visible) {
@@ -1631,6 +1672,7 @@ function App() {
     if (event === 'done') {
       // Always clean up running state and transition temp keys
       if (sessionKey?.startsWith?.('__new__') && data.session_id) {
+        ctx.resolvedSessionId = data.session_id;
         setRunningBySessionId((prev) => {
           const next = { ...prev };
           delete next[sessionKey];
@@ -1639,14 +1681,18 @@ function App() {
         });
         sessionRunRef.current[data.session_id] = sessionRunRef.current[sessionKey];
         delete sessionRunRef.current[sessionKey];
-        newSessionIdRef.current = data.session_id;
+        if (activeNewRunKeyRef.current === sessionKey) {
+          newSessionIdRef.current = data.session_id;
+        }
       }
       // Replace placeholder session in sidebar with real session ID
-      if (data.session_id && newSessionPlaceholderIdRef.current) {
+      if (data.session_id && ctx?.placeholderId) {
         setSessions((prev) =>
-          prev.map((s) => (s.id === newSessionPlaceholderIdRef.current ? { ...s, id: data.session_id } : s))
+          prev.map((s) => (s.id === ctx.placeholderId ? { ...s, id: data.session_id } : s))
         );
-        newSessionPlaceholderIdRef.current = null;
+        if (newSessionPlaceholderIdRef.current === ctx.placeholderId) {
+          newSessionPlaceholderIdRef.current = null;
+        }
       }
       // Immediately update session title in sidebar (auto-generated by backend)
       if (data.session_id && data.title) {
