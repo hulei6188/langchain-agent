@@ -193,6 +193,9 @@ function App() {
   // Keep a ref in sync so SSE handlers can check latest activeSessionId
   const activeSessionIdRef = useRef(activeSessionId);
   activeSessionIdRef.current = activeSessionId;
+  const messagesRef = useRef(messages);
+  const messageCacheRef = useRef({});
+  const sourcesCacheRef = useRef({});
   // Track newly-created session ID from done event for finally cleanup
   const newSessionIdRef = useRef(null);
   // Track placeholder session ID so we can replace it with the real one in the sidebar
@@ -201,6 +204,82 @@ function App() {
   const activeNewRunKeyRef = useRef(null);
   // Derived: busy only when CURRENT session is running
   const busy = activeSessionId ? !!runningBySessionId[activeSessionId]?.running : !!(activeNewRunKey && runningBySessionId[activeNewRunKey]?.running);
+
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
+
+  function sessionCacheKey(value) {
+    if (value === null || value === undefined || value === '') return '';
+    return String(value);
+  }
+
+  function isSessionKeyVisible(sessionKey) {
+    const key = sessionCacheKey(sessionKey);
+    if (!key) return false;
+    const currentSession = sessionCacheKey(activeSessionIdRef.current);
+    if (currentSession) return key === currentSession;
+    const currentNewRunKey = sessionCacheKey(activeNewRunKeyRef.current);
+    return Boolean(currentNewRunKey && key === currentNewRunKey);
+  }
+
+  function latestSourcesFromMessages(items) {
+    return [...(items || [])].reverse().find((item) => item.sources?.length)?.sources || [];
+  }
+
+  function replaceVisibleMessages(items) {
+    const next = Array.isArray(items) ? items : [];
+    messagesRef.current = next;
+    setMessages(next);
+    return next;
+  }
+
+  function writeSessionMessages(sessionKey, items, options = {}) {
+    const key = sessionCacheKey(sessionKey);
+    const next = Array.isArray(items) ? items : [];
+    if (key) {
+      messageCacheRef.current[key] = next;
+    }
+    if (options.visible || isSessionKeyVisible(key)) {
+      replaceVisibleMessages(next);
+    }
+    return next;
+  }
+
+  function updateSessionMessages(sessionKey, updater, options = {}) {
+    const key = sessionCacheKey(sessionKey);
+    const current = key
+      ? (messageCacheRef.current[key] || (isSessionKeyVisible(key) ? messagesRef.current : []))
+      : messagesRef.current;
+    const next = updater(current);
+    return writeSessionMessages(key, next, options);
+  }
+
+  function writeSessionSources(sessionKey, items, options = {}) {
+    const key = sessionCacheKey(sessionKey);
+    const next = Array.isArray(items) ? items : [];
+    if (key) {
+      sourcesCacheRef.current[key] = next;
+    }
+    if (options.visible || isSessionKeyVisible(key)) {
+      setSources(next);
+    }
+    return next;
+  }
+
+  function moveSessionCache(fromKey, toKey) {
+    const from = sessionCacheKey(fromKey);
+    const to = sessionCacheKey(toKey);
+    if (!from || !to || from === to) return;
+    if (messageCacheRef.current[from]) {
+      messageCacheRef.current[to] = messageCacheRef.current[from];
+      delete messageCacheRef.current[from];
+    }
+    if (sourcesCacheRef.current[from]) {
+      sourcesCacheRef.current[to] = sourcesCacheRef.current[from];
+      delete sourcesCacheRef.current[from];
+    }
+  }
 
   function setSessionRunning(sessionId) {
     if (!sessionId) return;
@@ -470,7 +549,9 @@ function App() {
     setActiveNewRunKey('');
     activeNewRunKeyRef.current = null;
     setSessionTitleDraft('');
-    setMessages([]);
+    messageCacheRef.current = {};
+    sourcesCacheRef.current = {};
+    replaceVisibleMessages([]);
     setSources([]);
     setToolDebugEvents([]);
     setDocuments([]);
@@ -536,7 +617,7 @@ function App() {
     setActiveSessionId(null);
     setActiveNewRunKey('');
     activeNewRunKeyRef.current = null;
-    setMessages([]);
+    replaceVisibleMessages([]);
     setSources([]);
     setToolDebugEvents([]);
     setFeedbackByMessage({});
@@ -613,13 +694,19 @@ function App() {
 
   async function loadSession(sessionId, options = {}) {
     const data = await api(`/api/sessions/${sessionId}`, { token });
+    const activeRun = data.active_run;
+    const cacheKey = sessionCacheKey(sessionId);
+    const cachedMessages = messageCacheRef.current[cacheKey];
+    const loaded = data.messages || [];
+    const displayMessages = activeRun?.status === 'running' && cachedMessages?.length
+      ? cachedMessages
+      : loaded;
     setActiveSessionId(sessionId);
     setActiveNewRunKey('');
     activeNewRunKeyRef.current = null;
     setSessionTitleDraft(data.session?.title || '');
-    const loaded = data.messages || [];
-    setMessages(loaded);
-    setSources([...loaded].reverse().find((item) => item.sources?.length)?.sources || []);
+    writeSessionMessages(sessionId, displayMessages, { visible: true });
+    writeSessionSources(sessionId, sourcesCacheRef.current[cacheKey] || latestSourcesFromMessages(displayMessages), { visible: true });
     setToolDebugEvents([]);
     setFeedbackByMessage({});
     if (options.openHome) {
@@ -627,9 +714,11 @@ function App() {
       setActiveNav('chat');
     }
     // If there's an active run, reconnect to its SSE stream
-    const activeRun = data.active_run;
     if (activeRun && activeRun.status === 'running') {
-      reconnectToRun(activeRun.id, sessionId, loaded).catch(() => {});
+      const existingRun = sessionRunRef.current[sessionId];
+      if (!existingRun?.controller) {
+        reconnectToRun(activeRun.id, sessionId, displayMessages).catch(() => {});
+      }
     }
   }
 
@@ -657,10 +746,10 @@ function App() {
       const decoder = new TextDecoder();
       let buffer = '';
       if (needPending) {
-        setMessages([...existingMessages, {
+        writeSessionMessages(sessionId, [...existingMessages, {
           role: 'assistant', content: '', pending: true, reasoning: '',
           reasoningTimeline: [], reasoningPending: false,
-        }]);
+        }], { visible: true });
       }
       const ctx = { sessionKey: sessionId, genId, realSessionId: sessionId, isNewSession: false };
       while (true) {
@@ -721,12 +810,14 @@ function App() {
   async function deleteSession(sessionId) {
     if (!sessionId) return;
     await api(`/api/sessions/${sessionId}`, { token, method: 'DELETE' });
+    delete messageCacheRef.current[sessionCacheKey(sessionId)];
+    delete sourcesCacheRef.current[sessionCacheKey(sessionId)];
     if (sessionId === activeSessionId) {
       setActiveSessionId(null);
       setActiveNewRunKey('');
       activeNewRunKeyRef.current = null;
       setSessionTitleDraft('');
-      setMessages([]);
+      replaceVisibleMessages([]);
       setSources([]);
       setToolDebugEvents([]);
       setFeedbackByMessage({});
@@ -1283,7 +1374,9 @@ function App() {
     setActiveNewRunKey('');
     activeNewRunKeyRef.current = null;
     setSessionTitleDraft('');
-    setMessages([]);
+    messageCacheRef.current = {};
+    sourcesCacheRef.current = {};
+    replaceVisibleMessages([]);
     setSources([]);
     setFeedbackByMessage({});
     setChatVariables({});
@@ -1305,7 +1398,7 @@ function App() {
     activeNewRunKeyRef.current = null;
     setSessionTitleDraft('');
     newSessionPlaceholderIdRef.current = null;
-    setMessages([]);
+    replaceVisibleMessages([]);
     setSources([]);
     setToolDebugEvents([]);
     setFeedbackByMessage({});
@@ -1345,7 +1438,7 @@ function App() {
 
   // Clean chat state when switching between draft debugging and published preview
   useEffect(() => {
-    setMessages([]);
+    replaceVisibleMessages([]);
     setSources([]);
     setToolDebugEvents([]);
     setActiveSessionId(null);
@@ -1422,8 +1515,12 @@ function App() {
     }
     setError('');
     setChatAttachments([]);
-    setMessages((items) => [
-      ...items,
+    const initialMessageKey = capturedSessionId || runKey;
+    const initialBaseMessages = capturedSessionId
+      ? (messageCacheRef.current[sessionCacheKey(capturedSessionId)] || messagesRef.current)
+      : messagesRef.current;
+    writeSessionMessages(initialMessageKey, [
+      ...initialBaseMessages,
       { role: 'user', content: text, attachments: outgoingAttachments },
       {
         role: 'assistant',
@@ -1436,7 +1533,7 @@ function App() {
         reasoningStartedAt: effectiveThinkingEnabled ? Date.now() : null,
         reasoningFinishedAt: null,
       },
-    ]);
+    ], { visible: true });
     setToolDebugEvents([]);
     const controller = new AbortController();
     sessionRunRef.current[runKey] = { runId: null, controller, genId: newGenId };
@@ -1494,7 +1591,7 @@ function App() {
         if (!requestIsVisible()) return;
         const message = errorMessage(err);
         setError(message);
-        setMessages((items) => {
+        updateSessionMessages(streamCtx?.resolvedSessionId || capturedSessionId || runKey, (items) => {
           const next = [...items];
           const last = next[next.length - 1];
           if (last?.role === 'assistant' && last.pending) {
@@ -1508,7 +1605,7 @@ function App() {
             };
           }
           return next;
-        });
+        }, { visible: true });
       }
     } finally {
       // Clean up per-session state — use runKey, not current activeSessionId
@@ -1568,7 +1665,7 @@ function App() {
       activeNewRunKeyRef.current = null;
       setActiveNewRunKey('');
     }
-    setMessages((items) => {
+    updateSessionMessages(lookupKey, (items) => {
       const next = [...items];
       const last = next[next.length - 1];
       if (last?.role === 'assistant' && last.pending) {
@@ -1580,7 +1677,7 @@ function App() {
         };
       }
       return next;
-    });
+    }, { visible: true });
   }
 
   async function uploadChatAttachment(file) {
@@ -1608,10 +1705,22 @@ function App() {
 
   // Helper: is this stream's session currently displayed in the UI?
   function _streamIsVisible(realSessionId, isNewSession, sessionKey) {
-    const currentView = activeSessionIdRef.current;
-    if (!currentView) return isNewSession && activeNewRunKeyRef.current === sessionKey;
-    if (isNewSession) return false;
-    return String(currentView) === String(realSessionId);
+    const currentView = sessionCacheKey(activeSessionIdRef.current);
+    const realKey = sessionCacheKey(realSessionId);
+    const streamKey = sessionCacheKey(sessionKey);
+    if (currentView) {
+      if (realKey) return currentView === realKey;
+      return Boolean(isNewSession && streamKey && sessionCacheKey(activeNewRunKeyRef.current) === streamKey);
+    }
+    return Boolean(isNewSession && streamKey && sessionCacheKey(activeNewRunKeyRef.current) === streamKey);
+  }
+
+  function _streamCacheKey(ctx) {
+    return sessionCacheKey(ctx?.resolvedSessionId || ctx?.realSessionId || ctx?.sessionKey);
+  }
+
+  function _streamVisible(ctx) {
+    return _streamIsVisible(ctx?.realSessionId, ctx?.isNewSession, ctx?.sessionKey);
   }
 
   function ensureAssistantTail(items, defaults = {}) {
@@ -1635,14 +1744,26 @@ function App() {
   }
 
   function handleSse(raw, ctx) {
-    const { sessionKey, genId, realSessionId, isNewSession } = ctx || {};
+    const { sessionKey, genId } = ctx || {};
     // Abandon if a new generation started for this session
     if (sessionKey && sessionRunRef.current[sessionKey]?.genId !== genId) return;
 
     const event = raw.match(/^event: (.+)$/m)?.[1];
     const dataLine = raw.match(/^data: (.+)$/m)?.[1];
+    if (!event) return;
     const data = dataLine ? JSON.parse(dataLine) : {};
-    const visible = _streamIsVisible(realSessionId, isNewSession, sessionKey);
+    let visible = _streamVisible(ctx);
+    let messageKey = _streamCacheKey(ctx);
+
+    const resolveRealSession = (sessionId) => {
+      if (!sessionId || !ctx) return;
+      const previousKey = _streamCacheKey(ctx);
+      ctx.resolvedSessionId = sessionId;
+      ctx.realSessionId = sessionId;
+      moveSessionCache(previousKey || sessionKey, sessionId);
+      messageKey = _streamCacheKey(ctx);
+      visible = _streamVisible(ctx);
+    };
 
     if (event === 'run_started') {
       if (sessionKey && sessionRunRef.current[sessionKey]) {
@@ -1650,7 +1771,7 @@ function App() {
       }
       // Replace placeholder session ID with real session ID as early as possible
       if (data.session_id && ctx?.placeholderId) {
-        ctx.resolvedSessionId = data.session_id;
+        resolveRealSession(data.session_id);
         if (sessionKey?.startsWith?.('__new__') && sessionRunRef.current[sessionKey]) {
           sessionRunRef.current[data.session_id] = sessionRunRef.current[sessionKey];
           if (activeNewRunKeyRef.current === sessionKey) {
@@ -1669,6 +1790,7 @@ function App() {
           newSessionPlaceholderIdRef.current = null;
         }
       }
+      return;
     }
     if (event === 'cancelled') {
       // Always clean up running state for this session
@@ -1676,7 +1798,10 @@ function App() {
       if (sessionKey && sessionKey !== data.session_id) clearSessionRunning(sessionKey);
       // If temp key, transition so finally block can clean up properly
       if (sessionKey?.startsWith?.('__new__') && data.session_id) {
-        ctx.resolvedSessionId = data.session_id;
+        resolveRealSession(data.session_id);
+        if (sessionRunRef.current[sessionKey]) {
+          sessionRunRef.current[data.session_id] = sessionRunRef.current[sessionKey];
+        }
         if (activeNewRunKeyRef.current === sessionKey) {
           newSessionIdRef.current = data.session_id;
         }
@@ -1690,34 +1815,32 @@ function App() {
           newSessionPlaceholderIdRef.current = null;
         }
       }
-      // Only update UI if this session is currently visible
       if (visible) {
-        // Set activeSessionId: new session gets the ID, existing keeps it
-        if (!realSessionId && data.session_id) {
+        if (ctx?.isNewSession && data.session_id && !activeSessionIdRef.current) {
           setActiveSessionId(data.session_id);
         }
-        setMessages((currentMessages) => {
-          const { next, last, index } = ensureAssistantTail(currentMessages);
-          next[index] = {
-            ...last,
-            id: data.message_id || last.id,
-            run_id: data.run_id || last.run_id,
-            pending: false,
-            reasoningPending: false,
-            reasoningFinishedAt: last.reasoningStartedAt && !last.reasoningFinishedAt ? Date.now() : last.reasoningFinishedAt,
-            content: data.content || last.content || '',
-            meta: { ...(last.meta || {}), cancelled: true },
-            _provisionalContent: undefined,
-          };
-          return next;
-        });
       }
+      updateSessionMessages(messageKey, (currentMessages) => {
+        const { next, last, index } = ensureAssistantTail(currentMessages);
+        next[index] = {
+          ...last,
+          id: data.message_id || last.id,
+          run_id: data.run_id || last.run_id,
+          pending: false,
+          reasoningPending: false,
+          reasoningFinishedAt: last.reasoningStartedAt && !last.reasoningFinishedAt ? Date.now() : last.reasoningFinishedAt,
+          content: data.content || last.content || '',
+          meta: { ...(last.meta || {}), cancelled: true },
+          _provisionalContent: undefined,
+        };
+        return next;
+      }, { visible });
       return;
     }
     if (event === 'done') {
       // Always clean up running state and transition temp keys
       if (sessionKey?.startsWith?.('__new__') && data.session_id) {
-        ctx.resolvedSessionId = data.session_id;
+        resolveRealSession(data.session_id);
         setRunningBySessionId((prev) => {
           const next = { ...prev };
           delete next[sessionKey];
@@ -1745,50 +1868,46 @@ function App() {
           prev.map((s) => (s.id === data.session_id ? { ...s, title: data.title } : s))
         );
       }
-      // Only update UI if this session is currently visible
       if (visible) {
-        // Set activeSessionId: new session gets the ID, existing keeps it
-        if (!realSessionId && data.session_id) {
+        if (ctx?.isNewSession && data.session_id && !activeSessionIdRef.current) {
           setActiveSessionId(data.session_id);
         }
-        setMessages((currentMessages) => {
-          const { next, last, index } = ensureAssistantTail(currentMessages);
-          const finalContent = data.content || last._intermediateContent || last.content || '';
-          next[index] = {
-            ...last,
-            id: data.message_id || last.id,
-            run_id: data.run_id || last.run_id,
-            pending: false,
-            reasoningPending: false,
-            reasoningFinishedAt: last.reasoningStartedAt && !last.reasoningFinishedAt ? Date.now() : last.reasoningFinishedAt,
-            reasoningDurationMs: data.reasoning_duration_ms ?? last.reasoningDurationMs,
-            content: finalContent,
-            meta: { ...(last.meta || {}), is_intermediate: false },
-            _intermediateContent: undefined,
-            _provisionalContent: undefined,
-          };
-          return next;
-        });
       }
+      updateSessionMessages(messageKey, (currentMessages) => {
+        const { next, last, index } = ensureAssistantTail(currentMessages);
+        const finalContent = data.content || last._intermediateContent || last.content || '';
+        next[index] = {
+          ...last,
+          id: data.message_id || last.id,
+          run_id: data.run_id || last.run_id,
+          pending: false,
+          reasoningPending: false,
+          reasoningFinishedAt: last.reasoningStartedAt && !last.reasoningFinishedAt ? Date.now() : last.reasoningFinishedAt,
+          reasoningDurationMs: data.reasoning_duration_ms ?? last.reasoningDurationMs,
+          content: finalContent,
+          meta: { ...(last.meta || {}), is_intermediate: false },
+          _intermediateContent: undefined,
+          _provisionalContent: undefined,
+        };
+        return next;
+      }, { visible });
       return;
     }
-    // All remaining events below only modify messages — skip if not visible
-    if (!visible) return;
     if (event === 'token') {
-      setMessages((items) => {
+      updateSessionMessages(messageKey, (items) => {
         const { next, last, index } = ensureAssistantTail(items);
         next[index] = {
           ...last,
           pending: false,
           reasoningPending: false,
           reasoningFinishedAt: last?.reasoningPending && last?.reasoningStartedAt && !last?.reasoningFinishedAt ? Date.now() : last?.reasoningFinishedAt,
-          content: (last.content || '') + data.content,
+          content: (last.content || '') + (data.content || ''),
         };
         return next;
-      });
+      }, { visible });
     }
     if (event === 'provisional_token') {
-      setMessages((items) => {
+      updateSessionMessages(messageKey, (items) => {
         const { next, last, index } = ensureAssistantTail(items);
         const content = data.content || '';
         next[index] = {
@@ -1800,10 +1919,10 @@ function App() {
           _provisionalContent: (last._provisionalContent || '') + content,
         };
         return next;
-      });
+      }, { visible });
     }
     if (event === 'provisional_clear') {
-      setMessages((items) => {
+      updateSessionMessages(messageKey, (items) => {
         const { next, last, index } = ensureAssistantTail(items);
         const provisionalContent = last._provisionalContent || '';
         next[index] = {
@@ -1813,20 +1932,20 @@ function App() {
           _provisionalContent: undefined,
         };
         return next;
-      });
+      }, { visible });
     }
     if (event === 'provisional_commit') {
-      setMessages((items) => {
+      updateSessionMessages(messageKey, (items) => {
         const { next, last, index } = ensureAssistantTail(items);
         next[index] = {
           ...last,
           _provisionalContent: undefined,
         };
         return next;
-      });
+      }, { visible });
     }
     if (event === 'reasoning_token') {
-      setMessages((items) => {
+      updateSessionMessages(messageKey, (items) => {
         const { next, last, index } = ensureAssistantTail(items, {
           reasoningVisible: true,
           reasoningPending: true,
@@ -1840,28 +1959,30 @@ function App() {
           reasoning: (last.reasoning || '') + (data.content || ''),
         }, data.content || '');
         return next;
-      });
+      }, { visible });
     }
     if (event === 'sources') {
       const items = data.items || [];
-      setSources(items);
-      setMessages((currentMessages) => {
+      writeSessionSources(messageKey, items, { visible });
+      updateSessionMessages(messageKey, (currentMessages) => {
         const { next, last, index } = ensureAssistantTail(currentMessages);
         next[index] = { ...last, sources: items };
         return next;
-      });
+      }, { visible });
     }
     if (['rag_status', 'tool_call', 'tool_call_start', 'tool_call_result', 'memory_used', 'thinking_status', 'search_status'].includes(event)) {
-      setToolDebugEvents((items) => [
-        ...items,
-        {
-          event,
-          received_at: new Date().toLocaleTimeString(),
-          ...data,
-        },
-      ].slice(-30));
+      if (visible) {
+        setToolDebugEvents((items) => [
+          ...items,
+          {
+            event,
+            received_at: new Date().toLocaleTimeString(),
+            ...data,
+          },
+        ].slice(-30));
+      }
       if (['tool_call', 'tool_call_start', 'tool_call_result', 'search_status'].includes(event)) {
-        setMessages((items) => {
+        updateSessionMessages(messageKey, (items) => {
           const { next, last, index } = ensureAssistantTail(items);
           const shouldKeepReasoningPending = last.reasoningVisible !== false && (last.reasoningPending || (last.pending && !last.content));
           next[index] = appendToolTimelineItem({
@@ -1870,26 +1991,26 @@ function App() {
             reasoningStartedAt: shouldKeepReasoningPending ? (last.reasoningStartedAt || Date.now()) : last.reasoningStartedAt,
           }, data, event);
           return next;
-        });
+        }, { visible });
       }
     }
     if (event === 'error') {
+      const detail = errorMessage(data.detail || data.message || '智能体运行失败');
       if (visible) {
-        const detail = errorMessage(data.detail || data.message || '智能体运行失败');
         setError(detail);
-        setMessages((items) => {
-          const { next, last, index } = ensureAssistantTail(items);
-          next[index] = {
-            ...last,
-            pending: false,
-            reasoningPending: false,
-            reasoningFinishedAt: last.reasoningStartedAt && !last.reasoningFinishedAt ? Date.now() : last.reasoningFinishedAt,
-            error: true,
-            content: detail,
-          };
-          return next;
-        });
       }
+      updateSessionMessages(messageKey, (items) => {
+        const { next, last, index } = ensureAssistantTail(items);
+        next[index] = {
+          ...last,
+          pending: false,
+          reasoningPending: false,
+          reasoningFinishedAt: last.reasoningStartedAt && !last.reasoningFinishedAt ? Date.now() : last.reasoningFinishedAt,
+          error: true,
+          content: detail,
+        };
+        return next;
+      }, { visible });
     }
   }
 
@@ -2390,7 +2511,7 @@ function HomeView(props) {
           </button>
         </div>
         <nav className="main-nav">
-          <NavButton icon={<SquarePen size={17} />} label="新建会话" active={false} onClick={() => { setActiveNav('chat'); startNewChat(); }} />
+          <NavButton icon={<SquarePen size={17} />} label="新建会话" active={activeNav === 'chat' && !activeSessionId} onClick={() => { setActiveNav('chat'); startNewChat(); }} />
           <NavButton icon={<Bot size={17} />} label="智能体" active={activeNav === 'agents'} onClick={() => setActiveNav('agents')} />
           <NavButton icon={<Boxes size={17} />} label="市场" active={activeNav === 'market'} onClick={() => setActiveNav('market')} />
           <NavButton icon={<ServerCog size={17} />} label="我的模型" active={activeNav === 'my-models'} onClick={() => setActiveNav('my-models')} />
@@ -2726,7 +2847,6 @@ function HomeView(props) {
       {settingsDialogOpen && (
         <SystemSettingsDialog
           activePanel={settingsPanel}
-          logout={logout}
           me={me}
           onClose={() => setSettingsDialogOpen(false)}
           onPanelChange={setSettingsPanel}
@@ -3845,7 +3965,6 @@ function KnowledgeWorkspace({
 
 function SystemSettingsDialog({
   activePanel,
-  logout,
   me,
   onClose,
   onPanelChange,
@@ -4000,7 +4119,6 @@ function SystemSettingsDialog({
                   <span>账号状态</span>
                   <strong>已登录</strong>
                 </div>
-                <button className="danger-action" type="button" onClick={() => { onClose(); logout(); }}><LogOut size={15} />退出登录</button>
               </section>
             )}
           </div>
@@ -7376,16 +7494,23 @@ function appendToolTimelineItem(message, eventData, eventType = 'tool_call') {
       return { ...message, reasoningTimeline: timeline };
     }
   }
-  if (item.type === 'search') {
-    const lastSearchIndex = [...timeline].reverse().findIndex((entry) => entry?.type === 'search');
-    if (lastSearchIndex >= 0) {
-      const index = timeline.length - 1 - lastSearchIndex;
-      timeline[index] = { ...timeline[index], ...item, id: timeline[index].id || item.id };
-      return { ...message, reasoningTimeline: timeline };
-    }
-  }
-  timeline.push(item);
+  const uniqueItem = ensureUniqueTimelineItemId(item, timeline);
+  timeline.push(uniqueItem);
   return { ...message, reasoningTimeline: timeline };
+}
+
+function ensureUniqueTimelineItemId(item, timeline) {
+  const baseId = item.id || `${item.type || 'tool'}-${Date.now()}`;
+  if (!timeline.some((entry) => entry?.id === baseId)) {
+    return { ...item, id: baseId };
+  }
+  let suffix = timeline.length + 1;
+  let nextId = `${baseId}-${suffix}`;
+  while (timeline.some((entry) => entry?.id === nextId)) {
+    suffix += 1;
+    nextId = `${baseId}-${suffix}`;
+  }
+  return { ...item, id: nextId };
 }
 
 function formatToolTimelineLabel(eventData = {}, eventType = 'tool_call') {

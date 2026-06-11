@@ -78,6 +78,11 @@ function updateConversationScrollbarWidth(chatHome, conversation) {
   chatHome.style.setProperty('--conversation-scrollbar-width', `${Math.ceil(scrollbarWidth)}px`);
 }
 
+function isNearConversationBottom(conversation, threshold = 96) {
+  if (!conversation) return true;
+  return conversation.scrollHeight - conversation.scrollTop - conversation.clientHeight <= threshold;
+}
+
 export function ChatView({
   activeAgent,
   activeAgentId,
@@ -232,6 +237,9 @@ function ChatHomeV2({
   const chatHomeRef = useRef(null);
   const conversationRef = useRef(null);
   const composerDockRef = useRef(null);
+  const stickToBottomRef = useRef(true);
+  const previousSessionKeyRef = useRef('');
+  const previousMessageCountRef = useRef(0);
   const currentModel = activeAgent?.user_model_config || activeAgent?.model_config || null;
   const conversationStarted = Boolean(activeSessionId) || messages.some((message) => message.role === 'user');
   const [welcomeTitle, setWelcomeTitle] = useState(() => randomWelcomeTitle());
@@ -267,14 +275,46 @@ function ChatHomeV2({
     }
   }, [activeAgent?.id, conversationStarted]);
 
+  useEffect(() => {
+    const conversation = conversationRef.current;
+    if (!conversation || !conversationStarted) return undefined;
+    const updateStickiness = () => {
+      stickToBottomRef.current = isNearConversationBottom(conversation);
+    };
+    updateStickiness();
+    conversation.addEventListener('scroll', updateStickiness, { passive: true });
+    return () => conversation.removeEventListener('scroll', updateStickiness);
+  }, [activeSessionId, conversationStarted]);
+
   useLayoutEffect(() => {
-    if (!conversationStarted || messages.length === 0) return undefined;
+    if (!conversationStarted || messages.length === 0) {
+      previousSessionKeyRef.current = activeSessionId ? String(activeSessionId) : '';
+      previousMessageCountRef.current = messages.length;
+      return undefined;
+    }
     const conversation = conversationRef.current;
     if (!conversation) return undefined;
 
-    const scrollToBottom = () => {
+    const sessionKey = activeSessionId ? String(activeSessionId) : '__new__';
+    const sessionChanged = previousSessionKeyRef.current !== sessionKey;
+    const messageCountIncreased = messages.length > previousMessageCountRef.current;
+    const shouldScrollToBottom = sessionChanged || messageCountIncreased || stickToBottomRef.current;
+    previousSessionKeyRef.current = sessionKey;
+    previousMessageCountRef.current = messages.length;
+
+    const updateMeasurements = () => {
       updateConversationScrollbarWidth(chatHomeRef.current, conversation);
+    };
+
+    if (!shouldScrollToBottom) {
+      updateMeasurements();
+      return undefined;
+    }
+
+    const scrollToBottom = () => {
+      updateMeasurements();
       conversation.scrollTop = conversation.scrollHeight;
+      stickToBottomRef.current = true;
     };
 
     scrollToBottom();
@@ -292,7 +332,10 @@ function ChatHomeV2({
       chatHome.style.setProperty('--composer-dock-height', `${Math.ceil(composerDock.getBoundingClientRect().height)}px`);
       if (conversationRef.current) {
         updateConversationScrollbarWidth(chatHome, conversationRef.current);
-        conversationRef.current.scrollTop = conversationRef.current.scrollHeight;
+        if (stickToBottomRef.current || isNearConversationBottom(conversationRef.current)) {
+          conversationRef.current.scrollTop = conversationRef.current.scrollHeight;
+          stickToBottomRef.current = true;
+        }
       }
     };
 

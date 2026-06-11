@@ -14,19 +14,9 @@ export function MessageList({ messages, feedbackByMessage = {}, submitFeedback =
           <div className="message-body">
             {message.role === 'assistant' ? (
               <div className={message.error ? 'message-error' : ''}>
-                {message.reasoningVisible !== false && (message.reasoning || message.reasoningPending || message.reasoningTimeline?.length || message.toolCalls?.length) && (
-                  <MessageReasoning
-                    content={message.reasoning || ''}
-                    timeline={message.reasoningTimeline || []}
-                    toolCalls={message.toolCalls || []}
-                    pending={message.reasoningPending}
-                    startedAt={message.reasoningStartedAt}
-                    finishedAt={message.reasoningFinishedAt}
-                    durationMs={message.reasoningDurationMs}
-                  />
-                )}
+                <MessageActivity message={message} />
                 {message.pending && !message.content ? (
-                  <p className="message-pending">{message.reasoning ? '正在组织回答...' : '思考中...'}</p>
+                  <p className="message-pending">{message.reasoningVisible === false ? '处理中...' : message.reasoning ? '正在组织回答...' : '思考中...'}</p>
                 ) : message.meta?.is_intermediate ? null : (
                   <MarkdownContent content={message.content || ''} />
                 )}
@@ -109,6 +99,41 @@ function formatThinkingDuration(startedAt, finishedAt, now, durationMs) {
   return seconds ? `${minutes} 分 ${seconds} 秒` : `${minutes} 分`;
 }
 
+function MessageActivity({ message }) {
+  const timeline = Array.isArray(message.reasoningTimeline) ? message.reasoningTimeline : [];
+  const hasReasoningContent = Boolean(
+    message.reasoningPending
+    || normalizeReasoningBlock(message.reasoning)
+    || timeline.some((item) => item?.type === 'reasoning' && normalizeReasoningBlock(item.content))
+  );
+  const toolItems = reasoningTimelineItems(
+    message.reasoning || '',
+    timeline,
+    message.toolCalls || [],
+    message.reasoningPending,
+  ).filter((item) => item.type === 'tool' || item.type === 'search');
+
+  if (message.reasoningVisible !== false && hasReasoningContent) {
+    return (
+      <MessageReasoning
+        content={message.reasoning || ''}
+        timeline={timeline}
+        toolCalls={message.toolCalls || []}
+        pending={message.reasoningPending}
+        startedAt={message.reasoningStartedAt}
+        finishedAt={message.reasoningFinishedAt}
+        durationMs={message.reasoningDurationMs}
+      />
+    );
+  }
+
+  if (toolItems.length > 0) {
+    return <MessageToolTimeline items={toolItems} />;
+  }
+
+  return null;
+}
+
 function MessageReasoning({ content, timeline = [], toolCalls = [], pending, startedAt, finishedAt, durationMs }) {
   const [open, setOpen] = useState(true);
   const [now, setNow] = useState(() => Date.now());
@@ -171,6 +196,42 @@ function MessageReasoning({ content, timeline = [], toolCalls = [], pending, sta
         </ol>
       </div>
     </details>
+  );
+}
+
+function MessageToolTimeline({ items }) {
+  const [expandedToolIds, setExpandedToolIds] = useState(new Set());
+  if (!items.length) return null;
+
+  function handleToolToggle(toolCallId, isOpen) {
+    setExpandedToolIds((prev) => {
+      const next = new Set(prev);
+      if (isOpen) {
+        next.add(toolCallId);
+      } else {
+        next.delete(toolCallId);
+      }
+      return next;
+    });
+  }
+
+  function isToolExpanded(toolCallId) {
+    return toolCallId ? expandedToolIds.has(toolCallId) : false;
+  }
+
+  return (
+    <div className="message-tool-activity">
+      <ol className="reasoning-timeline">
+        {items.map((item, index) => (
+          <ReasoningTimelineItem
+            item={item}
+            key={item.id || `${item.type}-${index}`}
+            expanded={isToolExpanded(item.toolCallId)}
+            onToggle={(isOpen) => handleToolToggle(item.toolCallId, isOpen)}
+          />
+        ))}
+      </ol>
+    </div>
   );
 }
 
