@@ -590,6 +590,7 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
 }
 
 .chat-home {
+  --composer-dock-height: 0px;
   min-height: 0;
   min-width: 0;
   display: grid;
@@ -613,7 +614,27 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
   padding: 0;
 }
 .chat-home.has-conversation .composer-dock {
-  position: static;
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 2;
+  pointer-events: none;
+}
+.chat-home.has-conversation .composer-dock > * {
+  pointer-events: auto;
+}
+.chat-home.has-conversation .conversation {
+  padding-bottom: calc(var(--composer-dock-height) + 24px);
+}
+.chat-home.has-conversation .error.inline {
+  position: absolute;
+  left: 24px;
+  right: 24px;
+  bottom: calc(var(--composer-dock-height) + 10px);
+  z-index: 3;
+  width: min(820px, calc(100% - 48px));
+  margin: 0 auto;
 }
 
 .conversation {
@@ -675,12 +696,20 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
 .quick-prompts button:hover { border-color: #c7ccef; background: #fbfbff; }
 
 .home-composer {
-  width: min(700px, calc(100% - 48px));
+  width: min(820px, calc(100% - 48px));
   margin: 0 auto;
 }
 .composer-dock {
   width: 100%;
   padding: 0 0 18px;
+  display: grid;
+  gap: 10px;
+}
+.composer-dock .chat-variable-bar {
+  width: min(820px, calc(100% - 48px));
+  margin: 0 auto;
+  border: 1px solid #eef0f5;
+  border-radius: 14px;
 }
 
 .runtime-status {
