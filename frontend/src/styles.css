@@ -104,9 +104,6 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
   transition: opacity .16s ease, padding .18s ease, border-color .18s ease;
 }
 
-.chat-app.sidebar-hidden .chat-topbar {
-  padding-left: 62px;
-}
 .chat-app.sidebar-hidden .chat-sidebar {
   gap: 0;
   padding: 0;
@@ -131,8 +128,7 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
   font-size: 17px;
 }
 
-.sidebar-toggle,
-.sidebar-reopen-button {
+.sidebar-toggle {
   display: grid;
   place-items: center;
   border: 1px solid #dfe3eb;
@@ -146,21 +142,58 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
   border-radius: 8px;
 }
 
-.sidebar-toggle:hover,
-.sidebar-reopen-button:hover {
+.sidebar-toggle:hover {
   background: #eef0f4;
   color: #111827;
 }
 
-.sidebar-reopen-button {
+.sidebar-collapsed-controls {
   position: fixed;
-  left: 12px;
-  top: 12px;
+  left: 10px;
+  top: 14px;
   z-index: 80;
-  width: 34px;
-  height: 34px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.collapsed-brand-dot {
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
   border-radius: 10px;
-  box-shadow: 0 10px 28px rgba(15, 23, 42, .12);
+  background: #eef2ff;
+  color: #111827;
+  box-shadow: 0 10px 24px rgba(15, 23, 42, .12);
+}
+
+.collapsed-action-pill {
+  height: 44px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 12px;
+  border: 1px solid rgba(15, 23, 42, .12);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, .92);
+  box-shadow: 0 12px 28px rgba(15, 23, 42, .14);
+  backdrop-filter: blur(14px);
+}
+
+.collapsed-action-pill button {
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  background: transparent;
+  color: #111827;
+}
+
+.collapsed-action-pill button:hover {
+  background: #eef0f4;
+  color: #111827;
 }
 
 .brand-dot {
@@ -169,8 +202,8 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
   display: grid;
   place-items: center;
   border-radius: 9px;
-  background: #111827;
-  color: #fff;
+  background: #eef2ff;
+  color: #111827;
 }
 
 .new-chat,
@@ -527,7 +560,7 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
   min-width: 0;
   min-height: 0;
   display: grid;
-  grid-template-rows: 58px 1fr;
+  grid-template-rows: 1fr;
   background: #fff;
 }
 .chat-main.no-topbar {
@@ -824,6 +857,9 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
   overflow: auto;
   padding: 34px;
 }
+.chat-app.sidebar-hidden .content-page {
+  padding-top: 86px;
+}
 .page-heading {
   display: flex;
   align-items: center;
@@ -887,6 +923,15 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
 }
 .agent-card button.danger-light:hover:not(:disabled) {
   background: #fee4e2;
+}
+.agent-card button.agent-current-button,
+.agent-card button.agent-current-button:disabled {
+  border-color: #b8c3ff;
+  background: #eef2ff;
+  color: #3340a7;
+  font-weight: 700;
+  opacity: 1;
+  cursor: default;
 }
 .agent-card button:disabled,
 .plain-panel button:disabled,
@@ -5359,6 +5404,22 @@ body.dark .chat-sidebar {
   border-right-color: #2b2b2b;
   background: #181818;
 }
+body.dark .collapsed-brand-dot {
+  background: #eef2ff;
+  color: #111827;
+}
+body.dark .collapsed-action-pill {
+  border-color: #444444;
+  background: rgba(48, 48, 48, .92);
+  box-shadow: 0 12px 28px rgba(0, 0, 0, .28);
+}
+body.dark .collapsed-action-pill button {
+  color: #f4f4f4;
+}
+body.dark .collapsed-action-pill button:hover {
+  background: rgba(255, 255, 255, .1);
+  color: #ffffff;
+}
 body.dark .chat-home.has-conversation .composer-dock {
   --composer-dock-bg: #151515;
 }
@@ -5425,7 +5486,6 @@ body.dark .coze-modal-row-desc {
 }
 body.dark .new-chat,
 body.dark .sidebar-toggle,
-body.dark .sidebar-reopen-button,
 body.dark .auth-panel,
 body.dark .account-menu,
 body.dark .session-menu,
@@ -5473,7 +5533,6 @@ body.dark .more-menu-dropdown button,
 body.dark .session-row.active,
 body.dark .session-row:hover,
 body.dark .sidebar-toggle:hover,
-body.dark .sidebar-reopen-button:hover,
 body.dark .account-menu-group button:hover,
 body.dark .session-menu button:hover,
 body.dark .more-menu-dropdown button:hover,
@@ -6299,6 +6358,17 @@ body.dark .model-admin-actions button:disabled {
   border-color: #3a3a3a;
   background: #202020;
   color: #777;
+}
+body.dark .agent-card.active {
+  border-color: #7084ff;
+  box-shadow: 0 0 0 1px rgba(112, 132, 255, .48), 0 16px 42px rgba(18, 28, 86, .32);
+}
+body.dark .agent-card button.agent-current-button,
+body.dark .agent-card button.agent-current-button:disabled {
+  border-color: #6376e8;
+  background: #1a2141;
+  color: #c8d2ff;
+  opacity: 1;
 }
 body.dark .model-delete-button,
 body.dark .user-model-actions .model-delete-button,

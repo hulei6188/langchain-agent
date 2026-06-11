@@ -2622,15 +2622,30 @@ function HomeView(props) {
   return (
     <main className={`chat-app ${sidebarHidden ? 'sidebar-hidden' : ''}`}>
       {sidebarHidden && (
-        <button
-          className="sidebar-reopen-button"
-          type="button"
-          title="展开侧栏"
-          aria-label="展开侧栏"
-          onClick={() => setSidebarHidden(false)}
-        >
-          <ChevronRight size={17} />
-        </button>
+        <div className="sidebar-collapsed-controls" aria-label="侧栏快捷操作">
+          <span className="collapsed-brand-dot" aria-hidden="true"><Sparkles size={18} /></span>
+          <div className="collapsed-action-pill">
+            <button
+              type="button"
+              title="展开侧栏"
+              aria-label="展开侧栏"
+              onClick={() => setSidebarHidden(false)}
+            >
+              <ChevronRight size={17} />
+            </button>
+            <button
+              type="button"
+              title="新建会话"
+              aria-label="新建会话"
+              onClick={() => {
+                setActiveNav('chat');
+                startNewChat();
+              }}
+            >
+              <SquarePen size={17} />
+            </button>
+          </div>
+        </div>
       )}
       <aside className="chat-sidebar">
         <div className="sidebar-brand">
@@ -3045,28 +3060,38 @@ function AgentsHome({ agents, activeAgentId, canManage, createAgent, deleteAgent
         <button className="primary" type="button" onClick={() => createAgent(true)}><Plus size={16} />创建智能体</button>
       </header>
       <div className="agent-grid">
-        {agents.map((agent) => (
-          <article className={`agent-card ${agent.id === activeAgentId ? 'active' : ''}`} key={agent.id}>
-            <AgentAvatar value={agent.avatar} />
-            <h3>{agent.name}</h3>
-            <p>{agent.description || '暂无简介'}</p>
-            <small className={`status-pill ${agent.status}`}>{statusLabel(agent.status)}</small>
-            <div>
-              <button type="button" onClick={() => setActiveAgentId(agent.id)}>设为当前</button>
-              <button type="button" disabled={!canManage && agent.created_by !== me?.id} onClick={() => openBuilder(agent.id)}>编辑</button>
-              {!agent.is_template && (
+        {agents.map((agent) => {
+          const isCurrent = agent.id === activeAgentId;
+          return (
+            <article className={`agent-card ${isCurrent ? 'active' : ''}`} key={agent.id}>
+              <AgentAvatar value={agent.avatar} />
+              <h3>{agent.name}</h3>
+              <p>{agent.description || '暂无简介'}</p>
+              <small className={`status-pill ${agent.status}`}>{statusLabel(agent.status)}</small>
+              <div>
                 <button
-                  className="danger-light"
+                  className={isCurrent ? 'agent-current-button' : ''}
                   type="button"
-                  disabled={!canManage && agent.created_by !== me?.id}
-                  onClick={() => deleteAgent(agent).catch((err) => console.error(err))}
+                  disabled={isCurrent}
+                  onClick={() => setActiveAgentId(agent.id)}
                 >
-                  删除
+                  {isCurrent ? '已设置' : '设为当前'}
                 </button>
-              )}
-            </div>
-          </article>
-        ))}
+                <button type="button" disabled={!canManage && agent.created_by !== me?.id} onClick={() => openBuilder(agent.id)}>编辑</button>
+                {!agent.is_template && (
+                  <button
+                    className="danger-light"
+                    type="button"
+                    disabled={!canManage && agent.created_by !== me?.id}
+                    onClick={() => deleteAgent(agent).catch((err) => console.error(err))}
+                  >
+                    删除
+                  </button>
+                )}
+              </div>
+            </article>
+          );
+        })}
       </div>
     </div>
   );

@@ -9,7 +9,6 @@ import {
   Sparkles,
   AlertTriangle,
   Brain,
-  ChevronDown,
   Database,
   Send
 } from 'lucide-react';
@@ -83,19 +82,9 @@ function isNearConversationBottom(conversation, threshold = 96) {
   return conversation.scrollHeight - conversation.scrollTop - conversation.clientHeight <= threshold;
 }
 
-function sameId(left, right) {
-  if (left === null || left === undefined || right === null || right === undefined) return false;
-  return String(left) === String(right);
-}
-
 export function ChatView({
   activeAgent,
-  activeAgentId,
-  activeSummary,
   chatAgents,
-  canEditActive,
-  openBuilder,
-  setActiveAgentId,
   // ChatHomeV2 props
   activeSessionId,
   agentForm,
@@ -126,98 +115,39 @@ export function ChatView({
   uploadingAttachment,
   updateChatVariable,
 }) {
-  const [agentMenuOpen, setAgentMenuOpen] = useState(false);
-  const activeChatAgent = chatAgents.find((agent) => sameId(agent.id, activeAgentId));
-  const activeAgentReady = Boolean(activeAgent && sameId(activeAgent.id, activeAgentId));
-  const showActiveAgentName = Boolean(activeAgentReady && activeChatAgent);
-  const blankAgentName = routeRestoring || chatAgents.length === 0 || Boolean(activeAgentId && !showActiveAgentName);
-  const agentSelectorDisabled = routeRestoring || chatAgents.length === 0 || Boolean(activeAgentId && !activeAgentReady);
-  const activeAgentName = blankAgentName ? '' : activeAgent?.name || activeChatAgent?.name || activeSummary?.name || '选择智能体';
   return (
-    <>
-      <header className="chat-topbar">
-        <div className="agent-select">
-          <button
-            type="button"
-            className="agent-trigger"
-            disabled={agentSelectorDisabled}
-            onClick={() => {
-              if (!agentSelectorDisabled) setAgentMenuOpen(!agentMenuOpen);
-            }}
-          >
-            <span>{activeAgentName}</span>
-            {!agentSelectorDisabled && <ChevronDown size={14} />}
-          </button>
-          {!agentSelectorDisabled && agentMenuOpen && (
-            <>
-              <div className="agent-menu-backdrop" onClick={() => setAgentMenuOpen(false)} />
-              <div className="agent-menu">
-                {chatAgents.length === 0 ? (
-                  <span className="agent-menu-empty">暂无已上架智能体</span>
-                ) : (
-                  chatAgents.map((agent) => (
-                    <button
-                      key={agent.id}
-                      type="button"
-                      className={agent.id === activeAgentId ? 'active' : ''}
-                      onClick={() => {
-                        if (String(agent.id) !== String(activeAgentId || '')) setActiveAgentId(Number(agent.id));
-                        setAgentMenuOpen(false);
-                      }}
-                    >
-                      {agent.name}
-                    </button>
-                  ))
-                )}
-              </div>
-            </>
-          )}
-          <button
-            className="agent-edit-button"
-            type="button"
-            disabled={routeRestoring || !canEditActive}
-            title="编辑智能体"
-            aria-label="编辑智能体"
-            onClick={() => openBuilder(activeAgentId)}
-          >
-            <SquarePen size={16} />
-          </button>
-        </div>
-      </header>
-
-      <ChatHomeV2
-        activeAgent={activeAgent}
-        activeSessionId={activeSessionId}
-        agentForm={agentForm}
-        busy={busy}
-        chatAgents={chatAgents}
-        chatAttachments={chatAttachments}
-        chatVariables={chatVariables}
-        error={error}
-        feedbackByMessage={feedbackByMessage}
-        homePrompt={homePrompt}
-        messages={messages}
-        onStopGeneration={onStopGeneration}
-        sendMessage={sendMessage}
-        sendSuggestedQuestion={sendSuggestedQuestion}
-        setChatAttachments={setChatAttachments}
-        setHomePrompt={setHomePrompt}
-        ragEnabled={ragEnabled}
-        setRagEnabled={setRagEnabled}
-        searchEnabled={searchEnabled}
-        setSearchEnabled={setSearchEnabled}
-        sources={sources}
-        submitFeedback={submitFeedback}
-        ragRuntime={ragRuntime}
-        webSearchRuntime={webSearchRuntime}
-        thinkingEnabled={thinkingEnabled}
-        setThinkingEnabled={setThinkingEnabled}
-        uploadChatAttachment={uploadChatAttachment}
-        uploadingAttachment={uploadingAttachment}
-        updateChatVariable={updateChatVariable}
-        routeRestoring={routeRestoring}
-      />
-    </>
+    <ChatHomeV2
+      activeAgent={activeAgent}
+      activeSessionId={activeSessionId}
+      agentForm={agentForm}
+      busy={busy}
+      chatAgents={chatAgents}
+      chatAttachments={chatAttachments}
+      chatVariables={chatVariables}
+      error={error}
+      feedbackByMessage={feedbackByMessage}
+      homePrompt={homePrompt}
+      messages={messages}
+      onStopGeneration={onStopGeneration}
+      sendMessage={sendMessage}
+      sendSuggestedQuestion={sendSuggestedQuestion}
+      setChatAttachments={setChatAttachments}
+      setHomePrompt={setHomePrompt}
+      ragEnabled={ragEnabled}
+      setRagEnabled={setRagEnabled}
+      searchEnabled={searchEnabled}
+      setSearchEnabled={setSearchEnabled}
+      sources={sources}
+      submitFeedback={submitFeedback}
+      ragRuntime={ragRuntime}
+      webSearchRuntime={webSearchRuntime}
+      thinkingEnabled={thinkingEnabled}
+      setThinkingEnabled={setThinkingEnabled}
+      uploadChatAttachment={uploadChatAttachment}
+      uploadingAttachment={uploadingAttachment}
+      updateChatVariable={updateChatVariable}
+      routeRestoring={routeRestoring}
+    />
   );
 }
 
