@@ -393,7 +393,34 @@ function compactText(value, limit = 160) {
   return compact.length > limit ? `${compact.slice(0, limit)}...` : compact;
 }
 
+function normalizeLatexDelimiters(text) {
+  if (!text) return text;
+  // Split by fenced code blocks (```...```) — skip conversion inside them
+  const segments = text.split(/(```[\s\S]*?```)/g);
+  return segments
+    .map((seg, i) => {
+      if (i % 2 === 1) return seg; // code block, leave untouched
+
+      // Convert LaTeX display math \[ ... \] → $$...$$
+      seg = seg.replace(/\\\[([\s\S]*?)\\\]/g, (_, inner) => {
+        const trimmed = inner.trim();
+        return `$$\n${trimmed}\n$$`;
+      });
+
+      // Convert LaTeX inline math \( ... \) → $...$
+      // remark-math requires $ not adjacent to whitespace, so we trim the inner content
+      seg = seg.replace(/\\\(([\s\S]*?)\\\)/g, (_, inner) => {
+        const trimmed = inner.trim();
+        return `$${trimmed}$`;
+      });
+
+      return seg;
+    })
+    .join('');
+}
+
 export function MarkdownContent({ content }) {
+  const processedContent = normalizeLatexDelimiters(content);
   return (
     <div className="markdown-content">
       <ReactMarkdown
@@ -426,7 +453,7 @@ export function MarkdownContent({ content }) {
           },
         }}
       >
-        {content || ''}
+        {processedContent || ''}
       </ReactMarkdown>
     </div>
   );
