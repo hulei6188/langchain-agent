@@ -30,6 +30,7 @@ import {
   LogOut,
   MessageSquare,
   MoreHorizontal,
+  Monitor,
   Moon,
   Plus,
   Rocket,
@@ -138,6 +139,16 @@ import {
 } from './utils.js';
 
 const THEME_STORAGE_KEY = 'agentbase_theme';
+const THEME_MODES = ['light', 'dark', 'system'];
+
+function initialThemeMode() {
+  const stored = localStorage.getItem(THEME_STORAGE_KEY);
+  return THEME_MODES.includes(stored) ? stored : 'light';
+}
+
+function systemPrefersDark() {
+  return Boolean(typeof window !== 'undefined' && window.matchMedia?.('(prefers-color-scheme: dark)').matches);
+}
 
 function App() {
   const [token, setToken] = useState(initialAuthToken);
@@ -225,7 +236,8 @@ function App() {
   const [activeNav, setActiveNav] = useState('chat');
   const [homePrompt, setHomePrompt] = useState('');
   const [accountMenuOpen, setAccountMenuOpen] = useState(false);
-  const [profileDialogOpen, setProfileDialogOpen] = useState(false);
+  const [settingsDialogOpen, setSettingsDialogOpen] = useState(false);
+  const [settingsPanel, setSettingsPanel] = useState('general');
   const [profileError, setProfileError] = useState('');
   const [confirmDialog, setConfirmDialog] = useState(null);
   const [memoryProfile, setMemoryProfile] = useState(() => defaultMemoryProfile());
@@ -236,8 +248,9 @@ function App() {
   const [agentIdentityDialog, setAgentIdentityDialog] = useState(null);
   const [agentIdentitySaving, setAgentIdentitySaving] = useState(false);
   const [agentIdentityError, setAgentIdentityError] = useState('');
-  const [themeMode, setThemeMode] = useState(() => localStorage.getItem(THEME_STORAGE_KEY) === 'dark' ? 'dark' : 'light');
-  const isDarkTheme = themeMode === 'dark';
+  const [themeMode, setThemeMode] = useState(initialThemeMode);
+  const [systemDark, setSystemDark] = useState(systemPrefersDark);
+  const isDarkTheme = themeMode === 'dark' || (themeMode === 'system' && systemDark);
 
   const activeSummary = useMemo(() => agents.find((item) => item.id === activeAgentId), [agents, activeAgentId]);
   const chatAgents = useMemo(
@@ -260,13 +273,23 @@ function App() {
 
   useEffect(() => {
     document.body.classList.toggle('dark', isDarkTheme);
-    document.documentElement.dataset.theme = themeMode;
+    document.documentElement.dataset.theme = isDarkTheme ? 'dark' : 'light';
+    document.documentElement.dataset.themeMode = themeMode;
     localStorage.setItem(THEME_STORAGE_KEY, themeMode);
   }, [isDarkTheme, themeMode]);
 
-  function toggleThemeMode() {
-    setThemeMode((current) => current === 'dark' ? 'light' : 'dark');
-  }
+  useEffect(() => {
+    if (typeof window === 'undefined' || !window.matchMedia) return undefined;
+    const media = window.matchMedia('(prefers-color-scheme: dark)');
+    const syncSystemTheme = (event) => setSystemDark(event.matches);
+    setSystemDark(media.matches);
+    if (media.addEventListener) {
+      media.addEventListener('change', syncSystemTheme);
+      return () => media.removeEventListener('change', syncSystemTheme);
+    }
+    media.addListener?.(syncSystemTheme);
+    return () => media.removeListener?.(syncSystemTheme);
+  }, []);
 
   async function loadDocuments(kbId) {
     if (!kbId || !token) return;
@@ -1408,6 +1431,7 @@ function App() {
         pending: true,
         reasoning: '',
         reasoningTimeline: [],
+        reasoningVisible: effectiveThinkingEnabled,
         reasoningPending: effectiveThinkingEnabled,
         reasoningStartedAt: effectiveThinkingEnabled ? Date.now() : null,
         reasoningFinishedAt: null,
@@ -1602,6 +1626,7 @@ function App() {
       pending: true,
       reasoning: '',
       reasoningTimeline: [],
+      reasoningVisible: false,
       reasoningPending: false,
       ...defaults,
     };
@@ -1803,11 +1828,13 @@ function App() {
     if (event === 'reasoning_token') {
       setMessages((items) => {
         const { next, last, index } = ensureAssistantTail(items, {
+          reasoningVisible: true,
           reasoningPending: true,
           reasoningStartedAt: Date.now(),
         });
         next[index] = appendReasoningTimelineItem({
           ...last,
+          reasoningVisible: true,
           reasoningPending: true,
           reasoningStartedAt: last.reasoningStartedAt || Date.now(),
           reasoning: (last.reasoning || '') + (data.content || ''),
@@ -1835,14 +1862,12 @@ function App() {
       ].slice(-30));
       if (['tool_call', 'tool_call_start', 'tool_call_result', 'search_status'].includes(event)) {
         setMessages((items) => {
-          const { next, last, index } = ensureAssistantTail(items, {
-            reasoningPending: true,
-            reasoningStartedAt: Date.now(),
-          });
+          const { next, last, index } = ensureAssistantTail(items);
+          const shouldKeepReasoningPending = last.reasoningVisible !== false && (last.reasoningPending || (last.pending && !last.content));
           next[index] = appendToolTimelineItem({
             ...last,
-            reasoningPending: last.reasoningPending || (last.pending && !last.content),
-            reasoningStartedAt: last.reasoningStartedAt || Date.now(),
+            reasoningPending: shouldKeepReasoningPending,
+            reasoningStartedAt: shouldKeepReasoningPending ? (last.reasoningStartedAt || Date.now()) : last.reasoningStartedAt,
           }, data, event);
           return next;
         });
@@ -2078,13 +2103,16 @@ function App() {
     updateUserModelConfig,
     view,
     workspace,
+    themeMode,
+    setThemeMode,
     isDarkTheme,
-    toggleThemeMode,
     accountMenuOpen,
-    profileDialogOpen,
+    settingsDialogOpen,
+    settingsPanel,
     profileError,
     setProfileError,
-    setProfileDialogOpen,
+    setSettingsDialogOpen,
+    setSettingsPanel,
     ragEnabled,
     setChatAttachments,
     testUserModelConfig,
@@ -2239,10 +2267,12 @@ function HomeView(props) {
     updateToolConfig,
     updateUserModelConfig,
     workspace,
+    themeMode,
+    setThemeMode,
     isDarkTheme,
-    toggleThemeMode,
     accountMenuOpen,
-    profileDialogOpen,
+    settingsDialogOpen,
+    settingsPanel,
     profileError,
     ragEnabled,
     ragRuntime,
@@ -2251,7 +2281,8 @@ function HomeView(props) {
     setRagEnabled,
     setThinkingEnabled,
     setProfileError,
-    setProfileDialogOpen,
+    setSettingsDialogOpen,
+    setSettingsPanel,
     testUserModelDraft,
     testUserModelConfig,
     token,
@@ -2476,44 +2507,19 @@ function HomeView(props) {
           </div>
         </div>
         <div className="sidebar-user-wrap">
-          <button
-            className="theme-toggle-button"
-            type="button"
-            title={isDarkTheme ? '切换到白色主题' : '切换到黑色主题'}
-            aria-label={isDarkTheme ? '切换到白色主题' : '切换到黑色主题'}
-            aria-pressed={isDarkTheme}
-            onClick={toggleThemeMode}
-          >
-            {isDarkTheme ? <Sun size={16} /> : <Moon size={16} />}
-            <span>{isDarkTheme ? '白色主题' : '黑色主题'}</span>
-          </button>
           {accountMenuOpen && (
             <div className="account-menu">
-              <button
-                className="account-menu-card"
-                type="button"
-                onClick={() => {
-                  setProfileDialogOpen(true);
-                  setAccountMenuOpen(false);
-                }}
-              >
-                <UserAvatar user={me} className="account-avatar" />
-                <span className="account-card-copy">
-                  <strong>{me?.name || me?.email || '当前用户'}</strong>
-                  <small>{roleLabel(workspace?.role)}</small>
-                </span>
-                <ChevronLeft className="account-chevron" size={16} />
-              </button>
               <div className="account-menu-group">
                 <button
                   type="button"
                   onClick={() => {
-                    setProfileDialogOpen(true);
+                    setSettingsPanel('general');
+                    setSettingsDialogOpen(true);
                     setAccountMenuOpen(false);
                   }}
                 >
-                  <KeyRound size={16} />
-                  个人资料
+                  <Settings2 size={16} />
+                  系统设置
                 </button>
               </div>
               <button
@@ -2719,13 +2725,17 @@ function HomeView(props) {
 
 
       </section>
-      {profileDialogOpen && (
-        <ProfileDialog
+      {settingsDialogOpen && (
+        <SystemSettingsDialog
+          activePanel={settingsPanel}
           logout={logout}
           me={me}
-          onClose={() => setProfileDialogOpen(false)}
+          onClose={() => setSettingsDialogOpen(false)}
+          onPanelChange={setSettingsPanel}
           profileError={profileError}
           setProfileError={setProfileError}
+          setThemeMode={setThemeMode}
+          themeMode={themeMode}
           updateProfile={updateProfile}
           workspace={workspace}
         />
@@ -3835,17 +3845,22 @@ function KnowledgeWorkspace({
 
 
 
-function ProfileDialog({
+function SystemSettingsDialog({
+  activePanel,
   logout,
   me,
   onClose,
+  onPanelChange,
   profileError,
   setProfileError,
+  setThemeMode,
+  themeMode,
   updateProfile,
   workspace,
 }) {
   const [nameDraft, setNameDraft] = useState(me?.name || '');
   const [savingProfile, setSavingProfile] = useState(false);
+  const currentPanel = activePanel === 'account' ? 'account' : 'general';
 
   useEffect(() => {
     setNameDraft(me?.name || '');
@@ -3858,6 +3873,12 @@ function ProfileDialog({
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [onClose]);
+
+  const themeOptions = [
+    { value: 'light', label: '浅色', icon: Sun },
+    { value: 'dark', label: '深色', icon: Moon },
+    { value: 'system', label: '跟随系统', icon: Monitor },
+  ];
 
   async function saveName() {
     const nextName = nameDraft.trim();
@@ -3896,38 +3917,96 @@ function ProfileDialog({
   }
 
   return (
-    <div className="profile-dialog-backdrop">
-      <section className="profile-dialog" role="dialog" aria-modal="true" aria-label="个人资料" onClick={(event) => event.stopPropagation()}>
-        <button className="profile-dialog-close" type="button" title="关闭" aria-label="关闭个人资料" onClick={onClose}>
+    <div className="profile-dialog-backdrop system-settings-backdrop" onClick={onClose}>
+      <section className="system-settings-dialog" role="dialog" aria-modal="true" aria-label="系统设置" onClick={(event) => event.stopPropagation()}>
+        <button className="profile-dialog-close system-settings-close" type="button" title="关闭" aria-label="关闭系统设置" onClick={onClose}>
           <X size={16} />
         </button>
-        <div className="profile-card">
-          <UserAvatar user={me} className="profile-avatar" />
-          <div>
-            <h3>个人信息</h3>
-            <p>{me?.name || '未设置姓名'}</p>
+        <header className="system-settings-header">
+          <h2>系统设置</h2>
+        </header>
+        <div className="system-settings-layout">
+          <nav className="system-settings-nav" aria-label="设置分类">
+            <button
+              className={currentPanel === 'general' ? 'active' : ''}
+              type="button"
+              onClick={() => onPanelChange('general')}
+            >
+              <Settings2 size={17} />
+              通用设置
+            </button>
+            <button
+              className={currentPanel === 'account' ? 'active' : ''}
+              type="button"
+              onClick={() => onPanelChange('account')}
+            >
+              <KeyRound size={17} />
+              账号管理
+            </button>
+          </nav>
+          <div className="system-settings-content">
+            {currentPanel === 'general' ? (
+              <>
+                <section className="settings-section">
+                  <h3>主题</h3>
+                  <div className="theme-choice-grid">
+                    {themeOptions.map((option) => {
+                      const Icon = option.icon;
+                      return (
+                        <button
+                          key={option.value}
+                          className={themeMode === option.value ? 'active' : ''}
+                          type="button"
+                          aria-pressed={themeMode === option.value}
+                          onClick={() => setThemeMode(option.value)}
+                        >
+                          <Icon size={18} />
+                          <span>{option.label}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </section>
+                <section className="settings-section settings-inline-row">
+                  <h3>语言</h3>
+                  <button className="settings-select" type="button" disabled>
+                    简体中文
+                  </button>
+                </section>
+              </>
+            ) : (
+              <section className="settings-account-panel">
+                <div className="profile-card settings-profile-card">
+                  <UserAvatar user={me} className="profile-avatar" />
+                  <div>
+                    <h3>个人资料</h3>
+                    <p>{me?.name || '未设置姓名'}</p>
+                  </div>
+                </div>
+                <div className="profile-actions">
+                  <label className="avatar-upload">
+                    {savingProfile ? '上传中...' : '上传头像'}
+                    <input type="file" accept="image/png,image/jpeg,image/webp,image/gif" onChange={uploadAvatar} disabled={savingProfile} />
+                  </label>
+                </div>
+                <div className="profile-edit">
+                  <input value={nameDraft} onChange={(event) => setNameDraft(event.target.value)} placeholder="姓名" />
+                  <button type="button" onClick={saveName} disabled={savingProfile || !nameDraft.trim()}>保存姓名</button>
+                </div>
+                {profileError && <p className="error">{profileError}</p>}
+                <div className="profile-grid">
+                  <span>邮箱</span>
+                  <strong>{me?.email || '-'}</strong>
+                  <span>角色</span>
+                  <strong>{roleLabel(workspace?.role)}</strong>
+                  <span>账号状态</span>
+                  <strong>已登录</strong>
+                </div>
+                <button className="danger-action" type="button" onClick={() => { onClose(); logout(); }}><LogOut size={15} />退出登录</button>
+              </section>
+            )}
           </div>
         </div>
-        <div className="profile-actions">
-          <label className="avatar-upload">
-            {savingProfile ? '上传中...' : '上传头像'}
-            <input type="file" accept="image/png,image/jpeg,image/webp,image/gif" onChange={uploadAvatar} disabled={savingProfile} />
-          </label>
-        </div>
-        <div className="profile-edit">
-          <input value={nameDraft} onChange={(event) => setNameDraft(event.target.value)} placeholder="姓名" />
-          <button type="button" onClick={saveName} disabled={savingProfile || !nameDraft.trim()}>保存姓名</button>
-        </div>
-        {profileError && <p className="error">{profileError}</p>}
-        <div className="profile-grid">
-          <span>邮箱</span>
-          <strong>{me?.email || '-'}</strong>
-          <span>角色</span>
-          <strong>{roleLabel(workspace?.role)}</strong>
-          <span>账号状态</span>
-          <strong>已登录</strong>
-        </div>
-        <button className="danger-action" type="button" onClick={() => { onClose(); logout(); }}><LogOut size={15} />退出登录</button>
       </section>
     </div>
   );

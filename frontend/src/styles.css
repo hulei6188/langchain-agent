@@ -252,7 +252,39 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
   font-weight: 700;
 }
 .sidebar-heading button { width: 24px; height: 24px; border-radius: 6px; background: transparent; color: #667085; }
-.session-list { min-height: 0; overflow: auto; display: grid; align-content: start; gap: 2px; }
+.session-list {
+  min-height: 0;
+  overflow: auto;
+  display: grid;
+  align-content: start;
+  gap: 2px;
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+}
+.session-list:hover {
+  scrollbar-color: rgba(100, 116, 139, .24) transparent;
+}
+.session-list::-webkit-scrollbar {
+  width: 8px;
+}
+.session-list::-webkit-scrollbar-track {
+  background: transparent;
+}
+.session-list::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: transparent;
+}
+.session-list:hover::-webkit-scrollbar-thumb {
+  background: rgba(100, 116, 139, .24);
+}
+.session-list:hover::-webkit-scrollbar-thumb:hover {
+  background: rgba(100, 116, 139, .34);
+}
+.session-list::-webkit-scrollbar-button {
+  display: none;
+  width: 0;
+  height: 0;
+}
 .session-row {
   position: relative;
   min-width: 0;
@@ -394,16 +426,14 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
   display: grid;
   gap: 1px;
 }
-.sidebar-user-copy strong,
-.account-card-copy strong {
+.sidebar-user-copy strong {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 13px;
 }
-.sidebar-user-copy small,
-.account-card-copy small {
+.sidebar-user-copy small {
   color: #667085;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -411,25 +441,6 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
   font-size: 12px;
 }
 .sidebar-user:hover { background: #f1f2f4; }
-
-.theme-toggle-button {
-  width: 100%;
-  min-height: 38px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  margin-bottom: 8px;
-  border: 1px solid #e1e5ee;
-  border-radius: 12px;
-  background: #fff;
-  color: #344054;
-  font-weight: 700;
-}
-.theme-toggle-button:hover {
-  background: #eef0f4;
-  color: #111827;
-}
 
 .account-menu {
   position: absolute;
@@ -445,7 +456,6 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
   box-shadow: 0 16px 42px rgba(15, 23, 42, .16), 0 2px 8px rgba(15, 23, 42, .06);
   z-index: 20;
 }
-.account-menu-card,
 .account-menu-group button,
 .account-menu-logout {
   width: 100%;
@@ -459,19 +469,10 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
   color: #202124;
   text-align: left;
 }
-.account-menu-card {
-  display: grid;
-  grid-template-columns: 32px minmax(0, 1fr) 16px;
-  gap: 10px;
-  min-height: 44px;
-  margin-bottom: 9px;
-  padding: 8px;
-}
 .account-menu-group {
   display: grid;
   gap: 2px;
-  padding: 8px 0;
-  border-top: 1px solid #eceff3;
+  padding: 0 0 8px;
 }
 .account-menu-logout {
   border-top: 1px solid #eceff3;
@@ -480,7 +481,6 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
   padding-top: 12px;
   color: #202124;
 }
-.account-menu-card:hover,
 .account-menu-group button:hover,
 .account-menu-logout:hover {
   background: #f4f4f5;
@@ -514,17 +514,6 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
   height: 30px;
   font-size: 10px;
 }
-.account-card-copy {
-  min-width: 0;
-  display: grid;
-  gap: 1px;
-}
-.account-chevron {
-  margin-left: auto;
-  color: #202124;
-  transform: rotate(180deg);
-}
-
 .chat-main {
   min-width: 0;
   min-height: 0;
@@ -1759,6 +1748,143 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
   color: #667085;
 }
 .profile-dialog-close:hover { background: #f1f2f4; color: #111827; }
+.system-settings-backdrop {
+  background: rgba(0, 0, 0, .38);
+}
+.system-settings-dialog {
+  position: relative;
+  width: min(760px, calc(100vw - 32px));
+  min-height: min(500px, calc(100vh - 48px));
+  max-height: calc(100vh - 48px);
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 18px;
+  border: 1px solid #dfe3ea;
+  border-radius: 22px;
+  padding: 22px 16px 18px;
+  background: #fff;
+  box-shadow: 0 24px 70px rgba(15, 23, 42, .24), 0 2px 10px rgba(15, 23, 42, .08);
+  overflow: hidden;
+}
+.system-settings-close {
+  top: 18px;
+  right: 18px;
+}
+.system-settings-header {
+  min-height: 28px;
+  padding: 0 42px 0 8px;
+}
+.system-settings-header h2 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 750;
+  letter-spacing: 0;
+}
+.system-settings-layout {
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 164px minmax(0, 1fr);
+  gap: 28px;
+}
+.system-settings-nav {
+  display: grid;
+  align-content: start;
+  gap: 6px;
+}
+.system-settings-nav button {
+  min-height: 40px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border-radius: 12px;
+  padding: 8px 10px;
+  background: transparent;
+  color: #475467;
+  font-weight: 650;
+  text-align: left;
+}
+.system-settings-nav button.active,
+.system-settings-nav button:hover {
+  background: #eef0f4;
+  color: #111827;
+}
+.system-settings-content {
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  padding: 2px 8px 10px 0;
+}
+.settings-section {
+  display: grid;
+  gap: 12px;
+  margin-bottom: 28px;
+}
+.settings-section h3 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 700;
+  color: #344054;
+}
+.theme-choice-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+.theme-choice-grid button {
+  min-height: 84px;
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 8px;
+  border: 1px solid #dfe3ea;
+  border-radius: 12px;
+  background: #fff;
+  color: #344054;
+  font-weight: 700;
+}
+.theme-choice-grid button.active,
+.theme-choice-grid button:hover {
+  border-color: #aab7cf;
+  background: #eef0f4;
+  color: #111827;
+}
+.settings-inline-row {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 14px;
+}
+.settings-select {
+  min-height: 38px;
+  border-radius: 999px;
+  padding: 8px 18px;
+  background: #eef0f4;
+  color: #344054;
+  font-weight: 700;
+}
+.settings-account-panel {
+  display: grid;
+  gap: 14px;
+  max-width: 480px;
+}
+.settings-profile-card {
+  padding-right: 0;
+}
+@media (max-width: 720px) {
+  .system-settings-dialog {
+    min-height: min(560px, calc(100vh - 32px));
+    padding: 20px 14px 16px;
+  }
+  .system-settings-layout {
+    grid-template-columns: 1fr;
+    gap: 16px;
+  }
+  .system-settings-nav {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .theme-choice-grid {
+    grid-template-columns: 1fr;
+  }
+}
 .user-model-dialog {
   position: relative;
   width: min(760px, calc(100vw - 32px));
@@ -5195,7 +5321,6 @@ body.dark .coze-modal-row-desc {
 body.dark .new-chat,
 body.dark .sidebar-toggle,
 body.dark .sidebar-reopen-button,
-body.dark .theme-toggle-button,
 body.dark .auth-panel,
 body.dark .sidebar-user,
 body.dark .account-menu,
@@ -5215,6 +5340,7 @@ body.dark .resource-detail-panel,
 body.dark .prompt-preview-panel,
 body.dark .dialog-form,
 body.dark .profile-dialog,
+body.dark .system-settings-dialog,
 body.dark .user-model-dialog,
 body.dark .tool-config-dialog,
 body.dark .prompt-template-dialog,
@@ -5242,7 +5368,6 @@ body.dark .more-menu-dropdown,
 body.dark .more-menu-dropdown button,
 body.dark .session-row.active,
 body.dark .session-row:hover,
-body.dark .theme-toggle-button:hover,
 body.dark .sidebar-user:hover,
 body.dark .sidebar-toggle:hover,
 body.dark .sidebar-reopen-button:hover,
@@ -5252,6 +5377,10 @@ body.dark .more-menu-dropdown button:hover,
 body.dark .more-menu-dropdown button.active,
 body.dark .quick-prompts button:hover,
 body.dark .profile-dialog-close:hover,
+body.dark .system-settings-nav button.active,
+body.dark .system-settings-nav button:hover,
+body.dark .theme-choice-grid button.active,
+body.dark .theme-choice-grid button:hover,
 body.dark .ghost-icon:hover,
 body.dark .coze-accordion-header:hover,
 body.dark .coze-modal-row:hover {
@@ -5261,6 +5390,34 @@ body.dark .coze-modal-row:hover {
 body.dark .session-running-dot {
   border-color: rgba(77, 141, 255, .28);
   border-top-color: #4d8dff;
+}
+body.dark .session-list:hover {
+  scrollbar-color: rgba(255, 255, 255, .18) transparent;
+}
+body.dark .session-list:hover::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, .18);
+}
+body.dark .session-list:hover::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, .26);
+}
+body.dark .system-settings-backdrop {
+  background: rgba(0, 0, 0, .58);
+}
+body.dark .system-settings-header h2,
+body.dark .settings-section h3 {
+  color: #f4f4f4;
+}
+body.dark .system-settings-nav button {
+  color: #d0d0d0;
+}
+body.dark .theme-choice-grid button {
+  border-color: #444;
+  background: #202020;
+  color: #ededed;
+}
+body.dark .settings-select {
+  background: #303030;
+  color: #ededed;
 }
 /* ── Dark: skill modal ── */
 body.dark .skill-modal {
@@ -7809,7 +7966,6 @@ body.dark .chunks-loading,
 body.dark .workspace-empty-detail,
 body.dark .profile-card p,
 body.dark .profile-grid span,
-body.dark .account-card-copy small,
 body.dark .agent-basics-avatar-copy span,
 body.dark .agent-basics-field em,
 body.dark .builder-switcher span,
@@ -7833,7 +7989,6 @@ body.dark .dashboard-table-container,
 body.dark .workspace-column,
 body.dark .doc-detail-header-card,
 body.dark .chunk-card,
-body.dark .account-menu-card,
 body.dark .profile-dialog,
 body.dark .resegment-sliding-panel,
 body.dark .conditional-group,
@@ -7911,7 +8066,6 @@ body.dark .panel button,
 body.dark .profile-actions button,
 body.dark .profile-edit button,
 body.dark .avatar-upload,
-body.dark .account-menu-card,
 body.dark .account-menu-group button,
 body.dark .account-menu-logout,
 body.dark .segmented button,
@@ -7932,12 +8086,16 @@ body.dark .panel button:hover:not(:disabled),
 body.dark .profile-actions button:hover:not(:disabled),
 body.dark .profile-edit button:hover:not(:disabled),
 body.dark .avatar-upload:hover,
-body.dark .account-menu-card:hover,
 body.dark .account-menu-group button:hover,
 body.dark .account-menu-logout:hover {
   border-color: #5a5a5a;
   background: #303030;
   color: #f4f4f4;
+}
+body.dark .account-menu-group button,
+body.dark .account-menu-group button:hover {
+  border-color: transparent;
+  background: transparent;
 }
 
 body.dark .search-box-wrapper input,

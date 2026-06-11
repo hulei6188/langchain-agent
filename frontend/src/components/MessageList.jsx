@@ -20,7 +20,7 @@ export function MessageList({ messages, feedbackByMessage = {}, submitFeedback =
           <div className="message-body">
             {message.role === 'assistant' ? (
               <div className={message.error ? 'message-error' : ''}>
-                {(message.reasoning || message.reasoningPending || message.reasoningTimeline?.length || message.toolCalls?.length) && (
+                {message.reasoningVisible !== false && (message.reasoning || message.reasoningPending || message.reasoningTimeline?.length || message.toolCalls?.length) && (
                   <MessageReasoning
                     content={message.reasoning || ''}
                     timeline={message.reasoningTimeline || []}
