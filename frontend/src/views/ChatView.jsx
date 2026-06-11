@@ -72,6 +72,12 @@ function hasTransferFiles(dt) {
   return false;
 }
 
+function updateConversationScrollbarWidth(chatHome, conversation) {
+  if (!chatHome || !conversation) return;
+  const scrollbarWidth = Math.max(0, conversation.offsetWidth - conversation.clientWidth);
+  chatHome.style.setProperty('--conversation-scrollbar-width', `${Math.ceil(scrollbarWidth)}px`);
+}
+
 export function ChatView({
   activeAgent,
   activeAgentId,
@@ -226,6 +232,17 @@ function ChatHomeV2({
   const attachmentHint = chatAttachments.length ? `${chatAttachments.length} file ready` : attachmentHintForModel(currentModel);
   const runtimeWarning = modelWarning || { text: '' }; // Fallback
   const hasChatAgent = chatAgents.length > 0;
+  const lastMessage = messages[messages.length - 1] || {};
+  const lastTimelineLength = Array.isArray(lastMessage.reasoningTimeline)
+    ? lastMessage.reasoningTimeline.reduce((total, item) => total + String(item?.content || item?.summary || item?.title || '').length, 0)
+    : 0;
+  const scrollSignal = [
+    messages.length,
+    String(lastMessage.content || '').length,
+    String(lastMessage.reasoning || '').length,
+    lastTimelineLength,
+    lastMessage.pending ? 1 : 0,
+  ].join(':');
 
   useEffect(() => {
     if (!conversationStarted) {
@@ -239,13 +256,14 @@ function ChatHomeV2({
     if (!conversation) return undefined;
 
     const scrollToBottom = () => {
+      updateConversationScrollbarWidth(chatHomeRef.current, conversation);
       conversation.scrollTop = conversation.scrollHeight;
     };
 
     scrollToBottom();
     const frame = window.requestAnimationFrame(scrollToBottom);
     return () => window.cancelAnimationFrame(frame);
-  }, [activeSessionId, conversationStarted, messages.length]);
+  }, [activeSessionId, conversationStarted, scrollSignal]);
 
   useLayoutEffect(() => {
     if (!conversationStarted) return undefined;
@@ -255,6 +273,10 @@ function ChatHomeV2({
 
     const updateComposerHeight = () => {
       chatHome.style.setProperty('--composer-dock-height', `${Math.ceil(composerDock.getBoundingClientRect().height)}px`);
+      if (conversationRef.current) {
+        updateConversationScrollbarWidth(chatHome, conversationRef.current);
+        conversationRef.current.scrollTop = conversationRef.current.scrollHeight;
+      }
     };
 
     updateComposerHeight();
@@ -266,6 +288,7 @@ function ChatHomeV2({
       window.cancelAnimationFrame(frame);
       observer?.disconnect();
       chatHome.style.removeProperty('--composer-dock-height');
+      chatHome.style.removeProperty('--conversation-scrollbar-width');
     };
   }, [conversationStarted, hasChatAgent]);
 

@@ -1391,6 +1391,7 @@ function App() {
       // Immediately show a placeholder session in the sidebar
       placeholderId = -Date.now();
       newSessionPlaceholderIdRef.current = placeholderId;
+      setRunningBySessionId((prev) => ({ ...prev, [placeholderId]: { running: true } }));
       setSessions((prev) => [
         { id: placeholderId, agent_id: activeAgentId, title: '新会话', message_count: 0, created_at: new Date().toISOString(), updated_at: new Date().toISOString() },
         ...prev,
@@ -1492,6 +1493,9 @@ function App() {
       if (sessionRunRef.current[finalKey]?.genId === newGenId) {
         clearSessionRunning(finalKey);
       }
+      if (finalKey !== runKey) {
+        clearSessionRunning(runKey);
+      }
       // Clean up ref entries
       if (sessionRunRef.current[finalKey]?.controller === controller) {
         delete sessionRunRef.current[finalKey];
@@ -1501,6 +1505,9 @@ function App() {
       }
       if (newSessionIdRef.current === finalKey) {
         newSessionIdRef.current = null;
+      }
+      if (placeholderId) {
+        clearSessionRunning(placeholderId);
       }
       if (placeholderId && newSessionPlaceholderIdRef.current === placeholderId) {
         newSessionPlaceholderIdRef.current = null;
@@ -1618,6 +1625,18 @@ function App() {
       }
       // Replace placeholder session ID with real session ID as early as possible
       if (data.session_id && ctx?.placeholderId) {
+        ctx.resolvedSessionId = data.session_id;
+        if (sessionKey?.startsWith?.('__new__') && sessionRunRef.current[sessionKey]) {
+          sessionRunRef.current[data.session_id] = sessionRunRef.current[sessionKey];
+          if (activeNewRunKeyRef.current === sessionKey) {
+            newSessionIdRef.current = data.session_id;
+          }
+        }
+        setRunningBySessionId((prev) => {
+          const next = { ...prev, [data.session_id]: { running: true } };
+          delete next[ctx.placeholderId];
+          return next;
+        });
         setSessions((prev) =>
           prev.map((s) => (s.id === ctx.placeholderId ? { ...s, id: data.session_id } : s))
         );
@@ -1950,6 +1969,7 @@ function App() {
     activeAgent,
     activeAgentId,
     activeNav,
+    activeSessionId,
     activeSummary,
     agentForm,
     agents,
@@ -2072,6 +2092,7 @@ function App() {
     userModels,
     webSearchRuntime,
     onStopGeneration: stopGeneration,
+    runningBySessionId,
   };
 
   const builderProps = {
@@ -2180,6 +2201,7 @@ function HomeView(props) {
     promptTemplates,
     requestDeleteConfirm,
     renameSessionById,
+    runningBySessionId,
     sendMessage,
     sendSuggestedQuestion,
     sessions,
@@ -2384,67 +2406,72 @@ function HomeView(props) {
             <button type="button" onClick={startNewChat}><Plus size={14} /></button>
           </div>
           <div className="session-list">
-            {sessions.map((session) => (
-              <div key={session.id} className={`session-row ${session.id === activeSessionId ? 'active' : ''}`}>
-                {renamingSessionId === session.id ? (
-                  <form className="session-rename-form" onSubmit={(event) => submitSessionRename(event).catch((err) => console.error(err))}>
-                    <MessageSquare size={14} />
-                    <input
-                      autoFocus
-                      value={sessionRenameDraft}
-                      onChange={(event) => setSessionRenameDraft(event.target.value)}
-                      onKeyDown={(event) => {
-                        if (event.key === 'Escape') {
-                          event.preventDefault();
-                          cancelSessionRename();
-                        }
-                      }}
-                      placeholder="会话标题"
-                    />
-                    <button type="submit" title="保存" aria-label="保存会话标题" disabled={!sessionRenameDraft.trim()}><Check size={14} /></button>
-                    <button type="button" title="取消" aria-label="取消重命名" onClick={cancelSessionRename}><X size={14} /></button>
-                  </form>
-                ) : (
-                  <>
-                    <button
-                      type="button"
-                      className="session-main"
-                      onClick={() => {
-                        setSessionMenuId(null);
-                        setSessionMenuPosition(null);
-                        loadSession(session.id, { openHome: true }).catch((err) => console.error(err));
-                      }}
-                    >
+            {sessions.map((session) => {
+              const isActiveSession = String(session.id) === String(activeSessionId || '');
+              return (
+                <div key={session.id} className={`session-row ${isActiveSession ? 'active' : ''}`}>
+                  {renamingSessionId === session.id ? (
+                    <form className="session-rename-form" onSubmit={(event) => submitSessionRename(event).catch((err) => console.error(err))}>
                       <MessageSquare size={14} />
-                      <span>{session.title}</span>
-                    </button>
-                    <button
-                      type="button"
-                      className="session-more"
-                      title="会话操作"
-                      aria-label="会话操作"
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        if (sessionMenuId === session.id) {
+                      <input
+                        autoFocus
+                        value={sessionRenameDraft}
+                        onChange={(event) => setSessionRenameDraft(event.target.value)}
+                        onKeyDown={(event) => {
+                          if (event.key === 'Escape') {
+                            event.preventDefault();
+                            cancelSessionRename();
+                          }
+                        }}
+                        placeholder="会话标题"
+                      />
+                      <button type="submit" title="保存" aria-label="保存会话标题" disabled={!sessionRenameDraft.trim()}><Check size={14} /></button>
+                      <button type="button" title="取消" aria-label="取消重命名" onClick={cancelSessionRename}><X size={14} /></button>
+                    </form>
+                  ) : (
+                    <>
+                      <button
+                        type="button"
+                        className="session-main"
+                        aria-current={isActiveSession ? 'page' : undefined}
+                        onClick={() => {
                           setSessionMenuId(null);
                           setSessionMenuPosition(null);
-                          return;
-                        }
-                        const rect = event.currentTarget.getBoundingClientRect();
-                        const sidebarRect = event.currentTarget.closest('.chat-sidebar')?.getBoundingClientRect();
-                        setSessionMenuPosition({
-                          left: (sidebarRect?.right ?? rect.right) + 8,
-                          top: Math.max(8, Math.min(rect.top - 2, window.innerHeight - 104)),
-                        });
-                        setSessionMenuId(session.id);
-                      }}
-                    >
-                      <MoreHorizontal size={15} />
-                    </button>
-                  </>
-                )}
-              </div>
-            ))}
+                          loadSession(session.id, { openHome: true }).catch((err) => console.error(err));
+                        }}
+                      >
+                        <MessageSquare size={14} />
+                        <span>{session.title}</span>
+                        {!!runningBySessionId[session.id]?.running && <span className="session-running-dot" title="运行中" />}
+                      </button>
+                      <button
+                        type="button"
+                        className="session-more"
+                        title="会话操作"
+                        aria-label="会话操作"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          if (sessionMenuId === session.id) {
+                            setSessionMenuId(null);
+                            setSessionMenuPosition(null);
+                            return;
+                          }
+                          const rect = event.currentTarget.getBoundingClientRect();
+                          const sidebarRect = event.currentTarget.closest('.chat-sidebar')?.getBoundingClientRect();
+                          setSessionMenuPosition({
+                            left: (sidebarRect?.right ?? rect.right) + 8,
+                            top: Math.max(8, Math.min(rect.top - 2, window.innerHeight - 104)),
+                          });
+                          setSessionMenuId(session.id);
+                        }}
+                      >
+                        <MoreHorizontal size={15} />
+                      </button>
+                    </>
+                  )}
+                </div>
+              );
+            })}
             {sessions.length === 0 && <p className="sidebar-empty">还没有历史会话</p>}
           </div>
         </div>

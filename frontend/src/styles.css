@@ -192,8 +192,8 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
 .main-nav { display: grid; gap: 2px; }
 .main-nav button.active,
 .main-nav button:hover,
-.session-row.active,
 .session-row:hover { background: #eef0f4; color: #111827; }
+.session-row.active { background: #dbeafe; color: #111827; }
 
 .more-menu-container { position: relative; }
 .more-menu-trigger {
@@ -280,6 +280,18 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.session-running-dot {
+  flex-shrink: 0;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 2px solid #bfdbfe;
+  border-top-color: #2563eb;
+  animation: session-running-spin .8s linear infinite;
+}
+@keyframes session-running-spin {
+  to { transform: rotate(360deg); }
 }
 .session-more {
   width: 28px;
@@ -591,6 +603,8 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
 
 .chat-home {
   --composer-dock-height: 0px;
+  --conversation-scrollbar-width: 0px;
+  --composer-dock-bg: #fff;
   min-height: 0;
   min-width: 0;
   display: grid;
@@ -620,6 +634,13 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
   bottom: 0;
   z-index: 2;
   pointer-events: none;
+  background: linear-gradient(
+    to right,
+    var(--composer-dock-bg) 0,
+    var(--composer-dock-bg) calc(100% - var(--conversation-scrollbar-width)),
+    transparent calc(100% - var(--conversation-scrollbar-width)),
+    transparent 100%
+  );
 }
 .chat-home.has-conversation .composer-dock > * {
   pointer-events: auto;
@@ -5117,6 +5138,9 @@ body.dark .chat-sidebar {
   border-right-color: #262b38;
   background: #121620;
 }
+body.dark .chat-home.has-conversation .composer-dock {
+  --composer-dock-bg: #0f1117;
+}
 body.dark .chat-topbar,
 body.dark .column-header,
 body.dark .stage-header,
@@ -5233,6 +5257,10 @@ body.dark .coze-accordion-header:hover,
 body.dark .coze-modal-row:hover {
   background: #242938;
   color: #f3f4f7;
+}
+body.dark .session-running-dot {
+  border-color: rgba(159, 176, 255, .26);
+  border-top-color: #9fb0ff;
 }
 /* ── Dark: skill modal ── */
 body.dark .skill-modal {
