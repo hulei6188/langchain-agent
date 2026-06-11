@@ -4064,13 +4064,46 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
 .markdown-content ul,
 .markdown-content ol,
 .markdown-content table,
-.markdown-content blockquote,
-.markdown-content h3,
+.markdown-content blockquote { margin: 0; }
+
+/* Chat message headings — smaller than article-level defaults */
+.markdown-content h1 {
+  font-size: 1.5rem;
+  line-height: 1.4;
+  font-weight: 700;
+  margin: 1rem 0 0.65rem;
+}
+.markdown-content h2 {
+  font-size: 1.3rem;
+  line-height: 1.4;
+  font-weight: 700;
+  margin: 0.9rem 0 0.55rem;
+}
+.markdown-content h3 {
+  font-size: 1.15rem;
+  line-height: 1.45;
+  font-weight: 700;
+  margin: 0.75rem 0 0.45rem;
+}
 .markdown-content h4,
-.markdown-content h5 { margin: 0; }
-.markdown-content h3 { font-size: 17px; line-height: 1.5; }
-.markdown-content h4,
-.markdown-content h5 { font-size: 16px; line-height: 1.5; }
+.markdown-content h5,
+.markdown-content h6 {
+  font-size: 1.05rem;
+  line-height: 1.45;
+  font-weight: 700;
+  margin: 0.65rem 0 0.35rem;
+}
+
+/* Remove top margin from first heading — avoids excess whitespace when message starts with a heading */
+.markdown-content > h1:first-child,
+.markdown-content > h2:first-child,
+.markdown-content > h3:first-child,
+.markdown-content > h4:first-child,
+.markdown-content > h5:first-child,
+.markdown-content > h6:first-child {
+  margin-top: 0;
+}
+
 .markdown-content ul,
 .markdown-content ol { padding-left: 20px; }
 .markdown-table-wrapper {
