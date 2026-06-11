@@ -5931,6 +5931,23 @@ body.dark .coze-group-title {
   border-color: rgba(64, 71, 91, .7);
   color: #8f8f8f;
 }
+body.dark .coze-add-button {
+  background: rgba(77, 67, 230, 0.12);
+  border-color: rgba(77, 67, 230, 0.3);
+  color: #8b85f0;
+}
+body.dark .coze-add-button:hover {
+  background: #4d43e6;
+  color: #ffffff;
+  border-color: #4d43e6;
+}
+body.dark .agent-avatar-upload {
+  background: #2b2b2b;
+  color: #e0e0e0;
+}
+body.dark .prompt-editor::placeholder {
+  color: #666;
+}
 
 body.dark .resource-page {
   background: #151515;
@@ -7543,7 +7560,7 @@ body.dark .panel-actions .primary-model-action {
 .coze-group-title {
   font-size: 11px;
   font-weight: 700;
-  color: #94a3b8;
+  color: #64748b;
   padding: 16px 20px 6px;
   text-transform: uppercase;
   letter-spacing: 0.05em;
@@ -7905,7 +7922,7 @@ body.dark .coze-accordion-item {
 }
 .coze-modal-row-btn.added {
   background: #f4f6fb;
-  color: #94a3b8;
+  color: #64748b;
   border-color: #dfe4ef;
   cursor: default;
 }
@@ -8498,6 +8515,9 @@ body.dark .rag-model-status.warning {
   border-color: #846327;
   background: #33270f;
   color: #f7c76f;
+}
+body.dark .rag-model-status.warning small {
+  color: #d4a853;
 }
 
 body.dark .user-model-test,

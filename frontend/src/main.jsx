@@ -2433,7 +2433,6 @@ function HomeView(props) {
         <div className="sidebar-section">
           <div className="sidebar-heading">
             <span>会话</span>
-            <button type="button" onClick={startNewChat}><Plus size={14} /></button>
           </div>
           <div className="session-list">
             {sessions.map((session) => {
