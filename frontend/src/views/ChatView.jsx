@@ -83,6 +83,11 @@ function isNearConversationBottom(conversation, threshold = 96) {
   return conversation.scrollHeight - conversation.scrollTop - conversation.clientHeight <= threshold;
 }
 
+function sameId(left, right) {
+  if (left === null || left === undefined || right === null || right === undefined) return false;
+  return String(left) === String(right);
+}
+
 export function ChatView({
   activeAgent,
   activeAgentId,
@@ -122,7 +127,12 @@ export function ChatView({
   updateChatVariable,
 }) {
   const [agentMenuOpen, setAgentMenuOpen] = useState(false);
-  const activeAgentName = routeRestoring ? '' : activeSummary?.name || activeAgent?.name || agentForm.name || '选择智能体';
+  const activeChatAgent = chatAgents.find((agent) => sameId(agent.id, activeAgentId));
+  const activeAgentReady = Boolean(activeAgent && sameId(activeAgent.id, activeAgentId));
+  const showActiveAgentName = Boolean(activeAgentReady && activeChatAgent);
+  const blankAgentName = routeRestoring || chatAgents.length === 0 || Boolean(activeAgentId && !showActiveAgentName);
+  const agentSelectorDisabled = routeRestoring || chatAgents.length === 0 || Boolean(activeAgentId && !activeAgentReady);
+  const activeAgentName = blankAgentName ? '' : activeAgent?.name || activeChatAgent?.name || activeSummary?.name || '选择智能体';
   return (
     <>
       <header className="chat-topbar">
@@ -130,15 +140,15 @@ export function ChatView({
           <button
             type="button"
             className="agent-trigger"
-            disabled={routeRestoring}
+            disabled={agentSelectorDisabled}
             onClick={() => {
-              if (!routeRestoring) setAgentMenuOpen(!agentMenuOpen);
+              if (!agentSelectorDisabled) setAgentMenuOpen(!agentMenuOpen);
             }}
           >
             <span>{activeAgentName}</span>
-            {!routeRestoring && <ChevronDown size={14} />}
+            {!agentSelectorDisabled && <ChevronDown size={14} />}
           </button>
-          {!routeRestoring && agentMenuOpen && (
+          {!agentSelectorDisabled && agentMenuOpen && (
             <>
               <div className="agent-menu-backdrop" onClick={() => setAgentMenuOpen(false)} />
               <div className="agent-menu">
