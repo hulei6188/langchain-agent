@@ -2389,9 +2389,8 @@ function HomeView(props) {
             <ChevronLeft size={16} />
           </button>
         </div>
-        <button className="new-chat" type="button" onClick={startNewChat}><SquarePen size={16} />新建会话</button>
         <nav className="main-nav">
-          <NavButton icon={<Home size={17} />} label="首页" active={activeNav === 'chat'} onClick={() => setActiveNav('chat')} />
+          <NavButton icon={<SquarePen size={17} />} label="新建会话" active={activeNav === 'chat'} onClick={() => { setActiveNav('chat'); startNewChat(); }} />
           <NavButton icon={<Bot size={17} />} label="智能体" active={activeNav === 'agents'} onClick={() => setActiveNav('agents')} />
           <NavButton icon={<Boxes size={17} />} label="市场" active={activeNav === 'market'} onClick={() => setActiveNav('market')} />
           <NavButton icon={<ServerCog size={17} />} label="我的模型" active={activeNav === 'my-models'} onClick={() => setActiveNav('my-models')} />
@@ -2532,7 +2531,7 @@ function HomeView(props) {
               </button>
             </div>
           )}
-          <button className="sidebar-user" type="button" onClick={() => setAccountMenuOpen(!accountMenuOpen)}>
+          <button className={`sidebar-user ${accountMenuOpen ? 'is-open' : ''}`} type="button" onClick={() => setAccountMenuOpen(!accountMenuOpen)}>
             <UserAvatar user={me} className="account-avatar small" />
             <span className="sidebar-user-copy">
               <strong>{me?.name || me?.email || '当前用户'}</strong>
