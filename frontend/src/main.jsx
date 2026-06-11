@@ -2704,7 +2704,6 @@ function HomeView(props) {
                 <div key={session.id} className={`session-row ${isActiveSession ? 'active' : ''}`}>
                   {renamingSessionId === session.id ? (
                     <form className="session-rename-form" onSubmit={(event) => submitSessionRename(event).catch((err) => console.error(err))}>
-                      <MessageSquare size={14} />
                       <input
                         autoFocus
                         value={sessionRenameDraft}

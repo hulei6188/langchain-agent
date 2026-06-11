@@ -341,7 +341,6 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
   color: #667085;
   opacity: 0;
 }
-.session-row.active .session-more,
 .session-row:hover .session-more,
 .session-more:focus-visible { opacity: 1; }
 .session-more:hover { background: transparent; color: inherit; }
@@ -379,33 +378,35 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
 .session-rename-form {
   grid-column: 1 / -1;
   min-width: 0;
-  min-height: 40px;
+  min-height: 34px;
   display: grid;
-  grid-template-columns: 14px minmax(0, 1fr) 28px 28px;
+  grid-template-columns: minmax(0, 1fr) 24px 24px;
   align-items: center;
-  gap: 7px;
-  padding: 5px 4px 5px 11px;
+  gap: 4px;
+  padding: 3px 5px 3px 11px;
 }
 .session-rename-form input {
   min-width: 0;
-  height: 30px;
-  border: 1px solid #d0d5dd;
+  height: 28px;
+  border: 1px solid transparent;
   border-radius: 8px;
   padding: 0 8px;
-  background: #fff;
+  background: transparent;
   color: #111827;
   font-size: 13px;
+  outline: none;
 }
 .session-rename-form button {
-  width: 28px;
-  height: 28px;
+  width: 24px;
+  height: 24px;
   display: grid;
   place-items: center;
-  border-radius: 8px;
+  border-radius: 6px;
   background: transparent;
-  color: #344054;
+  color: #667085;
 }
-.session-rename-form button:hover:not(:disabled) { background: #dfe3ea; color: #111827; }
+.session-rename-form button[type="submit"] { color: #667085; }
+.session-rename-form button:hover:not(:disabled) { background: rgba(148, 163, 184, .16); color: #111827; }
 .session-rename-form button:disabled { opacity: .45; cursor: not-allowed; }
 .sidebar-empty { color: #98a2b3; font-size: 12px; padding: 6px 4px; }
 
@@ -5492,6 +5493,22 @@ body.dark .coze-modal-row:hover {
 body.dark .session-running-dot {
   border-color: rgba(77, 141, 255, .28);
   border-top-color: #4d8dff;
+}
+body.dark .session-rename-form input {
+  border-color: transparent;
+  background: #1f1f1f;
+  color: #f4f4f4;
+}
+body.dark .session-rename-form button {
+  background: transparent;
+  color: #9ca3af;
+}
+body.dark .session-rename-form button[type="submit"] {
+  color: #9ca3af;
+}
+body.dark .session-rename-form button:hover:not(:disabled) {
+  background: rgba(255, 255, 255, .08);
+  color: #f4f4f4;
 }
 body.dark .session-list:hover {
   scrollbar-color: rgba(255, 255, 255, .18) transparent;
