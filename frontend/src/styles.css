@@ -5265,13 +5265,14 @@ body.dark .stage-header {
   background: rgba(24, 24, 24, .94);
 }
 body.dark .sidebar-user {
+  color: #ededed;
   border-color: transparent;
   background: transparent;
 }
 body.dark .sidebar-user:hover,
 body.dark .sidebar-user.is-open {
   border-color: transparent;
-  background: #303030;
+  background: #2a2a2a;
 }
 body.dark .sidebar-brand strong,
 body.dark .welcome-panel h1,
@@ -5311,7 +5312,6 @@ body.dark .new-chat,
 body.dark .sidebar-toggle,
 body.dark .sidebar-reopen-button,
 body.dark .auth-panel,
-body.dark .sidebar-user,
 body.dark .account-menu,
 body.dark .session-menu,
 body.dark .more-menu-dropdown,
@@ -5357,7 +5357,6 @@ body.dark .more-menu-dropdown,
 body.dark .more-menu-dropdown button,
 body.dark .session-row.active,
 body.dark .session-row:hover,
-body.dark .sidebar-user:hover,
 body.dark .sidebar-toggle:hover,
 body.dark .sidebar-reopen-button:hover,
 body.dark .account-menu-group button:hover,
@@ -8081,7 +8080,9 @@ body.dark .account-menu-logout:hover {
   color: #f4f4f4;
 }
 body.dark .account-menu-group button,
-body.dark .account-menu-group button:hover {
+body.dark .account-menu-group button:hover,
+body.dark .account-menu-logout,
+body.dark .account-menu-logout:hover {
   border-color: transparent;
   background: transparent;
 }
@@ -8128,8 +8129,7 @@ body.dark .document-status.failed {
 
 body.dark .btn-clear-documents,
 body.dark .btn-delete-active-doc,
-body.dark .danger-action,
-body.dark .account-menu-logout {
+body.dark .danger-action {
   border-color: #79372d;
   background: #2a1715;
   color: #ffb3a8;
@@ -8137,8 +8137,7 @@ body.dark .account-menu-logout {
 
 body.dark .btn-clear-documents:hover:not(:disabled),
 body.dark .btn-delete-active-doc:hover:not(:disabled),
-body.dark .danger-action:hover,
-body.dark .account-menu-logout:hover {
+body.dark .danger-action:hover {
   border-color: #a6483b;
   background: #321817;
   color: #ffd0ca;
