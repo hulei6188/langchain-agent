@@ -9,11 +9,11 @@ import {
   Sparkles,
   AlertTriangle,
   Brain,
+  ChevronDown,
   Database,
   Send
 } from 'lucide-react';
 import { MessageList } from '../components/MessageList.jsx';
-import { AgentAvatar } from '../components/AgentAvatar.jsx';
 import {
   reasoningCapabilityForModel,
   thinkingStatusText,
@@ -115,24 +115,41 @@ export function ChatView({
   uploadingAttachment,
   updateChatVariable,
 }) {
+  const [agentMenuOpen, setAgentMenuOpen] = useState(false);
+  const activeAgentName = activeSummary?.name || activeAgent?.name || agentForm.name || '选择智能体';
   return (
     <>
       <header className="chat-topbar">
         <div className="agent-select">
-          <AgentAvatar value={activeSummary?.avatar || activeAgent?.avatar || 'AI'} />
-          <select
-            value={chatAgents.some((agent) => agent.id === activeAgentId) ? activeAgentId : ''}
-            onChange={(e) => setActiveAgentId(Number(e.target.value))}
+          <button
+            type="button"
+            className="agent-trigger"
+            onClick={() => setAgentMenuOpen(!agentMenuOpen)}
           >
-            <option value="" disabled>
-              {chatAgents.length ? '选择已上架智能体' : '暂无已上架智能体'}
-            </option>
-            {chatAgents.map((agent) => (
-              <option key={agent.id} value={agent.id}>
-                {agent.name}
-              </option>
-            ))}
-          </select>
+            <span>{activeAgentName}</span>
+            <ChevronDown size={14} />
+          </button>
+          {agentMenuOpen && (
+            <>
+              <div className="agent-menu-backdrop" onClick={() => setAgentMenuOpen(false)} />
+              <div className="agent-menu">
+                {chatAgents.length === 0 ? (
+                  <span className="agent-menu-empty">暂无已上架智能体</span>
+                ) : (
+                  chatAgents.map((agent) => (
+                    <button
+                      key={agent.id}
+                      type="button"
+                      className={agent.id === activeAgentId ? 'active' : ''}
+                      onClick={() => { setActiveAgentId(Number(agent.id)); setAgentMenuOpen(false); }}
+                    >
+                      {agent.name}
+                    </button>
+                  ))
+                )}
+              </div>
+            </>
+          )}
           <button
             className="agent-edit-button"
             type="button"
@@ -297,13 +314,11 @@ function ChatHomeV2({
       <div className="conversation" ref={conversationRef}>
         {!hasChatAgent ? (
           <section className="welcome-panel">
-            <AgentAvatar value="AI" className="welcome-avatar" />
             <h1>{CHAT_COPY.noAgentTitle}</h1>
             <p>{CHAT_COPY.noAgentDesc}</p>
           </section>
         ) : !conversationStarted ? (
           <section className="welcome-panel">
-            <AgentAvatar value={activeAgent?.avatar || agentForm.avatar || 'AI'} className="welcome-avatar" />
             <h1>{welcomeTitle}</h1>
             <p>{activeAgent?.description || agentForm.description || CHAT_COPY.welcomeDesc}</p>
             <div className="quick-prompts">

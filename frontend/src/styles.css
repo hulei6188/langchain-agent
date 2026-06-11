@@ -117,6 +117,8 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
   align-items: center;
   gap: 8px;
   height: 30px;
+  padding-top: 4px;
+  padding-bottom: 10px;
 }
 
 .sidebar-brand strong {
@@ -125,6 +127,7 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-size: 17px;
 }
 
 .sidebar-toggle,
@@ -248,7 +251,7 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
   justify-content: space-between;
   padding: 4px 4px;
   color: #667085;
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 700;
 }
 .sidebar-heading button { width: 24px; height: 24px; border-radius: 6px; background: transparent; color: #667085; }
@@ -543,9 +546,60 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
   align-items: center;
   gap: 10px;
   min-width: 0;
+  position: relative;
 }
-.agent-select select { min-width: 180px; height: 38px; }
-.agent-select button {
+.agent-trigger {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 180px;
+  height: 38px;
+  padding: 0 12px;
+  border: 1px solid #e1e5ee;
+  border-radius: 10px;
+  background: #fff;
+  color: #344054;
+  font-size: 14px;
+  text-align: left;
+}
+.agent-trigger span {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.agent-menu-backdrop { position: fixed; inset: 0; z-index: 25; }
+.agent-menu {
+  position: absolute;
+  left: 0;
+  top: calc(100% + 4px);
+  min-width: 220px;
+  display: grid;
+  gap: 2px;
+  padding: 6px;
+  border: 1px solid #dfe3ea;
+  border-radius: 10px;
+  background: #fff;
+  box-shadow: 0 14px 30px rgba(15, 23, 42, .16);
+  z-index: 30;
+}
+.agent-menu button {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: transparent;
+  color: #344054;
+  font-size: 14px;
+  text-align: left;
+}
+.agent-menu button:hover,
+.agent-menu button.active { background: #eef0f4; color: #111827; }
+.agent-menu-empty { padding: 8px 10px; color: #98a2b3; font-size: 13px; }
+.agent-select button.agent-edit-button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -5567,19 +5621,37 @@ body.dark .rich-composer .attachment-button,
 body.dark .rich-composer .composer-icon-button {
   color: #d0d0d0;
 }
-body.dark .agent-select button,
+body.dark .agent-trigger {
+  border-color: #3a3a3a;
+  background: transparent;
+  color: #ededed;
+}
+body.dark .agent-trigger:hover {
+  border-color: #5a5a5a;
+  background: #242938;
+}
+body.dark .agent-menu {
+  border-color: #3a3a3a;
+  background: #202020;
+}
+body.dark .agent-menu button {
+  color: #d0d0d0;
+}
+body.dark .agent-menu button:hover,
+body.dark .agent-menu button.active {
+  background: #303030;
+  color: #f4f4f4;
+}
 body.dark .agent-edit-button {
   border-color: #3a3a3a;
   background: #2b2b2b;
   color: #e0e0e0;
 }
-body.dark .agent-select button:hover:not(:disabled),
 body.dark .agent-edit-button:hover:not(:disabled) {
   border-color: #5a5a5a;
   background: #303030;
   color: #f4f4f4;
 }
-body.dark .agent-select button:disabled,
 body.dark .agent-edit-button:disabled {
   border-color: #3a3a3a;
   background: #202020;
