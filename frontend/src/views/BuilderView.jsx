@@ -1111,12 +1111,6 @@ export function BuilderView(props) {
               <strong>{ragStatus}</strong>
             </div>
           )}
-          {activeSessionId && (
-            <div className="session-editor">
-              <input value={sessionTitleDraft} onChange={(e) => setSessionTitleDraft(e.target.value)} placeholder="会话标题" />
-              <button type="button" onClick={() => renameSession().catch((err) => console.error(err))}>保存标题</button>
-            </div>
-          )}
           <ChatComposer
             className="composer"
             value={draft}
