@@ -475,7 +475,6 @@ export function BuilderView(props) {
           />
 
           {/* ==================== 技能/工具 ==================== */}
-          <div className="coze-group-title">技能</div>
           <div className={`coze-accordion-item ${expandedSections.tools ? 'expanded' : ''}`}>
             <div className="coze-accordion-header" onClick={() => toggleSection('tools')}>
               <div className="coze-header-left">
@@ -632,7 +631,6 @@ export function BuilderView(props) {
           </div>
 
           {/* ==================== 知识/文本 ==================== */}
-          <div className="coze-group-title">知识</div>
           <div className={`coze-accordion-item ${expandedSections.kb ? 'expanded' : ''}`}>
             <div className="coze-accordion-header" onClick={() => toggleSection('kb')}>
               <div className="coze-header-left">
@@ -709,7 +707,6 @@ export function BuilderView(props) {
           </div>
 
           {/* ==================== 记忆大类 ==================== */}
-          <div className="coze-group-title">记忆</div>
           
           {/* 会话记忆 */}
           <div className={`coze-accordion-item ${expandedSections.memorySession ? 'expanded' : ''}`}>
@@ -794,7 +791,6 @@ export function BuilderView(props) {
           )}
 
           {/* ==================== 对话体验 ==================== */}
-          <div className="coze-group-title">对话体验</div>
           <div className={`coze-accordion-item ${expandedSections.onboarding ? 'expanded' : ''}`}>
             <div className="coze-accordion-header" onClick={() => toggleSection('onboarding')}>
               <div className="coze-header-left">
