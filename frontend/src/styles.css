@@ -95,7 +95,7 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
   min-width: 0;
   min-height: 0;
   display: grid;
-  grid-template-rows: auto auto auto 1fr auto;
+  grid-template-rows: auto auto 1fr auto;
   gap: 8px;
   padding: 10px 10px 10px 12px;
   border-right: 1px solid #eceef4;
@@ -117,8 +117,8 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
   align-items: center;
   gap: 8px;
   height: 30px;
-  padding-top: 4px;
-  padding-bottom: 10px;
+  padding-top: 8px;
+  padding-bottom: 16px;
 }
 
 .sidebar-brand strong {
