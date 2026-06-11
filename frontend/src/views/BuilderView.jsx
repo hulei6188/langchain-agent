@@ -1090,7 +1090,7 @@ export function BuilderView(props) {
                 <strong>{agentForm.name || '智能体一号'}</strong>
               </div>
             ) : (
-              <MessageList messages={messages} feedbackByMessage={feedbackByMessage} submitFeedback={submitFeedback} avatar={activeAgent?.avatar || agentForm.avatar || 'AI'} />
+              <MessageList messages={messages} feedbackByMessage={feedbackByMessage} submitFeedback={submitFeedback} />
             )}
           </div>
           {messages.length <= 1 && (agentForm.suggested_questions || []).length > 0 && (

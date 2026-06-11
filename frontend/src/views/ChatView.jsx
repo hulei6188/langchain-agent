@@ -319,7 +319,6 @@ function ChatHomeV2({
             messages={messages}
             feedbackByMessage={feedbackByMessage}
             submitFeedback={submitFeedback}
-            avatar={activeAgent?.avatar || agentForm.avatar || 'AI'}
           />
         )}
       </div>
