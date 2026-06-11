@@ -5094,6 +5094,11 @@ body.dark select:focus {
   border-color: #7c8cff;
   box-shadow: 0 0 0 3px rgba(124, 140, 255, .18);
 }
+body.dark .composer-textarea:focus {
+  border-color: transparent;
+  box-shadow: none;
+  outline: none;
+}
 body.dark .auth-shell,
 body.dark .chat-app,
 body.dark .chat-main,
