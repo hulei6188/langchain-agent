@@ -320,8 +320,8 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
 }
 .session-running-dot {
   flex-shrink: 0;
-  width: 12px;
-  height: 12px;
+  width: 14px;
+  height: 14px;
   border-radius: 50%;
   border: 2px solid #bfdbfe;
   border-top-color: #2563eb;
@@ -344,7 +344,7 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
 .session-row.active .session-more,
 .session-row:hover .session-more,
 .session-more:focus-visible { opacity: 1; }
-.session-more:hover { background: #dfe3ea; color: #111827; }
+.session-more:hover { background: transparent; color: inherit; }
 .session-menu {
   width: 118px;
   display: grid;

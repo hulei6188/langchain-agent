@@ -2699,6 +2699,7 @@ function HomeView(props) {
           <div className="session-list">
             {!routeRestoring && sessions.map((session) => {
               const isActiveSession = String(session.id) === String(activeSessionId || '');
+              const isSessionRunning = !!runningBySessionId[session.id]?.running;
               return (
                 <div key={session.id} className={`session-row ${isActiveSession ? 'active' : ''}`}>
                   {renamingSessionId === session.id ? (
@@ -2731,9 +2732,12 @@ function HomeView(props) {
                           loadSession(session.id, { openHome: true, historyMode: 'push' }).catch((err) => console.error(err));
                         }}
                       >
-                        <MessageSquare size={14} />
+                        {isSessionRunning ? (
+                          <span className="session-running-dot" title="运行中" aria-label="运行中" />
+                        ) : (
+                          <MessageSquare size={14} />
+                        )}
                         <span>{session.title}</span>
-                        {!!runningBySessionId[session.id]?.running && <span className="session-running-dot" title="运行中" />}
                       </button>
                       <button
                         type="button"
