@@ -238,6 +238,9 @@ function ChatHomeV2({
   const conversationRef = useRef(null);
   const composerDockRef = useRef(null);
   const stickToBottomRef = useRef(true);
+  const autoScrollPausedRef = useRef(false);
+  const lastScrollTopRef = useRef(0);
+  const lastTouchYRef = useRef(null);
   const previousSessionKeyRef = useRef('');
   const previousMessageCountRef = useRef(0);
   const currentModel = activeAgent?.user_model_config || activeAgent?.model_config || null;
@@ -278,12 +281,51 @@ function ChatHomeV2({
   useEffect(() => {
     const conversation = conversationRef.current;
     if (!conversation || !conversationStarted) return undefined;
+    lastScrollTopRef.current = conversation.scrollTop;
     const updateStickiness = () => {
-      stickToBottomRef.current = isNearConversationBottom(conversation);
+      const nearBottom = isNearConversationBottom(conversation);
+      const scrollingDown = conversation.scrollTop > lastScrollTopRef.current;
+      if (nearBottom && (!autoScrollPausedRef.current || scrollingDown)) {
+        stickToBottomRef.current = true;
+        autoScrollPausedRef.current = false;
+      } else if (!nearBottom) {
+        stickToBottomRef.current = false;
+      }
+      lastScrollTopRef.current = conversation.scrollTop;
+    };
+    const pauseAutoScroll = () => {
+      stickToBottomRef.current = false;
+      autoScrollPausedRef.current = true;
+    };
+    const handleWheel = (event) => {
+      if (event.deltaY < 0) pauseAutoScroll();
+    };
+    const handleTouchStart = (event) => {
+      lastTouchYRef.current = event.touches?.[0]?.clientY ?? null;
+    };
+    const handleTouchMove = (event) => {
+      const nextY = event.touches?.[0]?.clientY ?? null;
+      if (nextY !== null && lastTouchYRef.current !== null && nextY > lastTouchYRef.current) {
+        pauseAutoScroll();
+      }
+      lastTouchYRef.current = nextY;
+    };
+    const handleKeyDown = (event) => {
+      if (['ArrowUp', 'PageUp', 'Home'].includes(event.key)) pauseAutoScroll();
     };
     updateStickiness();
     conversation.addEventListener('scroll', updateStickiness, { passive: true });
-    return () => conversation.removeEventListener('scroll', updateStickiness);
+    conversation.addEventListener('wheel', handleWheel, { passive: true });
+    conversation.addEventListener('touchstart', handleTouchStart, { passive: true });
+    conversation.addEventListener('touchmove', handleTouchMove, { passive: true });
+    conversation.addEventListener('keydown', handleKeyDown);
+    return () => {
+      conversation.removeEventListener('scroll', updateStickiness);
+      conversation.removeEventListener('wheel', handleWheel);
+      conversation.removeEventListener('touchstart', handleTouchStart);
+      conversation.removeEventListener('touchmove', handleTouchMove);
+      conversation.removeEventListener('keydown', handleKeyDown);
+    };
   }, [activeSessionId, conversationStarted]);
 
   useLayoutEffect(() => {
@@ -298,7 +340,7 @@ function ChatHomeV2({
     const sessionKey = activeSessionId ? String(activeSessionId) : '__new__';
     const sessionChanged = previousSessionKeyRef.current !== sessionKey;
     const messageCountIncreased = messages.length > previousMessageCountRef.current;
-    const shouldScrollToBottom = sessionChanged || messageCountIncreased || stickToBottomRef.current;
+    const shouldScrollToBottom = sessionChanged || (!autoScrollPausedRef.current && (messageCountIncreased || stickToBottomRef.current));
     previousSessionKeyRef.current = sessionKey;
     previousMessageCountRef.current = messages.length;
 
@@ -315,6 +357,8 @@ function ChatHomeV2({
       updateMeasurements();
       conversation.scrollTop = conversation.scrollHeight;
       stickToBottomRef.current = true;
+      autoScrollPausedRef.current = false;
+      lastScrollTopRef.current = conversation.scrollTop;
     };
 
     scrollToBottom();
@@ -332,9 +376,11 @@ function ChatHomeV2({
       chatHome.style.setProperty('--composer-dock-height', `${Math.ceil(composerDock.getBoundingClientRect().height)}px`);
       if (conversationRef.current) {
         updateConversationScrollbarWidth(chatHome, conversationRef.current);
-        if (stickToBottomRef.current || isNearConversationBottom(conversationRef.current)) {
+        if (stickToBottomRef.current || (!autoScrollPausedRef.current && isNearConversationBottom(conversationRef.current))) {
           conversationRef.current.scrollTop = conversationRef.current.scrollHeight;
           stickToBottomRef.current = true;
+          autoScrollPausedRef.current = false;
+          lastScrollTopRef.current = conversationRef.current.scrollTop;
         }
       }
     };
