@@ -8510,11 +8510,34 @@ body.dark .model-row-tags span.enabled,
 body.dark .model-admin-capabilities button.enabled,
 body.dark .model-state-toggle.enabled,
 body.dark .tool-row-meta span.enabled,
-body.dark .tool-kind.builtin_search,
 body.dark .toast.success {
   border-color: #2d7255;
   background: #10281f;
   color: #7ee0aa;
+}
+
+body.dark .tool-kind.builtin_search {
+  border-color: #34486f;
+  background: #182235;
+  color: #9fc0ff;
+}
+
+body.dark .tool-kind.builtin {
+  border-color: #424242;
+  background: #242424;
+  color: #d7d7d7;
+}
+
+body.dark .tool-kind.http {
+  border-color: #2d5f48;
+  background: #14251d;
+  color: #7ee0aa;
+}
+
+body.dark .tool-kind.mcp {
+  border-color: #6a4a2d;
+  background: #2a2118;
+  color: #ffbe82;
 }
 
 body.dark .model-row-warning,
