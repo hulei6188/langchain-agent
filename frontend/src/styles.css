@@ -416,7 +416,7 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
   gap: 9px;
   padding: 10px;
   border-radius: 12px;
-  background: #fff;
+  background: transparent;
   border: 1px solid transparent;
   color: #111827;
   text-align: left;
@@ -440,7 +440,10 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
   white-space: nowrap;
   font-size: 12px;
 }
-.sidebar-user:hover { background: #f1f2f4; }
+.sidebar-user:hover,
+.sidebar-user.is-open {
+  background: #f1f2f4;
+}
 
 .account-menu {
   position: absolute;
@@ -643,7 +646,7 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
   right: 24px;
   bottom: calc(var(--composer-dock-height) + 10px);
   z-index: 3;
-  width: min(760px, calc(100% - 48px));
+  width: min(790px, calc(100% - 48px));
   margin: 0 auto;
 }
 
@@ -706,7 +709,7 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
 .quick-prompts button:hover { border-color: #c7ccef; background: #fbfbff; }
 
 .home-composer {
-  width: min(760px, calc(100% - 48px));
+  width: min(790px, calc(100% - 48px));
   margin: 0 auto;
 }
 .composer-dock {
@@ -716,7 +719,7 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
   gap: 10px;
 }
 .composer-dock .chat-variable-bar {
-  width: min(760px, calc(100% - 48px));
+  width: min(790px, calc(100% - 48px));
   margin: 0 auto;
   border: 1px solid #eef0f5;
   border-radius: 14px;
@@ -5260,6 +5263,15 @@ body.dark .runtime-status {
 body.dark .column-header,
 body.dark .stage-header {
   background: rgba(24, 24, 24, .94);
+}
+body.dark .sidebar-user {
+  border-color: transparent;
+  background: transparent;
+}
+body.dark .sidebar-user:hover,
+body.dark .sidebar-user.is-open {
+  border-color: transparent;
+  background: #303030;
 }
 body.dark .sidebar-brand strong,
 body.dark .welcome-panel h1,

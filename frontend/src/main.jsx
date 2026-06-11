@@ -2532,7 +2532,7 @@ function HomeView(props) {
               </button>
             </div>
           )}
-          <button className="sidebar-user" type="button" onClick={() => setAccountMenuOpen(!accountMenuOpen)}>
+          <button className={`sidebar-user ${accountMenuOpen ? 'is-open' : ''}`} type="button" onClick={() => setAccountMenuOpen(!accountMenuOpen)}>
             <UserAvatar user={me} className="account-avatar small" />
             <span className="sidebar-user-copy">
               <strong>{me?.name || me?.email || '当前用户'}</strong>
