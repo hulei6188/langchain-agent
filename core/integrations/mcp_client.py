@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
 import json
 import urllib.parse
@@ -89,11 +90,22 @@ def discover_stdio_mcp_tools(
     """
     _require_stdio_sdk()
     timeout_seconds = _normalize_timeout(timeout_seconds)
+    effective_args = _stdio_args_for_session(command, args or [], env=env)
+    if not session_key:
+        return asyncio.run(
+            _discover_stdio_mcp_tools(
+                command,
+                effective_args,
+                env=env,
+                cwd=cwd,
+                timeout_seconds=timeout_seconds,
+            )
+        )
     pool = _get_stdio_pool()
     raw_result = pool.discover_tools(
         session_key,
         command,
-        args or [],
+        effective_args,
         env=env,
         cwd=cwd,
     )
@@ -132,11 +144,24 @@ def call_stdio_mcp_tool(
     """
     _require_stdio_sdk()
     timeout_seconds = _normalize_timeout(timeout_seconds)
+    effective_args = _stdio_args_for_session(command, args or [], env=env)
+    if not session_key:
+        return asyncio.run(
+            _call_stdio_mcp_tool(
+                command,
+                effective_args,
+                tool_name,
+                arguments or {},
+                env=env,
+                cwd=cwd,
+                timeout_seconds=timeout_seconds,
+            )
+        )
     pool = _get_stdio_pool()
     raw_result = pool.call_tool(
         session_key,
         command,
-        args or [],
+        effective_args,
         tool_name,
         arguments or {},
         env=env,
@@ -517,7 +542,7 @@ def _stdio_session(
 
 
 # ── Per-session persistent stdio MCP session pool ──
-# Each (session_key, command, args) tuple gets its own long-lived MCP process
+# Each (session_key, command, args, env, cwd) tuple gets its own long-lived MCP process
 # so that browser state (Playwright pages, cookies, tabs) lives across
 # consecutive tool calls within the same chat session.
 #
@@ -526,10 +551,55 @@ def _stdio_session(
 _STDIO_POOL_IDLE_TTL = 30 * 60  # 30 minutes
 
 
-def _pool_key(session_key: str | None, command: str, args: list[str]) -> str:
+def _stdio_args_for_session(command: str, args: list[str], *, env: dict[str, str] | None = None) -> list[str]:
+    """Return process args adjusted for safe per-session browser isolation."""
+    normalized_args = [str(item) for item in (args or [])]
+    if not _is_playwright_mcp_command(command, normalized_args):
+        return normalized_args
+    if _has_playwright_profile_override(normalized_args, env):
+        return normalized_args
+    return [*normalized_args, "--isolated"]
+
+
+def _is_playwright_mcp_command(command: str, args: list[str]) -> bool:
+    tokens = [str(command or ""), *(str(item or "") for item in args)]
+    return any("@playwright/mcp" in token or "playwright-mcp" in token for token in tokens)
+
+
+def _has_playwright_profile_override(args: list[str], env: dict[str, str] | None) -> bool:
+    profile_flags = (
+        "--isolated",
+        "--persistent",
+        "--extension",
+        "--user-data-dir",
+    )
+    for arg in args:
+        normalized = str(arg or "").strip()
+        if any(normalized == flag or normalized.startswith(f"{flag}=") for flag in profile_flags):
+            return True
+    env_values = {str(key).upper(): str(value) for key, value in (env or {}).items()}
+    return any(
+        env_values.get(key)
+        for key in (
+            "PLAYWRIGHT_MCP_ISOLATED",
+            "PLAYWRIGHT_MCP_PERSISTENT",
+            "PLAYWRIGHT_MCP_EXTENSION",
+            "PLAYWRIGHT_MCP_USER_DATA_DIR",
+        )
+    )
+
+
+def _pool_key(session_key: str | None, command: str, args: list[str], env: dict | None = None, cwd: str | None = None) -> str:
     """Deterministic pool key for a session+command combination."""
     sk = session_key or "__default__"
-    return f"{sk}|{command}|{json.dumps(list(args or []), sort_keys=True)}"
+    config = {
+        "command": str(command or ""),
+        "args": list(args or []),
+        "env": {str(key): str(value) for key, value in sorted((env or {}).items())},
+        "cwd": str(cwd or ""),
+    }
+    digest = hashlib.sha256(json.dumps(config, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()[:16]
+    return f"{sk}|{digest}"
 
 
 class _PooledSession:
@@ -546,6 +616,7 @@ class _PooledSession:
         self._session = None
         self._last_used = time.monotonic()
         self._dead = False
+        self._lock = asyncio.Lock()
 
     def touch(self) -> None:
         self._last_used = time.monotonic()
@@ -553,7 +624,7 @@ class _PooledSession:
     def idle_seconds(self) -> float:
         return time.monotonic() - self._last_used
 
-    async def _start(self) -> None:
+    async def _start_locked(self) -> None:
         server_params = StdioServerParameters(
             command=self._command,
             args=self._args,
@@ -570,7 +641,7 @@ class _PooledSession:
         self.touch()
         logger.info("MCP stdio session [%s] ready", self.key)
 
-    async def _stop(self) -> None:
+    async def _stop_locked(self) -> None:
         logger.info("MCP stdio session [%s] stopping (idle %.0fs)", self.key, self.idle_seconds())
         try:
             if self._session_cm is not None:
@@ -593,48 +664,67 @@ class _PooledSession:
         self._dead = True
         logger.info("MCP stdio session [%s] stopped", self.key)
 
+    async def _stop(self) -> None:
+        async with self._lock:
+            await self._stop_locked()
+
     async def call_tool(self, tool_name: str, arguments: dict, timeout_seconds: int):
-        if self._session is None:
-            await self._start()
-        try:
-            result = await self._session.call_tool(
-                tool_name,
-                arguments=arguments,
-                read_timeout_seconds=timedelta(seconds=timeout_seconds),
-            )
-            self.touch()
-            return result
-        except BaseException:
-            logger.warning("MCP stdio session [%s] call_tool failed, marking dead", self.key, exc_info=True)
-            self._dead = True
-            raise
+        async with self._lock:
+            for attempt in range(2):
+                if self._session is None or self._dead:
+                    if self._session is not None or self._transport_cm is not None:
+                        await self._stop_locked()
+                    await self._start_locked()
+                try:
+                    result = await self._session.call_tool(
+                        tool_name,
+                        arguments=arguments,
+                        read_timeout_seconds=timedelta(seconds=timeout_seconds),
+                    )
+                    self.touch()
+                    return result
+                except BaseException:
+                    logger.warning("MCP stdio session [%s] call_tool failed", self.key, exc_info=True)
+                    self._dead = True
+                    if attempt == 0:
+                        await self._stop_locked()
+                        continue
+                    raise
 
     async def list_tools(self):
-        if self._session is None:
-            await self._start()
-        try:
-            result = await self._session.list_tools()
-            self.touch()
-            return result
-        except BaseException:
-            logger.warning("MCP stdio session [%s] list_tools failed, marking dead", self.key, exc_info=True)
-            self._dead = True
-            raise
+        async with self._lock:
+            for attempt in range(2):
+                if self._session is None or self._dead:
+                    if self._session is not None or self._transport_cm is not None:
+                        await self._stop_locked()
+                    await self._start_locked()
+                try:
+                    result = await self._session.list_tools()
+                    self.touch()
+                    return result
+                except BaseException:
+                    logger.warning("MCP stdio session [%s] list_tools failed", self.key, exc_info=True)
+                    self._dead = True
+                    if attempt == 0:
+                        await self._stop_locked()
+                        continue
+                    raise
 
 
 class _StdioSessionPool:
     """Per-session-key pool of persistent stdio MCP sessions.
 
-    Single background event-loop thread; asyncio.Lock for internal
-    concurrency; threading.Lock for the sync public API.
+    Single background event-loop thread; per-session asyncio locks serialize
+    access to each ClientSession, and threading.Lock protects the sync map.
     """
 
     def __init__(self):
         self._sync_lock = threading.Lock()
-        self._async_lock = asyncio.Lock()
         self._sessions: dict[str, _PooledSession] = {}
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(target=self._run_loop, name="mcp-stdio-pool", daemon=True)
+        self._cleanup_future = None
+        self._closed = False
         self._thread.start()
         atexit.register(self.shutdown)
         # Schedule periodic idle cleanup (runs every 120s on the background loop)
@@ -647,22 +737,32 @@ class _StdioSessionPool:
 
     def _schedule_cleanup(self) -> None:
         """Kick off the first cleanup cycle once the loop is running."""
-        asyncio.run_coroutine_threadsafe(self._cleanup_loop(), self._loop)
+        self._cleanup_future = asyncio.run_coroutine_threadsafe(self._cleanup_loop(), self._loop)
 
     async def _cleanup_loop(self) -> None:
         """Periodically reap idle sessions every 120 seconds."""
-        while True:
+        while not self._closed:
             await asyncio.sleep(120)
             try:
-                removed = self.cleanup_idle()
+                removed = await self._cleanup_idle_async()
                 if removed:
                     logger.info("MCP stdio pool cleanup: reaped %d idle sessions (TTL=%ds)", removed, _STDIO_POOL_IDLE_TTL)
+            except asyncio.CancelledError:
+                break
             except BaseException:
                 logger.warning("MCP stdio pool cleanup error", exc_info=True)
 
     # ── sync helpers ──
 
     def _run_coroutine(self, coro):
+        if threading.current_thread() is self._thread:
+            if inspect.iscoroutine(coro):
+                coro.close()
+            raise MCPClientError("Cannot synchronously wait for the MCP stdio pool loop from its own thread")
+        if not self._loop.is_running():
+            if inspect.iscoroutine(coro):
+                coro.close()
+            raise MCPClientError("MCP stdio session pool loop is not running")
         future = asyncio.run_coroutine_threadsafe(coro, self._loop)
         return future.result()
 
@@ -676,8 +776,10 @@ class _StdioSessionPool:
         env: dict | None,
         cwd: str | None,
     ) -> _PooledSession:
-        key = _pool_key(session_key, command, args)
+        key = _pool_key(session_key, command, args, env=env, cwd=cwd)
         with self._sync_lock:
+            if self._closed:
+                raise MCPClientError("MCP stdio session pool is shut down")
             existing = self._sessions.get(key)
             if existing is not None and not existing._dead:
                 existing.touch()
@@ -685,6 +787,7 @@ class _StdioSessionPool:
                 return existing
             if existing is not None and existing._dead:
                 logger.info("MCP stdio session [%s] was dead, replacing", key)
+                self._sessions.pop(key, None)
                 self._run_coroutine(existing._stop())
             session = _PooledSession(key, command, args, env, cwd)
             self._sessions[key] = session
@@ -711,7 +814,7 @@ class _StdioSessionPool:
         except BaseException:
             # If retry also failed, remove from pool
             with self._sync_lock:
-                removed = self._sessions.pop(session.key, None)
+                removed = self._sessions.pop(session.key, None) if self._sessions.get(session.key) is session else None
             if removed is not None:
                 logger.error("MCP stdio session [%s] removed after unrecoverable error", session.key)
                 self._run_coroutine(removed._stop())
@@ -731,7 +834,7 @@ class _StdioSessionPool:
             return self._run_coroutine(self._discover_with_retry(session))
         except BaseException:
             with self._sync_lock:
-                removed = self._sessions.pop(session.key, None)
+                removed = self._sessions.pop(session.key, None) if self._sessions.get(session.key) is session else None
             if removed is not None:
                 logger.error("MCP stdio session [%s] removed after unrecoverable error", session.key)
                 self._run_coroutine(removed._stop())
@@ -740,45 +843,46 @@ class _StdioSessionPool:
     # ── async internals (run on background loop) ──
 
     async def _call_tool_with_retry(self, session, tool_name, arguments, timeout_seconds):
-        try:
-            return await session.call_tool(tool_name, arguments, timeout_seconds)
-        except BaseException:
-            logger.info("MCP stdio session [%s] died during call_tool, recreating...", session.key)
-            await session._stop()
-            await session._start()
-            logger.info("MCP stdio session [%s] recreated, retrying call_tool", session.key)
-            return await session.call_tool(tool_name, arguments, timeout_seconds)
+        return await session.call_tool(tool_name, arguments, timeout_seconds)
 
     async def _discover_with_retry(self, session):
-        try:
-            return await session.list_tools()
-        except BaseException:
-            logger.info("MCP stdio session [%s] died during list_tools, recreating...", session.key)
-            await session._stop()
-            await session._start()
-            logger.info("MCP stdio session [%s] recreated, retrying list_tools", session.key)
-            return await session.list_tools()
+        return await session.list_tools()
 
     # ── lifecycle ──
 
     def cleanup_idle(self) -> int:
         """Reap sessions idle longer than TTL. Returns number removed."""
+        return self._run_coroutine(self._cleanup_idle_async())
+
+    async def _cleanup_idle_async(self) -> int:
         with self._sync_lock:
             stale = [k for k, s in self._sessions.items() if s.idle_seconds() > _STDIO_POOL_IDLE_TTL]
         removed = 0
         for key in stale:
             with self._sync_lock:
-                session = self._sessions.pop(key, None)
+                session = self._sessions.get(key)
+                if session is None or session.idle_seconds() <= _STDIO_POOL_IDLE_TTL:
+                    session = None
+                else:
+                    self._sessions.pop(key, None)
             if session is not None:
                 logger.info("MCP stdio session [%s] idle %.0fs > TTL, reaping", key, session.idle_seconds())
-                self._run_coroutine(session._stop())
+                await session._stop()
                 removed += 1
         return removed
 
     def shutdown(self) -> None:
         with self._sync_lock:
+            if self._closed:
+                return
+            self._closed = True
             sessions = list(self._sessions.values())
             self._sessions.clear()
+        if self._cleanup_future is not None:
+            self._cleanup_future.cancel()
+            self._cleanup_future = None
+        if not self._loop.is_running():
+            return
         if sessions:
             logger.info("MCP stdio pool shutting down %d sessions", len(sessions))
             for s in sessions:
@@ -790,6 +894,8 @@ class _StdioSessionPool:
             self._loop.call_soon_threadsafe(self._loop.stop)
         except BaseException:
             pass
+        if threading.current_thread() is not self._thread:
+            self._thread.join(timeout=2)
         logger.info("MCP stdio session pool shut down")
 
     @property
