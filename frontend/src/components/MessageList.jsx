@@ -240,13 +240,13 @@ function ReasoningTimelineItem({ item, expanded = false, onToggle }) {
     const rawInput = item.rawInput || item.inputRaw || '';
     const rawResult = item.rawResult || item.resultRaw || '';
     const isSearch = item.type === 'search';
-    const icon = isSearch
-      ? <Search size={14} />
-      : item.status === 'error'
+    const icon = item.status === 'running'
+      ? <Loader2 size={14} />
+      : isSearch
+        ? <Search size={14} />
+        : item.status === 'error'
         ? <AlertCircle size={14} />
-        : item.status === 'running'
-          ? <Loader2 size={14} />
-          : <Wrench size={14} />;
+        : <Wrench size={14} />;
     const statusIcon = item.status === 'success'
       ? <CheckCircle2 size={12} />
       : item.status === 'error'

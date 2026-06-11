@@ -7477,26 +7477,39 @@ function appendToolTimelineItem(message, eventData, eventType = 'tool_call') {
   const item = formatToolTimelineLabel(eventData, eventType);
   if (!item) return message;
   const timeline = Array.isArray(message?.reasoningTimeline) ? [...message.reasoningTimeline] : [];
-  const toolCallId = item.toolCallId || '';
-  if (toolCallId) {
-    const existingIndex = timeline.findIndex((entry) => entry?.toolCallId === toolCallId);
-    if (existingIndex >= 0) {
-      const existing = timeline[existingIndex];
-      timeline[existingIndex] = {
-        ...existing,
-        ...item,
-        id: existing.id || item.id,
-        inputLabel: item.inputLabel || existing.inputLabel || '参数',
-        inputPreview: item.inputPreview || existing.inputPreview || '',
-        rawInput: item.rawInput || existing.rawInput || '',
-        rawResult: item.rawResult || existing.rawResult || '',
-      };
-      return { ...message, reasoningTimeline: timeline };
-    }
+  const existingIndex = findToolTimelineMergeIndex(timeline, item);
+  if (existingIndex >= 0) {
+    const existing = timeline[existingIndex];
+    timeline[existingIndex] = {
+      ...existing,
+      ...item,
+      id: existing.id || item.id,
+      inputLabel: item.inputLabel || existing.inputLabel || '参数',
+      inputPreview: item.inputPreview || existing.inputPreview || '',
+      rawInput: item.rawInput || existing.rawInput || '',
+      rawResult: item.rawResult || existing.rawResult || '',
+    };
+    return { ...message, reasoningTimeline: timeline };
   }
   const uniqueItem = ensureUniqueTimelineItemId(item, timeline);
   timeline.push(uniqueItem);
   return { ...message, reasoningTimeline: timeline };
+}
+
+function findToolTimelineMergeIndex(timeline, item) {
+  const toolCallId = item.toolCallId || '';
+  if (toolCallId) {
+    return timeline.findIndex((entry) => entry?.toolCallId === toolCallId);
+  }
+  const toolRunKey = item.toolRunKey || '';
+  if (!toolRunKey) return -1;
+  for (let index = timeline.length - 1; index >= 0; index -= 1) {
+    const entry = timeline[index];
+    if (entry?.toolRunKey === toolRunKey && entry?.status === 'running') {
+      return index;
+    }
+  }
+  return -1;
 }
 
 function ensureUniqueTimelineItemId(item, timeline) {
@@ -7526,11 +7539,19 @@ function formatToolTimelineLabel(eventData = {}, eventType = 'tool_call') {
     const provider = eventData.provider ? String(eventData.provider) : '';
     const query = eventData.query ? `关键词：${String(eventData.query)}` : '';
     const summary = searchStatusSummary(eventData);
+    const toolCallId = eventData.tool_call_id || eventData.call_id || '';
+    const toolRunKey = timelineToolRunKey({
+      toolCallId,
+      toolType: 'builtin_search',
+      toolName: 'web_search',
+      rawInput: eventData.query || '',
+    });
     return {
       id: `search-${Date.now()}`,
       type: 'search',
       status,
-      toolCallId: eventData.tool_call_id || eventData.call_id || '',
+      toolCallId,
+      toolRunKey,
       title,
       meta: [provider, query].filter(Boolean).join(' · '),
       latency: formatTimelineLatency(eventData.latency_ms),
@@ -7547,6 +7568,7 @@ function formatToolTimelineLabel(eventData = {}, eventType = 'tool_call') {
   const rawInput = eventData.input_preview || '';
   const rawResult = eventData.result_preview || eventData.error || eventData.error_code || '';
   const inputSummary = summarizeToolInput(rawInput);
+  const toolRunKey = timelineToolRunKey({ toolCallId, toolType, toolName, rawInput });
   const title = status === 'running'
     ? `正在调用 ${toolName}`
     : isSearchTool
@@ -7557,6 +7579,7 @@ function formatToolTimelineLabel(eventData = {}, eventType = 'tool_call') {
     type: isSearchTool ? 'search' : 'tool',
     status,
     toolCallId,
+    toolRunKey,
     title,
     meta: [toolType, status === 'error' ? '失败' : status === 'running' ? '运行中' : '完成'].filter(Boolean).join(' · '),
     latency: formatTimelineLatency(eventData.latency_ms),
@@ -7566,6 +7589,26 @@ function formatToolTimelineLabel(eventData = {}, eventType = 'tool_call') {
     rawInput,
     rawResult,
   };
+}
+
+function timelineToolRunKey({ toolCallId = '', toolType = 'tool', toolName = 'tool', rawInput = '' } = {}) {
+  if (toolCallId) return `call:${toolCallId}`;
+  return [
+    'fallback',
+    String(toolType || 'tool'),
+    String(toolName || 'tool'),
+    normalizeToolRunInput(rawInput),
+  ].join(':');
+}
+
+function normalizeToolRunInput(value) {
+  const data = parseJsonPreview(value);
+  if (data && typeof data === 'object' && !Array.isArray(data)) {
+    const query = findFirstString(data, ['query', 'q', 'keyword', 'keywords', 'search', 'text', 'input']);
+    if (query) return compactTimelineText(query, 160);
+    return compactTimelineText(JSON.stringify(data), 180);
+  }
+  return compactTimelineText(value || '', 180);
 }
 
 function searchStatusSummary(eventData = {}) {
