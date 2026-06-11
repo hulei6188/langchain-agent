@@ -5,18 +5,12 @@ import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 import 'katex/dist/katex.min.css';
 import { AlertCircle, Brain, CheckCircle2, Clipboard, FileText, Loader2, Search, ThumbsDown, ThumbsUp, Wrench } from 'lucide-react';
-import { AgentAvatar } from './AgentAvatar.jsx';
 
-export function MessageList({ messages, feedbackByMessage = {}, submitFeedback = () => {}, avatar = 'AI' }) {
+export function MessageList({ messages, feedbackByMessage = {}, submitFeedback = () => {} }) {
   return (
     <>
       {messages.map((message, index) => (
         <div key={`${message.role}-${index}-${message.id || ''}`} className={`message ${message.role}`}>
-          {message.role === 'user' ? (
-            <span>我</span>
-          ) : (
-            <AgentAvatar value={avatar} />
-          )}
           <div className="message-body">
             {message.role === 'assistant' ? (
               <div className={message.error ? 'message-error' : ''}>
