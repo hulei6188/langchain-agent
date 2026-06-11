@@ -1,4 +1,4 @@
-import React, { useRef, useState, useEffect } from 'react';
+import React, { useRef, useState, useEffect, useLayoutEffect } from 'react';
 import {
   Square,
   SquarePen,
@@ -206,6 +206,9 @@ function ChatHomeV2({
   uploadingAttachment,
   updateChatVariable,
 }) {
+  const chatHomeRef = useRef(null);
+  const conversationRef = useRef(null);
+  const composerDockRef = useRef(null);
   const currentModel = activeAgent?.user_model_config || activeAgent?.model_config || null;
   const conversationStarted = Boolean(activeSessionId) || messages.some((message) => message.role === 'user');
   const [welcomeTitle, setWelcomeTitle] = useState(() => randomWelcomeTitle());
@@ -230,9 +233,45 @@ function ChatHomeV2({
     }
   }, [activeAgent?.id, conversationStarted]);
 
+  useLayoutEffect(() => {
+    if (!conversationStarted || messages.length === 0) return undefined;
+    const conversation = conversationRef.current;
+    if (!conversation) return undefined;
+
+    const scrollToBottom = () => {
+      conversation.scrollTop = conversation.scrollHeight;
+    };
+
+    scrollToBottom();
+    const frame = window.requestAnimationFrame(scrollToBottom);
+    return () => window.cancelAnimationFrame(frame);
+  }, [activeSessionId, conversationStarted, messages.length]);
+
+  useLayoutEffect(() => {
+    if (!conversationStarted) return undefined;
+    const chatHome = chatHomeRef.current;
+    const composerDock = composerDockRef.current;
+    if (!chatHome || !composerDock) return undefined;
+
+    const updateComposerHeight = () => {
+      chatHome.style.setProperty('--composer-dock-height', `${Math.ceil(composerDock.getBoundingClientRect().height)}px`);
+    };
+
+    updateComposerHeight();
+    const frame = window.requestAnimationFrame(updateComposerHeight);
+    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(updateComposerHeight);
+    observer?.observe(composerDock);
+
+    return () => {
+      window.cancelAnimationFrame(frame);
+      observer?.disconnect();
+      chatHome.style.removeProperty('--composer-dock-height');
+    };
+  }, [conversationStarted, hasChatAgent]);
+
   return (
-    <div className={`chat-home ${conversationStarted ? 'has-conversation' : 'is-empty'}`}>
-      <div className="conversation">
+    <div ref={chatHomeRef} className={`chat-home ${conversationStarted ? 'has-conversation' : 'is-empty'}`}>
+      <div className="conversation" ref={conversationRef}>
         {!hasChatAgent ? (
           <section className="welcome-panel">
             <AgentAvatar value="AI" className="welcome-avatar" />
@@ -261,11 +300,11 @@ function ChatHomeV2({
           />
         )}
       </div>
-      {(agentForm.variables || []).length > 0 && (
-        <VariableBar variables={agentForm.variables} values={chatVariables} onChange={updateChatVariable} />
-      )}
       {hasChatAgent && (
-        <div className="composer-dock">
+        <div className="composer-dock" ref={composerDockRef}>
+          {(agentForm.variables || []).length > 0 && (
+            <VariableBar variables={agentForm.variables} values={chatVariables} onChange={updateChatVariable} />
+          )}
           <ChatComposer
             className="home-composer"
             value={homePrompt}
