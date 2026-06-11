@@ -1842,6 +1842,7 @@ def _execute_workflow_thread(db: Session, params: dict, q: queue.Queue) -> None:
         if _tracked_run_id is not None:
             _append_run_event(_tracked_run_id, sse_str)
     answer = ""
+    provisional_answer = ""
     sources: list[dict] = []
     reasoning = ""
     reasoning_started_at: float | None = None
@@ -1874,12 +1875,29 @@ def _execute_workflow_thread(db: Session, params: dict, q: queue.Queue) -> None:
                     reasoning_duration_ms = int((time.perf_counter() - reasoning_started_at) * 1000)
                 answer += event.get("content", "")
                 _emit("token", {"content": event.get("content", "")})
+            elif event["event"] == "provisional_token":
+                content = event.get("content", "")
+                if reasoning_started_at is not None and reasoning_duration_ms is None:
+                    reasoning_duration_ms = int((time.perf_counter() - reasoning_started_at) * 1000)
+                provisional_answer += content
+                _emit("provisional_token", {"content": content})
             elif event["event"] == "reasoning_token":
                 content = event.get("content", "")
                 if reasoning_started_at is None:
                     reasoning_started_at = time.perf_counter()
                 reasoning += content
                 _emit("reasoning_token", {"content": content})
+            elif event["event"] == "provisional_clear":
+                provisional_answer = ""
+                if not reasoning:
+                    reasoning_started_at = None
+                    reasoning_duration_ms = None
+                _emit("provisional_clear", event.get("data", {}) or {})
+            elif event["event"] == "provisional_commit":
+                if provisional_answer:
+                    answer += provisional_answer
+                provisional_answer = ""
+                _emit("provisional_commit", event.get("data", {}) or {})
             elif event["event"] in {
                 "tool_call_start",
                 "tool_call_result",
@@ -1909,11 +1927,13 @@ def _execute_workflow_thread(db: Session, params: dict, q: queue.Queue) -> None:
                 run = db.get(Run, event["run_id"])
                 if reasoning_started_at is not None and reasoning_duration_ms is None:
                     reasoning_duration_ms = int((time.perf_counter() - reasoning_started_at) * 1000)
+                cancel_answer = answer + provisional_answer
+                cancel_reasoning = reasoning
                 assistant = Message(
                     session_id=chat_session.id,
                     role="assistant",
-                    content=answer,
-                    reasoning=reasoning,
+                    content=cancel_answer,
+                    reasoning=cancel_reasoning,
                     reasoning_duration_ms=reasoning_duration_ms,
                     sources=sources,
                     meta={"cancelled": True},
@@ -1926,12 +1946,12 @@ def _execute_workflow_thread(db: Session, params: dict, q: queue.Queue) -> None:
                     "session_id": chat_session.id,
                     "message_id": assistant.id,
                     "run_id": event["run_id"],
-                    "content": answer,
+                    "content": cancel_answer,
                 })
                 return
             elif event["event"] == "complete":
                 run = event["run"]
-                answer = event["answer"]
+                answer = event["answer"] or answer + provisional_answer
                 sources = event["sources"]
                 used_tools = any(
                     (step.get("node_type") == "Tool")
@@ -1978,15 +1998,17 @@ def _execute_workflow_thread(db: Session, params: dict, q: queue.Queue) -> None:
         })
     except _CancelledError:
         # Workflow was cancelled — run status already set by run_events()
-        if not assistant_saved and answer:
+        partial_answer = answer + provisional_answer
+        partial_reasoning = reasoning
+        if not assistant_saved and partial_answer:
             try:
                 if reasoning_started_at is not None and reasoning_duration_ms is None:
                     reasoning_duration_ms = int((time.perf_counter() - reasoning_started_at) * 1000)
                 assistant = Message(
                     session_id=chat_session.id,
                     role="assistant",
-                    content=answer,
-                    reasoning=reasoning,
+                    content=partial_answer,
+                    reasoning=partial_reasoning,
                     reasoning_duration_ms=reasoning_duration_ms,
                     sources=sources,
                     meta={"cancelled": True, "partial": True},
@@ -1998,7 +2020,7 @@ def _execute_workflow_thread(db: Session, params: dict, q: queue.Queue) -> None:
         _emit("cancelled", {
             "session_id": chat_session.id,
             "run_id": run.id if run else (_tracked_run_id or None),
-            "content": answer,
+            "content": partial_answer,
         })
     except Exception as exc:
         # Resolve run if we have tracked_run_id but run is None
@@ -2016,15 +2038,17 @@ def _execute_workflow_thread(db: Session, params: dict, q: queue.Queue) -> None:
         logger.exception("Agent chat stream failed")
         _emit("error", safe_stream_error(exc))
         # Safety net: persist partial answer
-        if not assistant_saved and answer:
+        partial_answer = answer + provisional_answer
+        partial_reasoning = reasoning
+        if not assistant_saved and partial_answer:
             try:
                 if reasoning_started_at is not None and reasoning_duration_ms is None:
                     reasoning_duration_ms = int((time.perf_counter() - reasoning_started_at) * 1000)
                 assistant = Message(
                     session_id=chat_session.id,
                     role="assistant",
-                    content=answer,
-                    reasoning=reasoning,
+                    content=partial_answer,
+                    reasoning=partial_reasoning,
                     reasoning_duration_ms=reasoning_duration_ms,
                     sources=sources,
                     meta={"cancelled": True, "partial": True},

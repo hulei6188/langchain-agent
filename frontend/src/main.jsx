@@ -1663,6 +1663,8 @@ function App() {
             reasoningFinishedAt: last.reasoningStartedAt && !last.reasoningFinishedAt ? Date.now() : last.reasoningFinishedAt,
             content: data.content || last.content || '',
             meta: { ...(last.meta || {}), cancelled: true },
+            _provisionalContent: undefined,
+            _provisionalReasoning: undefined,
           };
           return next;
         });
@@ -1720,6 +1722,8 @@ function App() {
             content: finalContent,
             meta: { ...(last.meta || {}), is_intermediate: false },
             _intermediateContent: undefined,
+            _provisionalContent: undefined,
+            _provisionalReasoning: undefined,
           };
           return next;
         });
@@ -1737,6 +1741,46 @@ function App() {
           reasoningPending: false,
           reasoningFinishedAt: last?.reasoningPending && last?.reasoningStartedAt && !last?.reasoningFinishedAt ? Date.now() : last?.reasoningFinishedAt,
           content: (last.content || '') + data.content,
+        };
+        return next;
+      });
+    }
+    if (event === 'provisional_token') {
+      setMessages((items) => {
+        const { next, last, index } = ensureAssistantTail(items);
+        const content = data.content || '';
+        next[index] = {
+          ...last,
+          pending: false,
+          reasoningPending: false,
+          reasoningFinishedAt: last?.reasoningPending && last?.reasoningStartedAt && !last?.reasoningFinishedAt ? Date.now() : last?.reasoningFinishedAt,
+          content: (last.content || '') + content,
+          _provisionalContent: (last._provisionalContent || '') + content,
+        };
+        return next;
+      });
+    }
+    if (event === 'provisional_clear') {
+      setMessages((items) => {
+        const { next, last, index } = ensureAssistantTail(items);
+        const provisionalContent = last._provisionalContent || '';
+        next[index] = {
+          ...last,
+          pending: true,
+          content: removeTextSuffix(last.content || '', provisionalContent),
+          _provisionalContent: undefined,
+          _provisionalReasoning: undefined,
+        };
+        return next;
+      });
+    }
+    if (event === 'provisional_commit') {
+      setMessages((items) => {
+        const { next, last, index } = ensureAssistantTail(items);
+        next[index] = {
+          ...last,
+          _provisionalContent: undefined,
+          _provisionalReasoning: undefined,
         };
         return next;
       });
@@ -7186,6 +7230,43 @@ function sampleValueForSchema(spec, key = '') {
   if (/(phone|mobile|tel|电话)/i.test(hint)) return '13800138000';
   if (spec.format === 'uri' || spec.format === 'url') return 'https://example.com';
   return 'example';
+}
+
+function removeTextSuffix(value, suffix) {
+  const text = String(value || '');
+  const tail = String(suffix || '');
+  return tail && text.endsWith(tail) ? text.slice(0, -tail.length) : text;
+}
+
+function removeReasoningTimelineSuffix(timeline, suffix) {
+  let remaining = String(suffix || '');
+  if (!remaining) return Array.isArray(timeline) ? timeline : [];
+  const next = Array.isArray(timeline) ? [...timeline] : [];
+  for (let index = next.length - 1; index >= 0 && remaining; index -= 1) {
+    const item = next[index];
+    if (item?.type !== 'reasoning') continue;
+    const content = String(item.content || '');
+    if (!content) {
+      next.splice(index, 1);
+      continue;
+    }
+    if (remaining.endsWith(content)) {
+      remaining = remaining.slice(0, -content.length);
+      next.splice(index, 1);
+      continue;
+    }
+    if (content.endsWith(remaining)) {
+      const kept = content.slice(0, content.length - remaining.length);
+      if (kept) {
+        next[index] = { ...item, content: kept };
+      } else {
+        next.splice(index, 1);
+      }
+      remaining = '';
+    }
+    break;
+  }
+  return next;
 }
 
 function appendReasoningTimelineItem(message, chunk) {
