@@ -767,23 +767,15 @@ class WorkflowRunner:
                 context,
                 tools=tool_schemas,
                 stream_content=True,
-                emit_deferred_content=False,
+                provisional_stream=True,
             )
             response = _coerce_dsml_tool_calls(response, stage=f"tool node stream round {_round}")
             if response.content and not response.tool_calls:
-                final = yield from self._stream_chat_response(
-                    agent,
-                    messages,
-                    context,
-                    stream_content=True,
-                )
-                final_content = final.content or response.content
-                final_reasoning = final.reasoning_content or response.reasoning_content or ""
                 return {
-                    "draft": strip_or_block_leaked_tool_markup(final_content),
-                    "draft_streamed": bool(final.content),
-                    "draft_reasoning": final_reasoning,
-                    "draft_reasoning_streamed": bool(final_reasoning and context.get("thinking_enabled")),
+                    "draft": strip_or_block_leaked_tool_markup(response.content),
+                    "draft_streamed": True,
+                    "draft_reasoning": response.reasoning_content or "",
+                    "draft_reasoning_streamed": bool(response.reasoning_content and context.get("thinking_enabled")),
                     "web_sources": web_sources,
                     "search_status": search_status,
                     "tool_outputs": [],
@@ -918,7 +910,7 @@ class WorkflowRunner:
         *,
         tools: list[dict] | None = None,
         stream_content: bool = False,
-        emit_deferred_content: bool = True,
+        provisional_stream: bool = False,
     ):
         content_chunks: list[str] = []
         reasoning_chunks: list[str] = []
@@ -928,10 +920,13 @@ class WorkflowRunner:
         pending_live_content = ""
         suppress_content_stream = False
         emitted_live_content = False
+        provisional_active = bool(provisional_stream and tools)
+        emitted_provisional_content = False
+        cleared_provisional = False
         # With tools available, models may emit a short natural-language preface
-        # before deciding to call a tool. Do not stream that preface live because
-        # the UI cannot retract it once the tool call arrives.
-        should_stream_content_live = stream_content and not tools
+        # before deciding to call a tool. Stream it as provisional content so the
+        # UI can retract it if a tool call arrives later in the same response.
+        should_stream_content_live = stream_content and (not tools or provisional_active)
         for chunk in self.provider.chat_stream_events(
             messages,
             model=agent.model,
@@ -946,7 +941,8 @@ class WorkflowRunner:
                 if not context.get("thinking_enabled"):
                     continue
                 reasoning_chunks.append(chunk.content)
-                yield {"event": "reasoning_token", "content": chunk.content}
+                if stream_content and not saw_tool_call:
+                    yield {"event": "reasoning_token", "content": chunk.content}
             elif chunk.type == "content":
                 content_chunks.append(chunk.content)
                 if should_stream_content_live and not saw_tool_call:
@@ -957,11 +953,21 @@ class WorkflowRunner:
                     )
                     for safe_content in safe_chunks:
                         emitted_live_content = True
-                        yield {"event": "token", "content": safe_content}
+                        if provisional_active:
+                            emitted_provisional_content = True
+                            yield {"event": "provisional_token", "content": safe_content}
+                        else:
+                            yield {"event": "token", "content": safe_content}
             elif chunk.type == "tool_call_delta":
+                if provisional_active and emitted_provisional_content and not cleared_provisional:
+                    yield {"event": "provisional_clear", "data": {"content": emitted_provisional_content}}
+                    cleared_provisional = True
                 saw_tool_call = True
                 self._merge_stream_tool_call_deltas(tool_call_builders, chunk.tool_calls or [])
             elif chunk.type == "tool_calls":
+                if provisional_active and emitted_provisional_content and not cleared_provisional:
+                    yield {"event": "provisional_clear", "data": {"content": emitted_provisional_content}}
+                    cleared_provisional = True
                 saw_tool_call = True
                 final_tool_calls = chunk.tool_calls or []
         self._raise_if_cancelled()
@@ -992,15 +998,27 @@ class WorkflowRunner:
             logger.warning("Blocked incomplete tool call markup in streamed content; full content:\n%s", joined_content)
             content_for_response = DSML_TOOL_MARKUP_ERROR
 
+        if final_tool_calls and provisional_active and emitted_provisional_content and not cleared_provisional:
+            yield {"event": "provisional_clear", "data": {"content": emitted_provisional_content}}
+            cleared_provisional = True
+
         if stream_content and not final_tool_calls and content_for_response:
             if should_stream_content_live:
                 if suppress_content_stream:
                     if content_for_response == DSML_TOOL_MARKUP_ERROR or not emitted_live_content:
-                        yield {"event": "token", "content": content_for_response}
+                        if provisional_active:
+                            emitted_provisional_content = True
+                            yield {"event": "provisional_token", "content": content_for_response}
+                        else:
+                            yield {"event": "token", "content": content_for_response}
                 elif not _contains_leaked_tool_markup(joined_content) and pending_live_content:
-                    yield {"event": "token", "content": pending_live_content}
-            elif tools and emit_deferred_content:
-                yield {"event": "token", "content": content_for_response}
+                    if provisional_active:
+                        emitted_provisional_content = True
+                        yield {"event": "provisional_token", "content": pending_live_content}
+                    else:
+                        yield {"event": "token", "content": pending_live_content}
+            if provisional_active and emitted_provisional_content:
+                yield {"event": "provisional_commit", "data": {"content": emitted_provisional_content}}
         return ChatResponse(
             content=content_for_response or None,
             reasoning_content="".join(reasoning_chunks),
