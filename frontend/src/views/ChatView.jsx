@@ -113,6 +113,7 @@ export function ChatView({
   sources,
   submitFeedback,
   ragRuntime,
+  routeRestoring,
   webSearchRuntime,
   thinkingEnabled,
   setThinkingEnabled,
@@ -121,7 +122,7 @@ export function ChatView({
   updateChatVariable,
 }) {
   const [agentMenuOpen, setAgentMenuOpen] = useState(false);
-  const activeAgentName = activeSummary?.name || activeAgent?.name || agentForm.name || '选择智能体';
+  const activeAgentName = routeRestoring ? '' : activeSummary?.name || activeAgent?.name || agentForm.name || '选择智能体';
   return (
     <>
       <header className="chat-topbar">
@@ -129,12 +130,15 @@ export function ChatView({
           <button
             type="button"
             className="agent-trigger"
-            onClick={() => setAgentMenuOpen(!agentMenuOpen)}
+            disabled={routeRestoring}
+            onClick={() => {
+              if (!routeRestoring) setAgentMenuOpen(!agentMenuOpen);
+            }}
           >
             <span>{activeAgentName}</span>
-            <ChevronDown size={14} />
+            {!routeRestoring && <ChevronDown size={14} />}
           </button>
-          {agentMenuOpen && (
+          {!routeRestoring && agentMenuOpen && (
             <>
               <div className="agent-menu-backdrop" onClick={() => setAgentMenuOpen(false)} />
               <div className="agent-menu">
@@ -146,7 +150,10 @@ export function ChatView({
                       key={agent.id}
                       type="button"
                       className={agent.id === activeAgentId ? 'active' : ''}
-                      onClick={() => { setActiveAgentId(Number(agent.id)); setAgentMenuOpen(false); }}
+                      onClick={() => {
+                        if (String(agent.id) !== String(activeAgentId || '')) setActiveAgentId(Number(agent.id));
+                        setAgentMenuOpen(false);
+                      }}
                     >
                       {agent.name}
                     </button>
@@ -158,7 +165,7 @@ export function ChatView({
           <button
             className="agent-edit-button"
             type="button"
-            disabled={!canEditActive}
+            disabled={routeRestoring || !canEditActive}
             title="编辑智能体"
             aria-label="编辑智能体"
             onClick={() => openBuilder(activeAgentId)}
@@ -198,6 +205,7 @@ export function ChatView({
         uploadChatAttachment={uploadChatAttachment}
         uploadingAttachment={uploadingAttachment}
         updateChatVariable={updateChatVariable}
+        routeRestoring={routeRestoring}
       />
     </>
   );
@@ -223,6 +231,7 @@ function ChatHomeV2({
   ragEnabled,
   setRagEnabled,
   ragRuntime,
+  routeRestoring,
   searchEnabled,
   setSearchEnabled,
   webSearchRuntime,
@@ -244,7 +253,7 @@ function ChatHomeV2({
   const previousSessionKeyRef = useRef('');
   const previousMessageCountRef = useRef(0);
   const currentModel = activeAgent?.user_model_config || activeAgent?.model_config || null;
-  const conversationStarted = Boolean(activeSessionId) || messages.some((message) => message.role === 'user');
+  const conversationStarted = !routeRestoring && (Boolean(activeSessionId) || messages.some((message) => message.role === 'user'));
   const [welcomeTitle, setWelcomeTitle] = useState(() => randomWelcomeTitle());
   const ragAvailable = ragRuntime.available;
   const effectiveRagEnabled = ragAvailable && ragEnabled;
@@ -399,9 +408,9 @@ function ChatHomeV2({
   }, [conversationStarted, hasChatAgent]);
 
   return (
-    <div ref={chatHomeRef} className={`chat-home ${conversationStarted ? 'has-conversation' : 'is-empty'}`}>
+    <div ref={chatHomeRef} className={`chat-home ${routeRestoring ? 'is-restoring' : conversationStarted ? 'has-conversation' : 'is-empty'}`}>
       <div className="conversation" ref={conversationRef}>
-        {!hasChatAgent ? (
+        {routeRestoring ? null : !hasChatAgent ? (
           <section className="welcome-panel">
             <h1>{CHAT_COPY.noAgentTitle}</h1>
             <p>{CHAT_COPY.noAgentDesc}</p>
@@ -426,7 +435,7 @@ function ChatHomeV2({
           />
         )}
       </div>
-      {hasChatAgent && (
+      {!routeRestoring && hasChatAgent && (
         <div className="composer-dock" ref={composerDockRef}>
           {(agentForm.variables || []).length > 0 && (
             <VariableBar variables={agentForm.variables} values={chatVariables} onChange={updateChatVariable} />

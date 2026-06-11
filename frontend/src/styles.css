@@ -570,6 +570,9 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.agent-trigger:disabled {
+  cursor: default;
+}
 .agent-menu-backdrop { position: fixed; inset: 0; z-index: 25; }
 .agent-menu {
   position: absolute;
@@ -669,6 +672,9 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
 .chat-home.is-empty .conversation {
   overflow: visible;
   padding: 0 24px;
+}
+.chat-home.is-restoring .conversation {
+  padding: 0;
 }
 .chat-home.is-empty .composer-dock {
   position: static;
@@ -5302,6 +5308,7 @@ body.dark .messages {
   background: #151515;
   color: #ededed;
 }
+
 body.dark .chat-sidebar {
   border-right-color: #2b2b2b;
   background: #181818;

@@ -139,11 +139,45 @@ import {
 } from './utils.js';
 
 const THEME_STORAGE_KEY = 'agentbase_theme';
+const CHAT_AGENT_QUERY_PARAM = 'agent';
+const CHAT_SESSION_QUERY_PARAM = 'session';
 const THEME_MODES = ['light', 'dark', 'system'];
 
 function initialThemeMode() {
   const stored = localStorage.getItem(THEME_STORAGE_KEY);
   return THEME_MODES.includes(stored) ? stored : 'light';
+}
+
+function sameRouteId(left, right) {
+  if (left === null || left === undefined || right === null || right === undefined) return false;
+  return String(left) === String(right);
+}
+
+function readChatRoute() {
+  if (typeof window === 'undefined') return { agentId: null, sessionId: null };
+  const params = new URLSearchParams(window.location.search);
+  return {
+    agentId: params.get(CHAT_AGENT_QUERY_PARAM) || null,
+    sessionId: params.get(CHAT_SESSION_QUERY_PARAM) || null,
+  };
+}
+
+function writeChatRoute(agentId, sessionId = null, options = {}) {
+  if (typeof window === 'undefined') return;
+  const url = new URL(window.location.href);
+  if (agentId) url.searchParams.set(CHAT_AGENT_QUERY_PARAM, String(agentId));
+  else url.searchParams.delete(CHAT_AGENT_QUERY_PARAM);
+  if (sessionId) url.searchParams.set(CHAT_SESSION_QUERY_PARAM, String(sessionId));
+  else url.searchParams.delete(CHAT_SESSION_QUERY_PARAM);
+  const nextUrl = `${url.pathname}${url.search}${url.hash}`;
+  const currentUrl = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+  if (nextUrl === currentUrl) return;
+  const method = options.mode === 'push' ? 'pushState' : 'replaceState';
+  window.history[method]({}, '', nextUrl);
+}
+
+function clearChatRoute(options = {}) {
+  writeChatRoute(null, null, options);
 }
 
 function systemPrefersDark() {
@@ -152,6 +186,7 @@ function systemPrefersDark() {
 
 function App() {
   const [token, setToken] = useState(initialAuthToken);
+  const [routeRestoring, setRouteRestoring] = useState(() => Boolean(initialAuthToken() && readChatRoute().sessionId));
   const [me, setMe] = useState(null);
   const [workspace, setWorkspace] = useState(null);
   const [agents, setAgents] = useState([]);
@@ -190,6 +225,8 @@ function App() {
   const [activeNewRunKey, setActiveNewRunKey] = useState('');
   // Per-session mutable run state (no re-render needed): { [sessionId]: { runId, controller, genId } }
   const sessionRunRef = useRef({});
+  const activeAgentIdRef = useRef(activeAgentId);
+  activeAgentIdRef.current = activeAgentId;
   // Keep a ref in sync so SSE handlers can check latest activeSessionId
   const activeSessionIdRef = useRef(activeSessionId);
   activeSessionIdRef.current = activeSessionId;
@@ -202,6 +239,7 @@ function App() {
   const newSessionPlaceholderIdRef = useRef(null);
   // Track the temp __new__ runKey so stopGeneration can find it before the real session ID arrives
   const activeNewRunKeyRef = useRef(null);
+  const pendingChatRestoreRef = useRef(readChatRoute());
   // Derived: busy only when CURRENT session is running
   const busy = activeSessionId ? !!runningBySessionId[activeSessionId]?.running : !!(activeNewRunKey && runningBySessionId[activeNewRunKey]?.running);
 
@@ -387,6 +425,7 @@ function App() {
 
   useEffect(() => {
     if (token) {
+      setRouteRestoring(Boolean(readChatRoute().sessionId));
       bootstrap().catch((err) => {
         if (isAuthError(err)) {
           logout();
@@ -394,6 +433,7 @@ function App() {
         } else {
           setError(errorMessage(err));
         }
+        setRouteRestoring(false);
       });
     }
   }, [token]);
@@ -407,9 +447,43 @@ function App() {
         } else {
           setError(errorMessage(err));
         }
+        setRouteRestoring(false);
       });
     }
   }, [activeAgentId]);
+
+  useEffect(() => {
+    if (!token) return undefined;
+    const handlePopState = () => {
+      const route = readChatRoute();
+      pendingChatRestoreRef.current = route;
+      if (route.agentId && !sameRouteId(route.agentId, activeAgentIdRef.current)) {
+        setRouteRestoring(Boolean(route.sessionId));
+        setActiveAgentId(Number(route.agentId));
+        return;
+      }
+      if (route.sessionId) {
+        if (sameRouteId(route.sessionId, activeSessionIdRef.current)) {
+          setRouteRestoring(false);
+          setView('home');
+          setActiveNav('chat');
+          return;
+        }
+        setRouteRestoring(true);
+        loadSession(route.sessionId, { openHome: true, updateUrl: false })
+          .catch((err) => {
+            setError(errorMessage(err));
+            writeChatRoute(route.agentId || activeAgentIdRef.current, null, { mode: 'replace' });
+          })
+          .finally(() => setRouteRestoring(false));
+        return;
+      }
+      setRouteRestoring(false);
+      startNewChat({ updateUrl: false });
+    };
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, [token, activeAgentId, activeSessionId, agentForm.variables, view]);
 
   useEffect(() => {
     if (activeNav !== 'chat' || !chatAgents.length) return;
@@ -517,17 +591,28 @@ function App() {
     setReviewItems(reviewList.items || []);
     setMembers(memberList.items || []);
     const publishedAgents = agentList.items.filter((item) => item.status === 'published' && item.published_version_id);
-    const fallbackAgent = publishedAgents[0] || agentList.items[0];
+    const rememberedRoute = pendingChatRestoreRef.current || readChatRoute();
+    const rememberedAgent = rememberedRoute.agentId
+      ? agentList.items.find((item) => sameRouteId(item.id, rememberedRoute.agentId))
+      : null;
+    if (rememberedRoute.agentId && !rememberedAgent) {
+      pendingChatRestoreRef.current = null;
+      clearChatRoute();
+    }
+    const fallbackAgent = rememberedAgent || publishedAgents[0] || agentList.items[0];
     if (!activeAgentId && fallbackAgent) {
       setActiveAgentId(fallbackAgent.id);
     } else if (activeAgentId && !agentList.items.some((item) => item.id === activeAgentId) && fallbackAgent) {
       setActiveAgentId(fallbackAgent.id);
+    } else if (!fallbackAgent) {
+      setRouteRestoring(false);
     }
   }
 
   function logout() {
     localStorage.removeItem(AUTH_TOKEN_KEY);
     localStorage.removeItem(LEGACY_AUTH_TOKEN_KEY);
+    clearChatRoute();
     setToken('');
     setMe(null);
     setWorkspace(null);
@@ -622,12 +707,32 @@ function App() {
     setToolDebugEvents([]);
     setFeedbackByMessage({});
     await loadMemoryProfile(agentId);
-    await loadSessions(agentId);
+    const loadedSessions = await loadSessions(agentId);
+    const rememberedRoute = pendingChatRestoreRef.current;
+    const shouldRestoreSession = rememberedRoute?.sessionId
+      && sameRouteId(rememberedRoute.agentId, agentId)
+      && loadedSessions.some((session) => sameRouteId(session.id, rememberedRoute.sessionId));
+    if (shouldRestoreSession) {
+      pendingChatRestoreRef.current = null;
+      try {
+        await loadSession(rememberedRoute.sessionId, { openHome: true, updateUrl: false });
+      } finally {
+        setRouteRestoring(false);
+      }
+    } else if (rememberedRoute?.agentId && sameRouteId(rememberedRoute.agentId, agentId)) {
+      pendingChatRestoreRef.current = null;
+      writeChatRoute(agentId, null, { mode: 'replace' });
+      setRouteRestoring(false);
+    } else {
+      setRouteRestoring(false);
+    }
   }
 
   async function loadSessions(agentId) {
     const data = await api(`/api/agents/${agentId}/sessions`, { token });
-    setSessions(data.items || []);
+    const items = data.items || [];
+    setSessions(items);
+    return items;
   }
 
   async function loadMemoryProfile(agentId = activeAgentId) {
@@ -701,6 +806,9 @@ function App() {
     const displayMessages = activeRun?.status === 'running' && cachedMessages?.length
       ? cachedMessages
       : loaded;
+    if (options.updateUrl !== false) {
+      writeChatRoute(data.session?.agent_id || activeAgentId, sessionId, { mode: options.historyMode || 'replace' });
+    }
     setActiveSessionId(sessionId);
     setActiveNewRunKey('');
     activeNewRunKeyRef.current = null;
@@ -772,7 +880,7 @@ function App() {
         // Reload session messages from DB so final assistant message
         // is properly synced (handles missed done/cancelled events).
         if (streamEnded && activeAgentId) {
-          loadSession(sessionId).catch(() => {});
+          loadSession(sessionId, { historyMode: 'replace' }).catch(() => {});
         }
       }
       if (sessionRunRef.current[sessionId]?.controller === controller) {
@@ -812,6 +920,10 @@ function App() {
     await api(`/api/sessions/${sessionId}`, { token, method: 'DELETE' });
     delete messageCacheRef.current[sessionCacheKey(sessionId)];
     delete sourcesCacheRef.current[sessionCacheKey(sessionId)];
+    const rememberedRoute = readChatRoute();
+    if (sameRouteId(rememberedRoute.sessionId, sessionId)) {
+      writeChatRoute(rememberedRoute.agentId || activeAgentId, null, { mode: 'replace' });
+    }
     if (sessionId === activeSessionId) {
       setActiveSessionId(null);
       setActiveNewRunKey('');
@@ -1382,6 +1494,11 @@ function App() {
     setChatVariables({});
     setView('home');
     setActiveNav(nextId ? 'agents' : 'chat');
+    const rememberedRoute = readChatRoute();
+    if (sameRouteId(rememberedRoute.agentId, agent.id)) {
+      if (nextId) writeChatRoute(nextId, null, { mode: 'replace' });
+      else clearChatRoute({ mode: 'replace' });
+    }
     await bootstrap();
     if (nextId) {
       await loadAgent(nextId);
@@ -1392,7 +1509,7 @@ function App() {
     }
   }
 
-  function startNewChat() {
+  function startNewChat(options = {}) {
     setActiveSessionId(null);
     setActiveNewRunKey('');
     activeNewRunKeyRef.current = null;
@@ -1410,6 +1527,9 @@ function App() {
     setThinkingEnabled(true);
     setSearchEnabled(false);
     setChatAttachments([]);
+    if (options.updateUrl !== false) {
+      writeChatRoute(activeAgentId, null, { mode: options.historyMode || 'push' });
+    }
     if (view !== 'builder') {
       setView('home');
       setActiveNav('chat');
@@ -1772,6 +1892,9 @@ function App() {
       // Replace placeholder session ID with real session ID as early as possible
       if (data.session_id && ctx?.placeholderId) {
         resolveRealSession(data.session_id);
+        if (ctx?.isNewSession && visible) {
+          writeChatRoute(activeAgentId, data.session_id, { mode: 'replace' });
+        }
         if (sessionKey?.startsWith?.('__new__') && sessionRunRef.current[sessionKey]) {
           sessionRunRef.current[data.session_id] = sessionRunRef.current[sessionKey];
           if (activeNewRunKeyRef.current === sessionKey) {
@@ -1817,6 +1940,7 @@ function App() {
       }
       if (visible) {
         if (ctx?.isNewSession && data.session_id && !activeSessionIdRef.current) {
+          writeChatRoute(activeAgentId, data.session_id, { mode: 'replace' });
           setActiveSessionId(data.session_id);
         }
       }
@@ -1870,6 +1994,7 @@ function App() {
       }
       if (visible) {
         if (ctx?.isNewSession && data.session_id && !activeSessionIdRef.current) {
+          writeChatRoute(activeAgentId, data.session_id, { mode: 'replace' });
           setActiveSessionId(data.session_id);
         }
       }
@@ -2064,6 +2189,18 @@ function App() {
     setChatVariables((items) => ({ ...items, [key]: value }));
   }
 
+  function selectChatAgent(agentId, options = {}) {
+    const nextAgentId = typeof agentId === 'string' || typeof agentId === 'number' ? Number(agentId) : null;
+    if (!nextAgentId) return;
+    if (options.updateUrl !== false) {
+      writeChatRoute(nextAgentId, null, { mode: options.historyMode || 'push' });
+    }
+    if (!sameRouteId(nextAgentId, activeAgentIdRef.current)) {
+      pendingChatRestoreRef.current = readChatRoute();
+    }
+    setActiveAgentId(nextAgentId);
+  }
+
   function openBuilder(agentId = activeAgentId) {
     const nextAgentId = typeof agentId === 'string' || typeof agentId === 'number' ? agentId : activeAgentId;
     if (nextAgentId && nextAgentId !== activeAgentId) setActiveAgentId(nextAgentId);
@@ -2182,6 +2319,7 @@ function App() {
     sendMessage,
     sendSuggestedQuestion,
     sessions,
+    selectChatAgent,
     setError,
     setActiveAgentId,
     setActiveNav,
@@ -2242,6 +2380,7 @@ function App() {
     webSearchRuntime,
     onStopGeneration: stopGeneration,
     runningBySessionId,
+    routeRestoring,
   };
 
   const builderProps = {
@@ -2351,9 +2490,11 @@ function HomeView(props) {
     requestDeleteConfirm,
     renameSessionById,
     runningBySessionId,
+    routeRestoring,
     sendMessage,
     sendSuggestedQuestion,
     sessions,
+    selectChatAgent,
     setError,
     setActiveAgentId,
     setActiveNav,
@@ -2511,7 +2652,7 @@ function HomeView(props) {
           </button>
         </div>
         <nav className="main-nav">
-          <NavButton icon={<SquarePen size={17} />} label="新建会话" active={activeNav === 'chat' && !activeSessionId} onClick={() => { setActiveNav('chat'); startNewChat(); }} />
+          <NavButton icon={<SquarePen size={17} />} label="新建会话" active={activeNav === 'chat' && !activeSessionId && !routeRestoring} onClick={() => { setActiveNav('chat'); startNewChat(); }} />
           <NavButton icon={<Bot size={17} />} label="智能体" active={activeNav === 'agents'} onClick={() => setActiveNav('agents')} />
           <NavButton icon={<Boxes size={17} />} label="市场" active={activeNav === 'market'} onClick={() => setActiveNav('market')} />
           <NavButton icon={<ServerCog size={17} />} label="我的模型" active={activeNav === 'my-models'} onClick={() => setActiveNav('my-models')} />
@@ -2556,7 +2697,7 @@ function HomeView(props) {
             <span>会话</span>
           </div>
           <div className="session-list">
-            {sessions.map((session) => {
+            {!routeRestoring && sessions.map((session) => {
               const isActiveSession = String(session.id) === String(activeSessionId || '');
               return (
                 <div key={session.id} className={`session-row ${isActiveSession ? 'active' : ''}`}>
@@ -2587,7 +2728,7 @@ function HomeView(props) {
                         onClick={() => {
                           setSessionMenuId(null);
                           setSessionMenuPosition(null);
-                          loadSession(session.id, { openHome: true }).catch((err) => console.error(err));
+                          loadSession(session.id, { openHome: true, historyMode: 'push' }).catch((err) => console.error(err));
                         }}
                       >
                         <MessageSquare size={14} />
@@ -2622,7 +2763,7 @@ function HomeView(props) {
                 </div>
               );
             })}
-            {sessions.length === 0 && <p className="sidebar-empty">还没有历史会话</p>}
+            {!routeRestoring && sessions.length === 0 && <p className="sidebar-empty">还没有历史会话</p>}
           </div>
         </div>
         <div className="sidebar-user-wrap">
@@ -2688,7 +2829,7 @@ function HomeView(props) {
             chatAgents={chatAgents}
             canEditActive={canEditActive}
             openBuilder={openBuilder}
-            setActiveAgentId={setActiveAgentId}
+            setActiveAgentId={selectChatAgent}
             activeSessionId={activeSessionId}
             agentForm={agentForm}
             busy={busy}
@@ -2716,6 +2857,7 @@ function HomeView(props) {
             uploadingAttachment={uploadingAttachment}
             updateChatVariable={updateChatVariable}
             onStopGeneration={onStopGeneration}
+            routeRestoring={routeRestoring}
           />
         )}
 
