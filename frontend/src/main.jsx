@@ -1664,7 +1664,6 @@ function App() {
             content: data.content || last.content || '',
             meta: { ...(last.meta || {}), cancelled: true },
             _provisionalContent: undefined,
-            _provisionalReasoning: undefined,
           };
           return next;
         });
@@ -1723,7 +1722,6 @@ function App() {
             meta: { ...(last.meta || {}), is_intermediate: false },
             _intermediateContent: undefined,
             _provisionalContent: undefined,
-            _provisionalReasoning: undefined,
           };
           return next;
         });
@@ -1769,7 +1767,6 @@ function App() {
           pending: true,
           content: removeTextSuffix(last.content || '', provisionalContent),
           _provisionalContent: undefined,
-          _provisionalReasoning: undefined,
         };
         return next;
       });
@@ -1780,7 +1777,6 @@ function App() {
         next[index] = {
           ...last,
           _provisionalContent: undefined,
-          _provisionalReasoning: undefined,
         };
         return next;
       });
@@ -7236,37 +7232,6 @@ function removeTextSuffix(value, suffix) {
   const text = String(value || '');
   const tail = String(suffix || '');
   return tail && text.endsWith(tail) ? text.slice(0, -tail.length) : text;
-}
-
-function removeReasoningTimelineSuffix(timeline, suffix) {
-  let remaining = String(suffix || '');
-  if (!remaining) return Array.isArray(timeline) ? timeline : [];
-  const next = Array.isArray(timeline) ? [...timeline] : [];
-  for (let index = next.length - 1; index >= 0 && remaining; index -= 1) {
-    const item = next[index];
-    if (item?.type !== 'reasoning') continue;
-    const content = String(item.content || '');
-    if (!content) {
-      next.splice(index, 1);
-      continue;
-    }
-    if (remaining.endsWith(content)) {
-      remaining = remaining.slice(0, -content.length);
-      next.splice(index, 1);
-      continue;
-    }
-    if (content.endsWith(remaining)) {
-      const kept = content.slice(0, content.length - remaining.length);
-      if (kept) {
-        next[index] = { ...item, content: kept };
-      } else {
-        next.splice(index, 1);
-      }
-      remaining = '';
-    }
-    break;
-  }
-  return next;
 }
 
 function appendReasoningTimelineItem(message, chunk) {
