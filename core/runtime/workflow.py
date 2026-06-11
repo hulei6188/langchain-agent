@@ -767,15 +767,23 @@ class WorkflowRunner:
                 context,
                 tools=tool_schemas,
                 stream_content=True,
+                emit_deferred_content=False,
             )
             response = _coerce_dsml_tool_calls(response, stage=f"tool node stream round {_round}")
-            reasoning_streamed = bool(response.reasoning_content and context.get("thinking_enabled"))
             if response.content and not response.tool_calls:
+                final = yield from self._stream_chat_response(
+                    agent,
+                    messages,
+                    context,
+                    stream_content=True,
+                )
+                final_content = final.content or response.content
+                final_reasoning = final.reasoning_content or response.reasoning_content or ""
                 return {
-                    "draft": strip_or_block_leaked_tool_markup(response.content),
-                    "draft_streamed": True,
-                    "draft_reasoning": response.reasoning_content or "",
-                    "draft_reasoning_streamed": reasoning_streamed,
+                    "draft": strip_or_block_leaked_tool_markup(final_content),
+                    "draft_streamed": bool(final.content),
+                    "draft_reasoning": final_reasoning,
+                    "draft_reasoning_streamed": bool(final_reasoning and context.get("thinking_enabled")),
                     "web_sources": web_sources,
                     "search_status": search_status,
                     "tool_outputs": [],
@@ -889,7 +897,7 @@ class WorkflowRunner:
             else:
                 break
 
-        final = yield from self._stream_chat_response(agent, messages, context, tools=tool_schemas, stream_content=True)
+        final = yield from self._stream_chat_response(agent, messages, context, stream_content=True)
         return {
             "draft": strip_or_block_leaked_tool_markup(final.content or ""),
             "draft_streamed": bool(final.content),
@@ -910,6 +918,7 @@ class WorkflowRunner:
         *,
         tools: list[dict] | None = None,
         stream_content: bool = False,
+        emit_deferred_content: bool = True,
     ):
         content_chunks: list[str] = []
         reasoning_chunks: list[str] = []
@@ -990,7 +999,7 @@ class WorkflowRunner:
                         yield {"event": "token", "content": content_for_response}
                 elif not _contains_leaked_tool_markup(joined_content) and pending_live_content:
                     yield {"event": "token", "content": pending_live_content}
-            elif tools:
+            elif tools and emit_deferred_content:
                 yield {"event": "token", "content": content_for_response}
         return ChatResponse(
             content=content_for_response or None,
