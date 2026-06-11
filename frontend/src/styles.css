@@ -4537,43 +4537,6 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
   font-size: 12px;
   word-break: break-word;
 }
-.reasoning-tool-raw-list {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-top: 4px;
-}
-.reasoning-tool-raw {
-  min-width: min(100%, 220px);
-  max-width: 100%;
-}
-.reasoning-tool-raw summary {
-  display: inline-flex;
-  align-items: center;
-  width: fit-content;
-  color: #667085;
-  font-size: 11.5px;
-  cursor: pointer;
-  user-select: none;
-}
-.reasoning-tool-raw summary:hover {
-  color: #344054;
-}
-.reasoning-tool-raw pre {
-  max-width: min(640px, 100%);
-  max-height: 220px;
-  margin: 6px 0 0;
-  padding: 9px 10px;
-  overflow: auto;
-  border: 1px solid #d0d5dd;
-  border-radius: 7px;
-  background: #f8fafc;
-  color: #344054;
-  font-size: 12px;
-  line-height: 1.55;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
 @keyframes reasoning-spin {
   to { transform: rotate(360deg); }
 }
@@ -5935,17 +5898,6 @@ body.dark .reasoning-tool-input code {
 }
 body.dark .reasoning-tool-summary-text {
   color: #8f8f8f;
-}
-body.dark .reasoning-tool-raw summary {
-  color: #8f8f8f;
-}
-body.dark .reasoning-tool-raw summary:hover {
-  color: #e0e0e0;
-}
-body.dark .reasoning-tool-raw pre {
-  border-color: #3a3a3a;
-  background: #151515;
-  color: #c9d3e6;
 }
 body.dark .message-reasoning-content .markdown-content h3,
 body.dark .message-reasoning-content .markdown-content h4,

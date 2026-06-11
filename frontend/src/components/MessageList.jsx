@@ -237,8 +237,6 @@ function MessageToolTimeline({ items }) {
 
 function ReasoningTimelineItem({ item, expanded = false, onToggle }) {
   if (item.type === 'tool' || item.type === 'search') {
-    const rawInput = item.rawInput || item.inputRaw || '';
-    const rawResult = item.rawResult || item.resultRaw || '';
     const isSearch = item.type === 'search';
     const icon = item.status === 'running'
       ? <Loader2 size={14} />
@@ -252,7 +250,7 @@ function ReasoningTimelineItem({ item, expanded = false, onToggle }) {
       : item.status === 'error'
         ? <AlertCircle size={12} />
         : null;
-    const hasDetail = item.inputPreview || item.summary || rawInput || rawResult;
+    const hasDetail = item.inputPreview || item.summary;
     return (
       <li className={`reasoning-timeline-item is-${item.type} status-${item.status || 'success'}`}>
         <span className="reasoning-timeline-node" aria-hidden="true">{icon}</span>
@@ -285,12 +283,6 @@ function ReasoningTimelineItem({ item, expanded = false, onToggle }) {
                     <span className="reasoning-tool-summary-text">{item.summary}</span>
                   </div>
                 )}
-                {(rawInput || rawResult) && (
-                  <div className="reasoning-tool-raw-list">
-                    <ToolRawDetails label="原始参数" value={rawInput} />
-                    <ToolRawDetails label="原始结果" value={rawResult} />
-                  </div>
-                )}
               </div>
             </details>
           ) : (
@@ -318,25 +310,6 @@ function ReasoningTimelineItem({ item, expanded = false, onToggle }) {
       </div>
     </li>
   );
-}
-
-function ToolRawDetails({ label, value }) {
-  if (!value) return null;
-  return (
-    <details className="reasoning-tool-raw">
-      <summary>{label}</summary>
-      <pre><code>{formatRawToolValue(value)}</code></pre>
-    </details>
-  );
-}
-
-function formatRawToolValue(value) {
-  if (typeof value !== 'string') return JSON.stringify(value || '', null, 2);
-  try {
-    return JSON.stringify(JSON.parse(value), null, 2);
-  } catch {
-    return value;
-  }
 }
 
 function reasoningTimelineItems(content, timeline, toolCalls, pending) {
