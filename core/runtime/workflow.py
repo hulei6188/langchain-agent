@@ -767,7 +767,6 @@ class WorkflowRunner:
                 context,
                 tools=tool_schemas,
                 stream_content=True,
-                live_content_with_tools=total_calls > 0,
             )
             response = _coerce_dsml_tool_calls(response, stage=f"tool node stream round {_round}")
             reasoning_streamed = bool(response.reasoning_content and context.get("thinking_enabled"))
@@ -911,7 +910,6 @@ class WorkflowRunner:
         *,
         tools: list[dict] | None = None,
         stream_content: bool = False,
-        live_content_with_tools: bool = False,
     ):
         content_chunks: list[str] = []
         reasoning_chunks: list[str] = []
@@ -921,7 +919,10 @@ class WorkflowRunner:
         pending_live_content = ""
         suppress_content_stream = False
         emitted_live_content = False
-        should_stream_content_live = stream_content
+        # With tools available, models may emit a short natural-language preface
+        # before deciding to call a tool. Do not stream that preface live because
+        # the UI cannot retract it once the tool call arrives.
+        should_stream_content_live = stream_content and not tools
         for chunk in self.provider.chat_stream_events(
             messages,
             model=agent.model,
@@ -960,8 +961,9 @@ class WorkflowRunner:
 
         joined_content = "".join(content_chunks)
         content_for_response = joined_content
-        if final_tool_calls and _contains_leaked_tool_markup(joined_content):
-            logger.warning("Detected DSML tool call markup alongside standard tool calls during stream response")
+        if final_tool_calls:
+            if joined_content.strip():
+                logger.warning("Dropping assistant content emitted before tool calls during stream response; preview=%r", _dsml_preview(joined_content))
             content_for_response = ""
         elif not final_tool_calls and contains_dsml_tool_calls(joined_content):
             logger.warning("Detected DSML tool call markup in streamed assistant content")
