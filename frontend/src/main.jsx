@@ -4348,6 +4348,15 @@ function ToolsHome({ createToolConfig, discoverMcpTools, deleteToolConfig, isDar
   );
 }
 
+function skillActivationLabel(mode) {
+  return {
+    always: '每轮加载',
+    auto: '自动选择',
+    manual: '手动触发',
+    disabled: '已禁用',
+  }[mode] || '自动选择';
+}
+
 function SkillsHome({
   createSkill,
   deleteSkill,
@@ -4385,6 +4394,7 @@ function SkillsHome({
           system_prompt: skill.system_prompt || '',
           icon: skill.icon || 'SK',
           category: skill.category || 'general',
+          activation_mode: skill.activation_mode || 'auto',
           tagsText: (skill.tags || []).join(', '),
           tags: skill.tags || [],
           tool_ids: (skill.tools || []).map((t) => t.id),
@@ -4461,6 +4471,7 @@ function SkillsHome({
                 <div className="skill-card-head">
                   <strong className="skill-card-name">{skill.name}</strong>
                   <span className="mode-chip skill-card-category">{skill.category || 'general'}</span>
+                  <span className="skill-card-tag">{skillActivationLabel(skill.activation_mode)}</span>
                   {(skill.tags || []).slice(0, 3).map((tag) => (
                     <span className="skill-card-tag" key={tag}>{tag}</span>
                   ))}

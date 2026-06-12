@@ -115,6 +115,8 @@ def _exec_run_powershell(args: dict) -> dict:
     elif timeout > MAX_POWERSHELL_TIMEOUT_SECONDS:
         timeout = MAX_POWERSHELL_TIMEOUT_SECONDS
 
+    # Ensure PowerShell outputs UTF-8 to avoid garbled Chinese characters
+    command = f"[Console]::OutputEncoding = [Text.Encoding]::UTF8; {command}"
     started = time.monotonic()
     try:
         completed = subprocess.run(

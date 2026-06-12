@@ -13,6 +13,15 @@ from core.db.models import (
 from core.services.tools import tool_payload
 
 
+SKILL_ACTIVATION_MODES = {"auto", "always", "manual", "disabled"}
+DEFAULT_SKILL_ACTIVATION_MODE = "auto"
+
+
+def normalize_activation_mode(value: str | None) -> str:
+    mode = str(value or DEFAULT_SKILL_ACTIVATION_MODE).strip().lower()
+    return mode if mode in SKILL_ACTIVATION_MODES else DEFAULT_SKILL_ACTIVATION_MODE
+
+
 def skill_summary(skill: Skill) -> dict:
     return {
         "id": skill.id,
@@ -21,6 +30,7 @@ def skill_summary(skill: Skill) -> dict:
         "icon": skill.icon,
         "category": skill.category,
         "tags": skill.tags or [],
+        "activation_mode": normalize_activation_mode(skill.activation_mode),
         "enabled": skill.enabled,
         "created_at": skill.created_at.isoformat() if skill.created_at else None,
         "updated_at": skill.updated_at.isoformat() if skill.updated_at else None,
@@ -82,6 +92,7 @@ def create_skill(
         icon=payload.get("icon") or "SK",
         category=payload.get("category") or "general",
         tags=payload.get("tags") or [],
+        activation_mode=normalize_activation_mode(payload.get("activation_mode")),
         rag_config=payload.get("rag_config") or {},
         memory_config=payload.get("memory_config") or {},
     )
@@ -102,11 +113,13 @@ def update_skill(db: Session, skill: Skill, payload: dict) -> Skill:
         "icon",
         "category",
         "tags",
+        "activation_mode",
         "rag_config",
         "memory_config",
     ]:
         if key in payload and payload[key] is not None:
-            setattr(skill, key, payload[key])
+            value = normalize_activation_mode(payload[key]) if key == "activation_mode" else payload[key]
+            setattr(skill, key, value)
     if "enabled" in payload and payload["enabled"] is not None:
         skill.enabled = payload["enabled"]
     if "tool_ids" in payload and payload["tool_ids"] is not None:

@@ -92,6 +92,7 @@ from core.services.agents import (
     create_agent,
     delete_agent as delete_agent_service,
     ensure_template_agents_published,
+    exclude_deprecated_template_agents,
     get_agent_detail,
     market_agent_summary,
     publish_agent,
@@ -1104,6 +1105,7 @@ def upload_file(request: UploadCreateRequest, membership: WorkspaceMember = Depe
 def list_agents(membership: WorkspaceMember = Depends(get_current_membership), db: Session = Depends(get_db)):
     ensure_template_agents_published(db, membership.workspace_id)
     query = db.query(Agent).filter(Agent.workspace_id == membership.workspace_id)
+    query = exclude_deprecated_template_agents(query)
     if not can_manage(membership.role):
         query = query.filter(Agent.created_by == membership.user_id)
     agents = query.order_by(Agent.updated_at.desc()).all()
@@ -1245,7 +1247,7 @@ def reject_agent_review(agent_id: int, membership: WorkspaceMember = Depends(req
 @app.get("/api/market/agents")
 def list_market_agents(membership: WorkspaceMember = Depends(get_current_membership), db: Session = Depends(get_db)):
     agents = (
-        db.query(Agent)
+        exclude_deprecated_template_agents(db.query(Agent))
         .filter(
             Agent.workspace_id == membership.workspace_id,
             Agent.status == "published",
@@ -2086,11 +2088,13 @@ def cancel_run_endpoint(run_id: int, membership: WorkspaceMember = Depends(get_c
 
 
 @app.get("/api/runs/{run_id}/events")
-def stream_run_events(run_id: int, membership: WorkspaceMember = Depends(get_current_membership), db: Session = Depends(get_db)):
+def stream_run_events(run_id: int, since: int = Query(0), membership: WorkspaceMember = Depends(get_current_membership), db: Session = Depends(get_db)):
     """Reconnect to an in-progress run's SSE event stream after page refresh.
 
     Replays buffered events then streams new events as they arrive.
     If the run is already finished, returns buffered events and closes.
+
+    Supports ?since=N to skip already-consumed events (for session switch-back).
     """
     run = db.get(Run, run_id)
     if not run or run.workspace_id != membership.workspace_id:
@@ -2100,7 +2104,7 @@ def stream_run_events(run_id: int, membership: WorkspaceMember = Depends(get_cur
         require_session_access(session, membership)
 
     def _event_stream() -> Iterable[str]:
-        emitted = 0
+        emitted = max(0, since)
         terminal_seen = False
         # Phase 1: replay buffered events
         while True:

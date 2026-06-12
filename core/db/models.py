@@ -322,6 +322,7 @@ class Skill(Base):
     icon: Mapped[str] = mapped_column(String(40), default="SK")
     category: Mapped[str] = mapped_column(String(80), default="general")
     tags: Mapped[list] = mapped_column(JSON, default=list)
+    activation_mode: Mapped[str] = mapped_column(String(20), default="auto")
     rag_config: Mapped[dict] = mapped_column(JSON, default=dict)
     memory_config: Mapped[dict] = mapped_column(JSON, default=dict)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)

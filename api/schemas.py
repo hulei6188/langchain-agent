@@ -305,6 +305,7 @@ class SkillCreateRequest(BaseModel):
     icon: str = "SK"
     category: str = Field(default="general", min_length=1, max_length=80)
     tags: list[str] = []
+    activation_mode: str = Field(default="auto", pattern="^(auto|always|manual|disabled)$")
     tool_ids: list[int] = []
     knowledge_base_ids: list[int] = []
     rag_config: dict = {}
@@ -318,6 +319,7 @@ class SkillUpdateRequest(BaseModel):
     icon: str | None = None
     category: str | None = Field(default=None, min_length=1, max_length=80)
     tags: list[str] | None = None
+    activation_mode: str | None = Field(default=None, pattern="^(auto|always|manual|disabled)$")
     tool_ids: list[int] | None = None
     knowledge_base_ids: list[int] | None = None
     rag_config: dict | None = None

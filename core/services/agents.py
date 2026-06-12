@@ -53,6 +53,7 @@ DEFAULT_RAG = {
     "refuse_when_no_evidence": True,
 }
 DEFAULT_TOOL_POLICY = {"mode": "auto", "allowed_tool_names": []}
+DEPRECATED_TEMPLATE_AGENT_NAMES = ("扫地机器人客服",)
 LEGACY_TEAM_AGENT_TEXT = {
     "description": (
         "面向团队内部使用的自定义智能体。",
@@ -67,6 +68,15 @@ LEGACY_TEAM_AGENT_TEXT = {
         "你是一个谨慎、清晰的智能体。优先使用绑定知识库和工具输出回答。",
     ),
 }
+
+
+def exclude_deprecated_template_agents(query):
+    return query.filter(
+        ~(
+            Agent.is_template.is_(True)
+            & Agent.name.in_(DEPRECATED_TEMPLATE_AGENT_NAMES)
+        )
+    )
 
 
 def agent_summary(agent: Agent) -> dict:
@@ -198,7 +208,7 @@ def publish_agent(db: Session, agent: Agent, user_id: int, *, require_review: bo
 
 def ensure_template_agents_published(db: Session, workspace_id: int) -> None:
     templates = (
-        db.query(Agent)
+        exclude_deprecated_template_agents(db.query(Agent))
         .filter(Agent.workspace_id == workspace_id, Agent.is_template.is_(True))
         .all()
     )
