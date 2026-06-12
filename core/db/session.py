@@ -92,10 +92,13 @@ def _run_compat_migrations() -> None:
             },
         )
     if "agent_settings" in table_names:
-        settings_columns = {column["name"] for column in inspector.get_columns("agent_settings")}
-        if "rag" not in settings_columns:
-            with engine.begin() as connection:
-                connection.execute(text("ALTER TABLE agent_settings ADD COLUMN rag JSON DEFAULT '{}'"))
+        _ensure_columns(
+            "agent_settings",
+            {
+                "rag": "JSON DEFAULT '{}'",
+                "workdir": "VARCHAR(500)",
+            },
+        )
     if "tools" in table_names:
         _ensure_columns(
             "tools",

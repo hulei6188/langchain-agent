@@ -123,6 +123,7 @@ def get_agent_detail(db: Session, agent: Agent) -> dict:
         "memory": normalize_memory(settings.memory),
         "rag": normalize_rag(settings.rag),
         "tool_policy": normalize_tool_policy(settings.tool_policy),
+        "workdir": normalize_workdir(settings.workdir),
         "skills": [skill_summary(skill) for skill in get_agent_skills(db, agent.id)],
     }
 
@@ -152,6 +153,7 @@ def create_agent(db: Session, *, workspace_id: int, user_id: int, payload: dict)
             memory=normalize_memory(payload.get("memory")),
             rag=normalize_rag(payload.get("rag")),
             tool_policy=normalize_tool_policy(payload.get("tool_policy")),
+            workdir=normalize_workdir(payload.get("workdir")),
         )
     )
     _replace_agent_knowledge(db, agent.id, payload.get("knowledge_base_ids") or [])
@@ -172,7 +174,7 @@ def update_agent(db: Session, agent: Agent, payload: dict) -> Agent:
         _replace_agent_knowledge(db, agent.id, payload["knowledge_base_ids"] or [])
     if "tool_ids" in payload:
         _replace_agent_tools(db, agent.id, payload["tool_ids"] or [])
-    if any(key in payload for key in ["suggested_questions", "variables", "memory", "rag", "tool_policy"]):
+    if any(key in payload for key in ["suggested_questions", "variables", "memory", "rag", "tool_policy", "workdir"]):
         settings = ensure_agent_settings(db, agent.id)
         if "suggested_questions" in payload:
             settings.suggested_questions = normalize_questions(payload["suggested_questions"])
@@ -184,6 +186,8 @@ def update_agent(db: Session, agent: Agent, payload: dict) -> Agent:
             settings.rag = normalize_rag(payload["rag"])
         if "tool_policy" in payload:
             settings.tool_policy = normalize_tool_policy(payload["tool_policy"])
+        if "workdir" in payload:
+            settings.workdir = normalize_workdir(payload["workdir"])
     db.commit()
     db.refresh(agent)
     return agent
@@ -438,6 +442,15 @@ def normalize_tool_policy(value) -> dict:
     mode = data.get("mode") if data.get("mode") == "auto" else "auto"
     names = [str(item).strip() for item in data.get("allowed_tool_names", []) if str(item).strip()]
     return {"mode": mode, "allowed_tool_names": names[:50]}
+
+
+def normalize_workdir(value) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    return text[:500]
 
 
 def _replace_agent_knowledge(db: Session, agent_id: int, knowledge_base_ids: list[int]) -> None:
