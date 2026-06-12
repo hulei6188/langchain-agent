@@ -234,7 +234,11 @@ function ChatHomeV2({
     const updateStickiness = () => {
       const nearBottom = isNearConversationBottom(conversation);
       const scrollingDown = conversation.scrollTop > lastScrollTopRef.current;
-      if (nearBottom && (!autoScrollPausedRef.current || scrollingDown)) {
+      const scrollingUp = conversation.scrollTop < lastScrollTopRef.current - 1;
+      if (scrollingUp) {
+        stickToBottomRef.current = false;
+        autoScrollPausedRef.current = true;
+      } else if (nearBottom && (!autoScrollPausedRef.current || scrollingDown)) {
         stickToBottomRef.current = true;
         autoScrollPausedRef.current = false;
       } else if (!nearBottom) {

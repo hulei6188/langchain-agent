@@ -4160,15 +4160,16 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
   justify-self: stretch;
   width: 100%;
   max-width: 100%;
-  overflow-x: auto;
+  overflow-x: visible;
   border: 0;
   border-radius: 0;
 }
 .markdown-content table {
   border-collapse: collapse;
-  table-layout: auto;
+  table-layout: fixed;
   width: 100%;
-  min-width: 100%;
+  min-width: 0;
+  max-width: 100%;
 }
 .markdown-content pre {
   min-width: 0;
@@ -4220,9 +4221,9 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
 }
 .markdown-content th code.inline-code,
 .markdown-content td code.inline-code {
-  white-space: nowrap;
-  overflow-wrap: normal;
-  word-break: normal;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 .code-block {
   min-width: 0;
