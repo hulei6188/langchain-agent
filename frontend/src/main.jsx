@@ -253,6 +253,7 @@ function systemPrefersDark() {
 
 function App() {
   const [token, setToken] = useState(initialAuthToken);
+  const [appBootstrapping, setAppBootstrapping] = useState(() => Boolean(initialAuthToken()));
   const [routeRestoring, setRouteRestoring] = useState(() => {
     const route = readChatRoute();
     return Boolean(initialAuthToken() && isChatHomeRoute(route) && route.sessionId);
@@ -518,6 +519,7 @@ function App() {
   useEffect(() => {
     if (token) {
       const route = readChatRoute();
+      setAppBootstrapping(true);
       setRouteRestoring(Boolean(isChatHomeRoute(route) && route.sessionId));
       bootstrap().catch((err) => {
         if (isAuthError(err)) {
@@ -527,7 +529,7 @@ function App() {
           setError(errorMessage(err));
         }
         setRouteRestoring(false);
-      });
+      }).finally(() => setAppBootstrapping(false));
     }
   }, [token]);
 
@@ -769,6 +771,7 @@ function App() {
     setMemoryProfileSaving(false);
     setMemoryProfileError('');
     setError('');
+    setAppBootstrapping(false);
     setView('home');
     setActiveNav('chat');
     setAccountMenuOpen(false);
@@ -2429,6 +2432,7 @@ function App() {
     activeNav,
     activeSessionId,
     activeSummary,
+    appBootstrapping,
     agentForm,
     agents,
     adminModels,
@@ -2614,6 +2618,7 @@ function HomeView(props) {
     activeNav,
     activeSessionId,
     activeSummary,
+    appBootstrapping,
     agentForm,
     agents,
     adminModels,
@@ -2743,8 +2748,10 @@ function HomeView(props) {
     () => sessions.find((session) => session.id === sessionMenuId),
     [sessionMenuId, sessions],
   );
-  const restoringListedSession = routeRestoring
+  const restoringListedSession = appBootstrapping
+    || routeRestoring
     || (activeSessionId && !sessions.some((session) => sameRouteId(session.id, activeSessionId)));
+  const hideRoutedContent = appBootstrapping && activeNav !== 'chat';
 
   useEffect(() => {
     if (!sessionMenuId) return undefined;
@@ -2969,39 +2976,47 @@ function HomeView(props) {
           </div>
         </div>
         <div className="sidebar-user-wrap">
-          {accountMenuOpen && (
-            <div className="account-menu">
-              <div className="account-menu-group">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setSettingsPanel('general');
-                    setSettingsDialogOpen(true);
-                    setAccountMenuOpen(false);
-                  }}
-                >
-                  <Settings2 size={16} />
-                  系统设置
-                </button>
-              </div>
+          {!appBootstrapping && (
+            <>
+              {accountMenuOpen && (
+                <div className="account-menu">
+                  <div className="account-menu-group">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSettingsPanel('general');
+                        setSettingsDialogOpen(true);
+                        setAccountMenuOpen(false);
+                      }}
+                    >
+                      <Settings2 size={16} />
+                      系统设置
+                    </button>
+                  </div>
+                  <button
+                    className="account-menu-logout"
+                    type="button"
+                    onClick={logout}
+                  >
+                    <LogOut size={16} />
+                    退出登录
+                  </button>
+                </div>
+              )}
               <button
-                className="account-menu-logout"
+                className={`sidebar-user ${accountMenuOpen ? 'is-open' : ''}`}
                 type="button"
-                onClick={logout}
+                onClick={() => setAccountMenuOpen(!accountMenuOpen)}
               >
-                <LogOut size={16} />
-                退出登录
+                <UserAvatar user={me} className="account-avatar small" />
+                <span className="sidebar-user-copy">
+                  <strong>{me?.name || me?.email || '当前用户'}</strong>
+                  <small>{roleLabel(workspace?.role)}</small>
+                </span>
+                <MoreHorizontal size={18} />
               </button>
-            </div>
+            </>
           )}
-          <button className={`sidebar-user ${accountMenuOpen ? 'is-open' : ''}`} type="button" onClick={() => setAccountMenuOpen(!accountMenuOpen)}>
-            <UserAvatar user={me} className="account-avatar small" />
-            <span className="sidebar-user-copy">
-              <strong>{me?.name || me?.email || '当前用户'}</strong>
-              <small>{roleLabel(workspace?.role)}</small>
-            </span>
-            <MoreHorizontal size={18} />
-          </button>
         </div>
       </aside>
 
@@ -3064,52 +3079,54 @@ function HomeView(props) {
           />
         )}
 
-        {activeNav === 'members' && canManage && (
-          <MembersHome members={members} />
-        )}
+        {!hideRoutedContent && (
+          <>
+            {activeNav === 'members' && canManage && (
+              <MembersHome members={members} />
+            )}
 
-        {activeNav === 'knowledge' && (
-          <KnowledgeHome
-            canManage={canManage}
-            clearKnowledgeBaseDocuments={clearKnowledgeBaseDocuments}
-            createKnowledgeBase={createKnowledgeBase}
-            updateKnowledgeBase={updateKnowledgeBase}
-            deleteDocument={deleteDocument}
-            deleteKnowledgeBase={deleteKnowledgeBase}
-            docForm={docForm}
-            documents={documents}
-            knowledgeBases={knowledgeBases}
-            setDocForm={setDocForm}
-            setProfileError={setProfileError}
-            token={token}
-            uploadingKnowledgeFile={uploadingKnowledgeFile}
-            uploadingKnowledgeItems={uploadingKnowledgeItems}
-            uploadDocument={uploadDocument}
-            uploadKnowledgeFile={uploadKnowledgeFile}
-            loadDocuments={loadDocuments}
-            notify={notify}
-          />
-        )}
+            {activeNav === 'knowledge' && (
+              <KnowledgeHome
+                canManage={canManage}
+                clearKnowledgeBaseDocuments={clearKnowledgeBaseDocuments}
+                createKnowledgeBase={createKnowledgeBase}
+                updateKnowledgeBase={updateKnowledgeBase}
+                deleteDocument={deleteDocument}
+                deleteKnowledgeBase={deleteKnowledgeBase}
+                docForm={docForm}
+                documents={documents}
+                knowledgeBases={knowledgeBases}
+                setDocForm={setDocForm}
+                setProfileError={setProfileError}
+                token={token}
+                uploadingKnowledgeFile={uploadingKnowledgeFile}
+                uploadingKnowledgeItems={uploadingKnowledgeItems}
+                uploadDocument={uploadDocument}
+                uploadKnowledgeFile={uploadKnowledgeFile}
+                loadDocuments={loadDocuments}
+                notify={notify}
+              />
+            )}
 
-        {activeNav === 'agents' && (
-          <AgentsHome
-            agents={agents}
-            activeAgentId={activeAgentId}
-            canManage={canManage}
-            createAgent={createAgent}
-            deleteAgent={deleteAgent}
-            me={me}
-            openBuilder={openBuilder}
-            setActiveAgentId={(agentId) => selectChatAgent(agentId, { historyMode: 'replace' })}
-          />
-        )}
+            {activeNav === 'agents' && (
+              <AgentsHome
+                agents={agents}
+                activeAgentId={activeAgentId}
+                canManage={canManage}
+                createAgent={createAgent}
+                deleteAgent={deleteAgent}
+                me={me}
+                openBuilder={openBuilder}
+                setActiveAgentId={(agentId) => selectChatAgent(agentId, { historyMode: 'replace' })}
+              />
+            )}
 
-        {activeNav === 'market' && (
-          <MarketHome
-            agents={marketAgents}
-            copyMarketAgent={copyMarketAgent}
-          />
-        )}
+            {activeNav === 'market' && (
+              <MarketHome
+                agents={marketAgents}
+                copyMarketAgent={copyMarketAgent}
+              />
+            )}
 
         {activeNav === 'my-models' && (
           <UserModelsHome
@@ -3185,6 +3202,8 @@ function HomeView(props) {
             approveReview={approveReview}
             rejectReview={rejectReview}
           />
+        )}
+          </>
         )}
 
 

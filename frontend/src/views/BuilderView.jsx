@@ -119,6 +119,7 @@ export function BuilderView(props) {
     activeAgentId,
     activeSessionId,
     activeSummary,
+    appBootstrapping,
     addSuggestedQuestion,
     addVariable,
     agentForm,
@@ -347,6 +348,19 @@ export function BuilderView(props) {
     } finally {
       setKnowledgeSaving(false);
     }
+  }
+
+  if (appBootstrapping) {
+    return (
+      <main className="builder-shell">
+        <header className="builder-topbar">
+          <div className="bot-title">
+            <button className="ghost-icon" type="button" title="返回主页" onClick={() => setView('home')}><ChevronLeft size={18} /></button>
+          </div>
+        </header>
+        <div className="workbench" aria-hidden="true" />
+      </main>
+    );
   }
 
   return (
