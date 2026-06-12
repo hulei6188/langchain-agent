@@ -37,6 +37,7 @@ from core.services.agents import get_agent_detail, normalize_memory, normalize_r
 from core.services.rag import retrieve
 from core.services.memory import format_profile_memory, get_memory_profile, memory_used_event
 from core.services.models import resolve_agent_model
+from core.services.skills import normalize_activation_mode
 from core.services.tools import execute_tool, tool_call_event, tool_schema_for_llm
 from core.services.uploads import get_workspace_uploads
 from core.services.user_models import (
@@ -49,6 +50,9 @@ from core.services import web_search as web_search_service
 MAX_TOOL_CALLS_PER_RUN = 200
 MAX_TOOL_ROUNDS_PER_RUN = 50
 MAX_TOOL_WALL_TIME_SECONDS = 1800
+SKILL_AUTO_TOP_K = 3
+SKILL_AUTO_THRESHOLD = 0.25
+SKILL_SELECTION_HISTORY_MESSAGES = 8
 DSML_TOOL_MARKUP_ERROR = "工具调用格式异常，未能正确执行，请重试。"
 DSML_TOOL_CALL_START_MARKER = "<||DSML||tool_calls>"
 DSML_STREAM_GUARD_TAIL_CHARS = len(DSML_TOOL_CALL_START_MARKER) - 1
@@ -308,6 +312,7 @@ class WorkflowRunner:
             "web_sources": search_status.get("sources", []),
             "uploads": uploads,
         }
+        self._apply_runtime_skills(runtime, context, chat_session)
         steps: list[dict] = []
         for node in runtime.workflow:
             output = self._execute_node(runtime, node, context)
@@ -315,6 +320,7 @@ class WorkflowRunner:
                 output.setdefault("events", []).append({"event": "memory_used", "data": profile_memory_event})
                 output.setdefault("events", []).append({"event": "thinking_status", "data": thinking_status})
                 output.setdefault("events", []).append({"event": "search_status", "data": self._search_status_event(search_status)})
+                output.setdefault("events", []).append({"event": "skill_selection", "data": context.get("skill_selection", {})})
             events = output.pop("events", [])
             context.update(output)
             step = RunStep(
@@ -406,6 +412,7 @@ class WorkflowRunner:
                     output.setdefault("events", []).append({"event": "memory_used", "data": context.get("profile_memory_used", {})})
                     output.setdefault("events", []).append({"event": "thinking_status", "data": context.get("thinking_status", {})})
                     output.setdefault("events", []).append({"event": "search_status", "data": self._search_status_event(context.get("search_status", {}))})
+                    output.setdefault("events", []).append({"event": "skill_selection", "data": context.get("skill_selection", {})})
                 events = output.pop("events", [])
                 context.update(output)
                 step = self._persist_step(run, node, user_message, output)
@@ -513,6 +520,7 @@ class WorkflowRunner:
             "web_sources": search_status.get("sources", []),
             "uploads": uploads,
         }
+        self._apply_runtime_skills(runtime, context, chat_session)
         return runtime, run, context
 
     def _persist_step(self, run: Run, node: dict, user_message: str, output: dict) -> RunStep:
@@ -539,6 +547,7 @@ class WorkflowRunner:
                 "rag_enabled": context.get("rag_enabled", True),
                 "search_enabled": context.get("search_enabled", False),
                 "attachment_count": len(context.get("uploads", [])),
+                "loaded_skills": context.get("loaded_skills", []),
             }
         if node_type == "Knowledge":
             effective_source = "request" if "rag_enabled_request" in context else "agent_default"
@@ -583,10 +592,13 @@ class WorkflowRunner:
             allowed_names = set(tool_policy.get("allowed_tool_names") or [])
             if allowed_names:
                 bound_tools = [t for t in bound_tools if t.name in allowed_names or t.type == "builtin_search"]
-            if not bound_tools:
+            skill_loader_schema = self._skill_loader_schema(agent, context)
+            if not bound_tools and not skill_loader_schema:
                 return {"tool_outputs": [], "tool_stats": {"total_calls": 0, "tools_used": []}}
 
             tool_schemas = [tool_schema_for_llm(t) for t in bound_tools]
+            if skill_loader_schema:
+                tool_schemas.append(skill_loader_schema)
             messages = self._llm_messages(agent, context)
             total_calls = 0
             tools_used: list[str] = []
@@ -646,6 +658,7 @@ class WorkflowRunner:
                     # 并发执行同一轮的所有工具调用
                     _session_key = str(context.get("session_id") or "")
                     jobs = []
+                    job_results = {}
                     for tc in calls_this_round:
                         func = tc["function"]
                         tool_name = func["name"]
@@ -653,23 +666,30 @@ class WorkflowRunner:
                             tool_args = json.loads(func.get("arguments") or "{}")
                         except json.JSONDecodeError:
                             tool_args = {"input": func.get("arguments") or ""}
+                        is_skill_loader = tool_name == "load_skill"
                         matching = next((t for t in bound_tools if t.name == tool_name), None)
-                        jobs.append({
+                        job = {
                             "tc": tc, "tool_name": tool_name, "tool_args": tool_args,
                             "matching": matching, "_session_key": _session_key,
-                        })
+                            "internal": is_skill_loader,
+                        }
+                        jobs.append(job)
+                        if is_skill_loader:
+                            job_results[id(job)] = self._handle_load_skill_call(agent, context, tool_args)
 
                     # 使用线程池并发执行所有工具调用
-                    with ThreadPoolExecutor(max_workers=min(len(jobs), 8)) as executor:
-                        future_to_job = {executor.submit(self._execute_single_tool_safe, job): job for job in jobs}
-                        job_results = {}
-                        for future in as_completed(future_to_job):
-                            job = future_to_job[future]
-                            try:
-                                job_results[id(job)] = future.result()
-                            except Exception:
-                                job_results[id(job)] = {"error": "thread_error", "content": "Error: tool execution failed", "result_preview": "", "latency_ms": 0}
+                    external_jobs = [job for job in jobs if not job.get("internal")]
+                    if external_jobs:
+                        with ThreadPoolExecutor(max_workers=min(len(external_jobs), 8)) as executor:
+                            future_to_job = {executor.submit(self._execute_single_tool_safe, job): job for job in external_jobs}
+                            for future in as_completed(future_to_job):
+                                job = future_to_job[future]
+                                try:
+                                    job_results[id(job)] = future.result()
+                                except Exception:
+                                    job_results[id(job)] = {"error": "thread_error", "content": "Error: tool execution failed", "result_preview": "", "latency_ms": 0}
 
+                    loaded_skill_this_round = False
                     # 按原始顺序处理结果，确保副作用线程安全
                     for job in jobs:
                         tc = job["tc"]
@@ -677,6 +697,25 @@ class WorkflowRunner:
                         tool_args = job["tool_args"]
                         matching = job["matching"]
                         result = job_results.get(id(job), {})
+
+                        if job.get("internal") and tool_name == "load_skill":
+                            internal_tool = type("_", (), {"id": None, "name": tool_name, "type": "internal"})()
+                            status = "error" if result.get("status") == "error" else "success"
+                            event_data = tool_call_event(
+                                internal_tool,
+                                result,
+                                status=status,
+                                input_preview=json.dumps(tool_args, ensure_ascii=False),
+                                error_code="skill_not_loadable" if status == "error" else None,
+                            )
+                            tool_content = result.get("content") or result.get("result_preview") or ""
+                            events.append({"event": "tool_call", "data": event_data})
+                            messages.append({"role": "tool", "tool_call_id": tc["id"], "content": tool_content})
+                            self._persist_intermediate_message(context, role="tool", content=tool_content, tool_call_id=tc["id"], tool_name=tool_name, meta={**event_data, "node_id": node["id"], "round": _round, "kind": "tool_result"})
+                            loaded_skill_this_round = loaded_skill_this_round or status == "success"
+                            total_calls += 1
+                            tools_used.append(tool_name)
+                            continue
 
                         if matching:
                             if result.get("error"):
@@ -704,6 +743,16 @@ class WorkflowRunner:
 
                         total_calls += 1
                         tools_used.append(tool_name)
+
+                    if loaded_skill_this_round:
+                        self._refresh_system_message(messages, agent, context)
+                        bound_tools = self._runtime_tools(agent, node, context)
+                        if allowed_names:
+                            bound_tools = [t for t in bound_tools if t.name in allowed_names or t.type == "builtin_search"]
+                        skill_loader_schema = self._skill_loader_schema(agent, context)
+                        tool_schemas = [tool_schema_for_llm(t) for t in bound_tools]
+                        if skill_loader_schema:
+                            tool_schemas.append(skill_loader_schema)
 
             # Max rounds reached — get final answer from accumulated context
             self._raise_if_cancelled()
@@ -752,10 +801,13 @@ class WorkflowRunner:
         allowed_names = set(tool_policy.get("allowed_tool_names") or [])
         if allowed_names:
             bound_tools = [t for t in bound_tools if t.name in allowed_names or t.type == "builtin_search"]
-        if not bound_tools:
+        skill_loader_schema = self._skill_loader_schema(agent, context)
+        if not bound_tools and not skill_loader_schema:
             return {"tool_outputs": [], "tool_stats": {"total_calls": 0, "tools_used": []}}
 
         tool_schemas = [tool_schema_for_llm(t) for t in bound_tools]
+        if skill_loader_schema:
+            tool_schemas.append(skill_loader_schema)
         messages = self._llm_messages(agent, context)
         total_calls = 0
         tools_used: list[str] = []
@@ -812,6 +864,7 @@ class WorkflowRunner:
                 # 并发执行同一轮的所有工具调用（流式模式）
                 _session_key = str(context.get("session_id") or "")
                 stream_jobs = []
+                stream_results = {}
                 for tc in calls_this_round:
                     func = tc["function"]
                     tool_name = func["name"]
@@ -819,11 +872,16 @@ class WorkflowRunner:
                         tool_args = json.loads(func.get("arguments") or "{}")
                     except json.JSONDecodeError:
                         tool_args = {"input": func.get("arguments") or ""}
+                    is_skill_loader = tool_name == "load_skill"
                     matching = next((t for t in bound_tools if t.name == tool_name), None)
-                    stream_jobs.append({
+                    job = {
                         "tc": tc, "tool_name": tool_name, "tool_args": tool_args,
                         "matching": matching, "_session_key": _session_key,
-                    })
+                        "internal": is_skill_loader,
+                    }
+                    stream_jobs.append(job)
+                    if is_skill_loader:
+                        stream_results[id(job)] = self._handle_load_skill_call(agent, context, tool_args)
 
                 # 先发送所有 tool_call_start 事件
                 for job in stream_jobs:
@@ -831,24 +889,29 @@ class WorkflowRunner:
                     matching = job["matching"]
                     tool_name = job["tool_name"]
                     tool_args = job["tool_args"]
+                    display_tool = matching
+                    if not display_tool and tool_name == "load_skill":
+                        display_tool = type("_", (), {"id": None, "name": tool_name, "type": "internal"})()
                     start_data = self._tool_call_start_event(
-                        matching, tool_name=tool_name,
+                        display_tool, tool_name=tool_name,
                         tool_call_id=tc.get("id") or "",
                         input_preview=json.dumps(tool_args, ensure_ascii=False),
                     )
                     yield {"event": "tool_call_start", "data": start_data}
 
-                # 使用线程池并发执行所有工具调用
-                with ThreadPoolExecutor(max_workers=min(len(stream_jobs), 8)) as executor:
-                    future_to_job = {executor.submit(self._execute_single_tool_safe, job): job for job in stream_jobs}
-                    stream_results = {}
-                    for future in as_completed(future_to_job):
-                        job = future_to_job[future]
-                        try:
-                            stream_results[id(job)] = future.result()
-                        except Exception:
-                            stream_results[id(job)] = {"error": "thread_error", "content": "Error: tool execution failed", "result_preview": "", "latency_ms": 0}
+                # 使用线程池并发执行所有外部工具调用
+                external_stream_jobs = [job for job in stream_jobs if not job.get("internal")]
+                if external_stream_jobs:
+                    with ThreadPoolExecutor(max_workers=min(len(external_stream_jobs), 8)) as executor:
+                        future_to_job = {executor.submit(self._execute_single_tool_safe, job): job for job in external_stream_jobs}
+                        for future in as_completed(future_to_job):
+                            job = future_to_job[future]
+                            try:
+                                stream_results[id(job)] = future.result()
+                            except Exception:
+                                stream_results[id(job)] = {"error": "thread_error", "content": "Error: tool execution failed", "result_preview": "", "latency_ms": 0}
 
+                loaded_skill_this_round = False
                 # 按原始顺序处理结果
                 for job in stream_jobs:
                     tc = job["tc"]
@@ -856,6 +919,29 @@ class WorkflowRunner:
                     tool_args = job["tool_args"]
                     matching = job["matching"]
                     result = stream_results.get(id(job), {})
+
+                    if job.get("internal") and tool_name == "load_skill":
+                        internal_tool = type("_", (), {"id": None, "name": tool_name, "type": "internal"})()
+                        status = "error" if result.get("status") == "error" else "success"
+                        event_data = {
+                            **tool_call_event(
+                                internal_tool,
+                                result,
+                                status=status,
+                                input_preview=json.dumps(tool_args, ensure_ascii=False),
+                                error_code="skill_not_loadable" if status == "error" else None,
+                            ),
+                            "type": "tool_call_result",
+                            "tool_call_id": tc.get("id") or "",
+                        }
+                        tool_content = result.get("content") or result.get("result_preview") or ""
+                        yield {"event": "tool_call_result", "data": event_data}
+                        messages.append({"role": "tool", "tool_call_id": tc["id"], "content": tool_content})
+                        self._persist_intermediate_message(context, role="tool", content=tool_content, tool_call_id=tc["id"], tool_name=tool_name, meta={**event_data, "node_id": node["id"], "round": _round, "kind": "tool_result"})
+                        loaded_skill_this_round = loaded_skill_this_round or status == "success"
+                        total_calls += 1
+                        tools_used.append(tool_name)
+                        continue
 
                     if matching:
                         if result.get("error"):
@@ -897,6 +983,15 @@ class WorkflowRunner:
 
                     total_calls += 1
                     tools_used.append(tool_name)
+                if loaded_skill_this_round:
+                    self._refresh_system_message(messages, agent, context)
+                    bound_tools = self._runtime_tools(agent, node, context)
+                    if allowed_names:
+                        bound_tools = [t for t in bound_tools if t.name in allowed_names or t.type == "builtin_search"]
+                    skill_loader_schema = self._skill_loader_schema(agent, context)
+                    tool_schemas = [tool_schema_for_llm(t) for t in bound_tools]
+                    if skill_loader_schema:
+                        tool_schemas.append(skill_loader_schema)
             else:
                 break
 
@@ -1274,6 +1369,8 @@ class WorkflowRunner:
         tool_text = "\n".join(f"- {item['tool']}: {item['content']}" for item in context.get("tool_outputs", []))
         variable_text = "\n".join(f"- {key}: {value}" for key, value in context.get("variables", {}).items())
         attachment_text = self._attachment_text(context.get("uploads", []))
+        skill_manifest_text = self._skill_manifest_text(context.get("skill_manifest") or [])
+        loaded_skill_text = self._loaded_skill_text(context.get("loaded_skills") or [])
         thinking_blocks = []
         thinking_msgs = self._thinking_messages(context)
         if thinking_msgs:
@@ -1301,6 +1398,8 @@ class WorkflowRunner:
             agent.system_prompt or "你是一个自定义智能体。",
             *thinking_blocks,
             search_instruction,
+            skill_manifest_text,
+            loaded_skill_text,
             f"Web search results for this turn:\n{web_source_text or 'None'}",
             f"可用知识片段：\n{source_text or '无'}",
             f"工具输出：\n{tool_text or '无'}",
@@ -1408,6 +1507,10 @@ class WorkflowRunner:
             "reasoning_chars": len(reasoning or ""),
             "search_enabled": bool(context.get("search_enabled")),
             "search_result_count": len(context.get("web_sources", [])),
+            "loaded_skills": [
+                {"id": item.get("id"), "name": item.get("name"), "activation_mode": item.get("activation_mode"), "score": item.get("score")}
+                for item in context.get("loaded_skills", [])
+            ],
         }
 
     def _runtime_agent(self, agent: Agent, mode: str, user_id: int):
@@ -1458,52 +1561,12 @@ class WorkflowRunner:
         user_model_config = self._user_model_config(user_id, source["user_model_config_id"])
         runtime_config = user_model_runtime_config(user_model_config) if user_model_config else None
 
-        # Merge Agent-bound Skills
-        agent_skill_rows = (
-            self.db.query(AgentSkill)
-            .filter(
-                AgentSkill.agent_id == agent.id,
-                AgentSkill.enabled.is_(True),
-            )
-            .all()
-        )
-        if agent_skill_rows:
-            skill_ids = [row.skill_id for row in agent_skill_rows]
-            skills = (
-                self.db.query(Skill)
-                .filter(Skill.id.in_(skill_ids), Skill.enabled.is_(True))
-                .all()
-            )
-            priority_map = {row.skill_id: row.priority for row in agent_skill_rows}
-            for skill in sorted(skills, key=lambda s: priority_map.get(s.id, 0), reverse=True):
-                # Merge system_prompt
-                source["system_prompt"] += (
-                    f"\n\n## Skill: {skill.name}\n{skill.system_prompt}"
-                )
-                # Merge tools (deduplicate)
-                skill_tool_ids = [
-                    st.tool_id
-                    for st in self.db.query(SkillTool)
-                    .filter(SkillTool.skill_id == skill.id)
-                    .all()
-                ]
-                source["tool_ids"] = list(
-                    dict.fromkeys(source["tool_ids"] + skill_tool_ids)
-                )
-                # Merge knowledge bases (deduplicate)
-                skill_kb_ids = [
-                    skb.knowledge_base_id
-                    for skb in self.db.query(SkillKnowledgeBase)
-                    .filter(SkillKnowledgeBase.skill_id == skill.id)
-                    .all()
-                ]
-                source["knowledge_base_ids"] = list(
-                    dict.fromkeys(source["knowledge_base_ids"] + skill_kb_ids)
-                )
+        skill_bindings = self._runtime_skill_bindings(agent)
 
         return SimpleNamespace(
             id=agent.id,
             workspace_id=agent.workspace_id,
+            base_system_prompt=source["system_prompt"],
             system_prompt=source["system_prompt"],
             model_id=source["model_id"],
             user_model_config_id=source["user_model_config_id"],
@@ -1511,6 +1574,7 @@ class WorkflowRunner:
             temperature=source["temperature"],
             knowledge_base_ids=source["knowledge_base_ids"],
             tool_ids=source["tool_ids"],
+            skill_bindings=skill_bindings,
             workflow=source["workflow"],
             model_config=self._model_config(source["model_id"], source["model"]),
             user_model_config=user_model_config,
@@ -1523,6 +1587,227 @@ class WorkflowRunner:
                 "tool_policy": source["tool_policy"],
             },
         )
+
+    def _runtime_skill_bindings(self, agent: Agent) -> list[dict]:
+        agent_skill_rows = (
+            self.db.query(AgentSkill)
+            .filter(
+                AgentSkill.agent_id == agent.id,
+                AgentSkill.enabled.is_(True),
+            )
+            .all()
+        )
+        if not agent_skill_rows:
+            return []
+
+        skill_ids = [row.skill_id for row in agent_skill_rows]
+        skills = (
+            self.db.query(Skill)
+            .filter(Skill.id.in_(skill_ids), Skill.enabled.is_(True))
+            .all()
+        )
+        skills_by_id = {skill.id: skill for skill in skills}
+        priority_map = {row.skill_id: row.priority for row in agent_skill_rows}
+
+        tool_ids_by_skill: dict[int, list[int]] = {skill_id: [] for skill_id in skill_ids}
+        for row in self.db.query(SkillTool).filter(SkillTool.skill_id.in_(skill_ids)).all():
+            tool_ids_by_skill.setdefault(row.skill_id, []).append(row.tool_id)
+
+        kb_ids_by_skill: dict[int, list[int]] = {skill_id: [] for skill_id in skill_ids}
+        for row in self.db.query(SkillKnowledgeBase).filter(SkillKnowledgeBase.skill_id.in_(skill_ids)).all():
+            kb_ids_by_skill.setdefault(row.skill_id, []).append(row.knowledge_base_id)
+
+        bindings = []
+        for skill_id in skill_ids:
+            skill = skills_by_id.get(skill_id)
+            if not skill:
+                continue
+            mode = normalize_activation_mode(skill.activation_mode)
+            if mode == "disabled":
+                continue
+            bindings.append(
+                {
+                    "id": skill.id,
+                    "name": skill.name,
+                    "description": skill.description or "",
+                    "category": skill.category or "general",
+                    "tags": skill.tags or [],
+                    "activation_mode": mode,
+                    "priority": priority_map.get(skill.id, 0),
+                    "system_prompt": skill.system_prompt or "",
+                    "tool_ids": list(dict.fromkeys(tool_ids_by_skill.get(skill.id, []))),
+                    "knowledge_base_ids": list(dict.fromkeys(kb_ids_by_skill.get(skill.id, []))),
+                }
+            )
+        return sorted(bindings, key=lambda item: item.get("priority", 0), reverse=True)
+
+    def _apply_runtime_skills(self, runtime, context: dict, chat_session: ChatSession) -> None:
+        bindings = list(getattr(runtime, "skill_bindings", []) or [])
+        manifest = [self._skill_manifest(item) for item in bindings]
+        context["skill_manifest"] = manifest
+        if not bindings:
+            context["skill_selection"] = {"loaded": [], "auto_candidates": [], "threshold": SKILL_AUTO_THRESHOLD, "top_k": SKILL_AUTO_TOP_K}
+            return
+
+        always_skills = [item for item in bindings if item["activation_mode"] == "always"]
+        manual_skills = [
+            item for item in bindings
+            if item["activation_mode"] == "manual" and self._skill_explicitly_requested(item, context.get("input") or "")
+        ]
+
+        selection_text = self._skill_selection_text(runtime, context, chat_session, [item["name"] for item in always_skills + manual_skills])
+        auto_candidates = self._score_runtime_skills(
+            selection_text,
+            [item for item in bindings if item["activation_mode"] == "auto"],
+        )
+        auto_skills = [
+            item
+            for item, score in auto_candidates
+            if score >= SKILL_AUTO_THRESHOLD
+        ][:SKILL_AUTO_TOP_K]
+
+        loaded = self._dedupe_skill_bindings(always_skills + manual_skills + auto_skills)
+        score_by_id = {item["id"]: score for item, score in auto_candidates}
+
+        skill_blocks = []
+        tool_ids = list(getattr(runtime, "tool_ids", []) or [])
+        kb_ids = list(getattr(runtime, "knowledge_base_ids", []) or [])
+        loaded_payload = []
+        for item in loaded:
+            if item["system_prompt"].strip():
+                skill_blocks.append(f"## Skill: {item['name']}\n{item['system_prompt'].strip()}")
+            tool_ids.extend(item.get("tool_ids") or [])
+            kb_ids.extend(item.get("knowledge_base_ids") or [])
+            loaded_payload.append(
+                {
+                    **self._skill_manifest(item),
+                    "score": round(score_by_id.get(item["id"], 1.0 if item["activation_mode"] == "always" else 0.0), 4),
+                    "tool_ids": item.get("tool_ids") or [],
+                    "knowledge_base_ids": item.get("knowledge_base_ids") or [],
+                }
+            )
+
+        base_prompt = getattr(runtime, "base_system_prompt", runtime.system_prompt) or ""
+        runtime.system_prompt = "\n\n".join([base_prompt, *skill_blocks]).strip()
+        runtime.tool_ids = list(dict.fromkeys(tool_ids))
+        runtime.knowledge_base_ids = list(dict.fromkeys(kb_ids))
+        context["loaded_skills"] = loaded_payload
+        context["skill_selection"] = {
+            "loaded": loaded_payload,
+            "auto_candidates": [
+                {**self._skill_manifest(item), "score": round(score, 4)}
+                for item, score in auto_candidates[:10]
+            ],
+            "threshold": SKILL_AUTO_THRESHOLD,
+            "top_k": SKILL_AUTO_TOP_K,
+        }
+
+    @staticmethod
+    def _skill_manifest(item: dict) -> dict:
+        tags = item.get("tags") or []
+        if isinstance(tags, str):
+            tags = [tags]
+        return {
+            "id": item["id"],
+            "name": item["name"],
+            "description": item.get("description") or "",
+            "category": item.get("category") or "general",
+            "tags": tags,
+            "activation_mode": item.get("activation_mode") or "auto",
+            "priority": item.get("priority", 0),
+        }
+
+    @staticmethod
+    def _dedupe_skill_bindings(items: list[dict]) -> list[dict]:
+        result = []
+        seen = set()
+        for item in items:
+            if item["id"] in seen:
+                continue
+            seen.add(item["id"])
+            result.append(item)
+        return result
+
+    def _skill_selection_text(self, runtime, context: dict, chat_session: ChatSession, active_skill_names: list[str]) -> str:
+        parts = [context.get("input") or ""]
+        if chat_session.title and chat_session.title != "新对话":
+            parts.append(f"会话标题：{chat_session.title}")
+        history = context.get("history_messages") or []
+        for item in history[-SKILL_SELECTION_HISTORY_MESSAGES:]:
+            role = item.get("role") or ""
+            content = str(item.get("content") or "")
+            if role in {"user", "assistant"} and content.strip():
+                parts.append(f"{role}: {content[:1200]}")
+        if context.get("memory_summary"):
+            parts.append(f"会话记忆：{str(context.get('memory_summary'))[:2000]}")
+        if active_skill_names:
+            parts.append("已加载技能：" + "、".join(active_skill_names))
+        return "\n".join(part for part in parts if str(part).strip())
+
+    @staticmethod
+    def _skill_explicitly_requested(item: dict, user_text: str) -> bool:
+        text = str(user_text or "").lower()
+        name = str(item.get("name") or "").strip().lower()
+        if not name:
+            return False
+        return name in text or f"@{name}" in text or f"#{name}" in text
+
+    def _score_runtime_skills(self, selection_text: str, skills: list[dict]) -> list[tuple[dict, float]]:
+        text = self._normalize_skill_text(selection_text)
+        scored = [(item, self._skill_match_score(text, item)) for item in skills]
+        return sorted(scored, key=lambda pair: (pair[1], pair[0].get("priority", 0)), reverse=True)
+
+    def _skill_match_score(self, normalized_text: str, item: dict) -> float:
+        if not normalized_text.strip():
+            return 0.0
+        score = 0.0
+        name = self._normalize_skill_text(item.get("name") or "")
+        if name and name in normalized_text:
+            score += 0.65
+        tags = item.get("tags") or []
+        if isinstance(tags, str):
+            tags = [tags]
+        for tag in tags:
+            tag_text = self._normalize_skill_text(tag)
+            if len(tag_text) >= 2 and tag_text in normalized_text:
+                score += 0.18
+        category = self._normalize_skill_text(item.get("category") or "")
+        if len(category) >= 2 and category in normalized_text:
+            score += 0.08
+
+        terms = self._skill_terms(item)
+        if terms:
+            matched_weight = sum(weight for term, weight in terms if term in normalized_text)
+            total_weight = sum(weight for _, weight in terms)
+            if total_weight > 0:
+                score += 0.55 * min(matched_weight / total_weight, 1.0)
+        return min(score, 1.0)
+
+    @staticmethod
+    def _normalize_skill_text(value: str) -> str:
+        return re.sub(r"\s+", " ", str(value or "").strip().lower())
+
+    def _skill_terms(self, item: dict) -> list[tuple[str, float]]:
+        tags = item.get("tags") or []
+        if isinstance(tags, str):
+            tags = [tags]
+        weighted_fields = [
+            (item.get("name") or "", 1.0),
+            (" ".join(str(tag) for tag in tags), 0.9),
+            (item.get("category") or "", 0.35),
+            (item.get("description") or "", 0.65),
+        ]
+        terms: dict[str, float] = {}
+        for text, weight in weighted_fields:
+            normalized = self._normalize_skill_text(text)
+            for token in re.findall(r"[a-z0-9_+#.-]+|[\u4e00-\u9fff]{2,}", normalized):
+                if len(token) < 2:
+                    continue
+                terms[token] = max(terms.get(token, 0.0), weight)
+                if re.fullmatch(r"[\u4e00-\u9fff]{4,}", token):
+                    for index in range(0, len(token) - 1):
+                        terms[token[index:index + 2]] = max(terms.get(token[index:index + 2], 0.0), weight * 0.35)
+        return list(terms.items())
 
     def _model_config(self, model_id: int | None, model_name: str | None) -> ModelConfig | None:
         return resolve_agent_model(self.db, model_id=model_id, model_name=model_name)
@@ -1674,6 +1959,163 @@ class WorkflowRunner:
             snippet = item.get("snippet") or ""
             lines.append(f"{index}. {title}\nURL: {url}\nSnippet: {snippet}")
         return "\n\n".join(lines)
+
+    def _skill_manifest_text(self, skills: list[dict]) -> str:
+        if not skills:
+            return ""
+        lines = [
+            "可用技能清单（渐进式披露）：",
+            "只有“本轮已加载技能”的完整规则已进入上下文；auto 技能需达阈值才加载，manual 技能需用户明确点名或通过 load_skill 加载，always 技能每轮加载。",
+        ]
+        for skill in skills[:80]:
+            tags = "、".join(skill.get("tags") or [])
+            desc = skill.get("description") or "无描述"
+            lines.append(
+                f"- [{skill.get('activation_mode')}] #{skill.get('id')} {skill.get('name')}: {desc}"
+                + (f"；标签：{tags}" if tags else "")
+            )
+        if len(skills) > 80:
+            lines.append(f"... 还有 {len(skills) - 80} 个技能未列出")
+        return "\n".join(lines)
+
+    def _loaded_skill_text(self, skills: list[dict]) -> str:
+        if not skills:
+            return "本轮已加载技能：无"
+        lines = ["本轮已加载技能："]
+        for skill in skills:
+            mode = skill.get("activation_mode") or "auto"
+            score = skill.get("score")
+            score_text = f"，score={score}" if score is not None else ""
+            lines.append(f"- [{mode}] {skill.get('name')}#{skill.get('id')}{score_text}")
+        return "\n".join(lines)
+
+    def _skill_loader_schema(self, agent, context: dict) -> dict | None:
+        loaded_ids = {item.get("id") for item in context.get("loaded_skills", [])}
+        loadable = [
+            item for item in getattr(agent, "skill_bindings", []) or []
+            if item.get("activation_mode") in {"auto", "manual"} and item.get("id") not in loaded_ids
+        ]
+        if not loadable:
+            return None
+        names = "、".join(f"{item['name']}#{item['id']}" for item in loadable[:20])
+        return {
+            "type": "function",
+            "function": {
+                "name": "load_skill",
+                "description": (
+                    "Load one available Skill's full instructions and its bound resources for this turn. "
+                    "Use this only when the user explicitly asks for a manual Skill or the manifest shows a relevant Skill that was not loaded. "
+                    f"Loadable skills: {names}"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "skill_id": {"type": "integer", "description": "Skill id from the manifest."},
+                        "skill_name": {"type": "string", "description": "Skill name from the manifest, used only if skill_id is absent."},
+                        "reason": {"type": "string", "description": "Why this Skill is required for the current task."},
+                    },
+                    "required": [],
+                },
+            },
+        }
+
+    def _handle_load_skill_call(self, agent, context: dict, args: dict) -> dict:
+        raw_skill_id = args.get("skill_id")
+        skill_id = None
+        try:
+            skill_id = int(raw_skill_id) if raw_skill_id not in (None, "") else None
+        except (TypeError, ValueError):
+            skill_id = None
+        skill_name = str(args.get("skill_name") or "").strip().lower()
+        loaded_ids = {item.get("id") for item in context.get("loaded_skills", [])}
+        binding = None
+        for item in getattr(agent, "skill_bindings", []) or []:
+            if item.get("id") in loaded_ids:
+                continue
+            if item.get("activation_mode") not in {"auto", "manual"}:
+                continue
+            if skill_id is not None and item.get("id") == skill_id:
+                binding = item
+                break
+            if skill_id is None and skill_name and str(item.get("name") or "").strip().lower() == skill_name:
+                binding = item
+                break
+        if not binding:
+            return {
+                "status": "error",
+                "content": json.dumps({"error": "skill_not_loadable", "requested": args}, ensure_ascii=False),
+                "result_preview": "Skill not found, already loaded, or not loadable.",
+                "latency_ms": 0,
+            }
+
+        payload = self._merge_loaded_skill(agent, context, binding, score=1.0, reason="load_skill")
+        retrieved = self._retrieve_skill_knowledge(agent, context, binding)
+        content = {
+            "loaded_skill": payload,
+            "retrieved_sources": len(retrieved),
+            "reason": args.get("reason") or "",
+        }
+        return {
+            "status": "success",
+            "content": json.dumps(content, ensure_ascii=False),
+            "result_preview": f"Loaded Skill: {binding['name']}",
+            "latency_ms": 0,
+        }
+
+    def _merge_loaded_skill(self, agent, context: dict, item: dict, *, score: float, reason: str) -> dict:
+        loaded = context.setdefault("loaded_skills", [])
+        if any(existing.get("id") == item["id"] for existing in loaded):
+            return next(existing for existing in loaded if existing.get("id") == item["id"])
+        if item.get("system_prompt", "").strip():
+            agent.system_prompt = "\n\n".join(
+                part for part in [
+                    getattr(agent, "system_prompt", "") or "",
+                    f"## Skill: {item['name']}\n{item['system_prompt'].strip()}",
+                ]
+                if part.strip()
+            )
+        agent.tool_ids = list(dict.fromkeys((getattr(agent, "tool_ids", []) or []) + (item.get("tool_ids") or [])))
+        agent.knowledge_base_ids = list(dict.fromkeys((getattr(agent, "knowledge_base_ids", []) or []) + (item.get("knowledge_base_ids") or [])))
+        payload = {
+            **self._skill_manifest(item),
+            "score": round(score, 4),
+            "reason": reason,
+            "tool_ids": item.get("tool_ids") or [],
+            "knowledge_base_ids": item.get("knowledge_base_ids") or [],
+        }
+        loaded.append(payload)
+        selection = context.setdefault("skill_selection", {"loaded": [], "auto_candidates": [], "threshold": SKILL_AUTO_THRESHOLD, "top_k": SKILL_AUTO_TOP_K})
+        selection["loaded"] = loaded
+        return payload
+
+    def _retrieve_skill_knowledge(self, agent, context: dict, item: dict) -> list[dict]:
+        kb_ids = item.get("knowledge_base_ids") or []
+        if not kb_ids or not context.get("rag_enabled", True):
+            return []
+        rag_result = retrieve(
+            self.db,
+            workspace_id=agent.workspace_id,
+            knowledge_base_ids=kb_ids,
+            query=context["input"],
+            config=context.get("rag_config") or {},
+            runtime_config=getattr(agent, "runtime_config", None),
+        )
+        existing = {json.dumps(source, ensure_ascii=False, sort_keys=True) for source in context.get("sources", [])}
+        added = []
+        for source in rag_result.sources:
+            key = json.dumps(source, ensure_ascii=False, sort_keys=True)
+            if key in existing:
+                continue
+            existing.add(key)
+            added.append(source)
+        if added:
+            context["sources"] = [*context.get("sources", []), *added]
+        return added
+
+    def _refresh_system_message(self, messages: list[dict], agent, context: dict) -> None:
+        if not messages or messages[0].get("role") != "system":
+            return
+        messages[0] = self._llm_messages(agent, context)[0]
 
     def _runtime_tools(self, agent, node: dict, context: dict | None = None) -> list[Tool]:
         tool_ids = getattr(agent, "tool_ids", []) or []

@@ -339,6 +339,27 @@ class OpenAICompatibleProvider:
             return
         if self._is_dashscope_qwen(api_base, model):
             payload["enable_thinking"] = bool(thinking_enabled)
+            return
+        if self._is_openai_reasoning_model(api_base, model):
+            if thinking_enabled:
+                payload["reasoning_effort"] = "high"
+            return
+
+    @staticmethod
+    def _is_openai_reasoning_model(api_base: str, model: str) -> bool:
+        normalized_model = (model or "").lower().strip()
+        if not normalized_model:
+            return False
+        # OpenAI-compatible gateways usually keep the original OpenAI model
+        # name even when api_base is not api.openai.com, so prefer model-name
+        # detection here instead of only checking the base URL.
+        openai_reasoning_prefixes = (
+            "gpt-5",
+            "o1",
+            "o3",
+            "o4",
+        )
+        return normalized_model.startswith(openai_reasoning_prefixes)
 
     @staticmethod
     def _is_dashscope_qwen(api_base: str, model: str) -> bool:

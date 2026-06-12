@@ -140,6 +140,21 @@ def _run_compat_migrations() -> None:
                 "created_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
             },
         )
+    if "skills" in table_names:
+        _ensure_columns(
+            "skills",
+            {
+                "activation_mode": "VARCHAR(20) DEFAULT 'auto'",
+            },
+        )
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "UPDATE skills "
+                    "SET activation_mode = 'auto' "
+                    "WHERE activation_mode IS NULL OR activation_mode = ''"
+                )
+            )
     if "agent_memory_profiles" in table_names:
         _ensure_columns(
             "agent_memory_profiles",

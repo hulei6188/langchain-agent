@@ -352,6 +352,7 @@ function defaultSkillForm() {
     system_prompt: '',
     icon: 'SK',
     category: 'general',
+    activation_mode: 'auto',
     tagsText: '',
     tags: [],
     tool_ids: [],
@@ -366,6 +367,7 @@ function skillFormPayload(form) {
     system_prompt: String(form.system_prompt || '').trim(),
     icon: String(form.icon || 'SK').trim() || 'SK',
     category: String(form.category || 'general').trim() || 'general',
+    activation_mode: ['auto', 'always', 'manual', 'disabled'].includes(form.activation_mode) ? form.activation_mode : 'auto',
     tags: String(form.tagsText || '')
       .split(',')
       .map((item) => item.trim())

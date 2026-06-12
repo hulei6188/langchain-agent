@@ -5,6 +5,13 @@ function toolTypeLabel(type) {
   return { builtin: '内置', builtin_search: '搜索', http: 'HTTP', mcp: 'MCP' }[type] || type || '未知';
 }
 
+const ACTIVATION_MODE_OPTIONS = [
+  { value: 'auto', label: '自动选择' },
+  { value: 'always', label: '每轮加载' },
+  { value: 'manual', label: '手动触发' },
+  { value: 'disabled', label: '不参与运行' },
+];
+
 export function SkillDialog({
   form,
   onCancel,
@@ -136,7 +143,19 @@ export function SkillDialog({
               </div>
 
               <label className="field-stack">
-                <span>技能 Prompt（运行时拼接到 Agent System Prompt 末尾）</span>
+                <span>激活策略</span>
+                <select
+                  value={form.activation_mode || 'auto'}
+                  onChange={(event) => onChange({ ...form, activation_mode: event.target.value })}
+                >
+                  {ACTIVATION_MODE_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>{option.label}</option>
+                  ))}
+                </select>
+              </label>
+
+              <label className="field-stack">
+                <span>技能 Prompt（技能被加载后拼接到 Agent System Prompt 末尾）</span>
                 <textarea
                   className="skill-prompt-textarea"
                   value={form.system_prompt}
