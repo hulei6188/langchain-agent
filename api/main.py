@@ -1733,7 +1733,12 @@ def list_agent_sessions(agent_id: int, membership: WorkspaceMember = Depends(get
     if not can_manage(membership.role):
         query = query.filter(ChatSession.user_id == membership.user_id)
     sessions = query.order_by(ChatSession.updated_at.desc()).all()
-    return {"items": [session_payload(session, db) for session in sessions]}
+    items = []
+    for session in sessions:
+        payload = session_payload(session, db)
+        payload["active_run"] = active_run_payload(db, session.id)
+        items.append(payload)
+    return {"items": items}
 
 
 @app.get("/api/sessions/{session_id}")
@@ -1743,39 +1748,10 @@ def get_session(session_id: int, membership: WorkspaceMember = Depends(get_curre
         raise HTTPException(status_code=404, detail="Session not found")
     require_session_access(session, membership)
     messages = db.query(Message).filter(Message.session_id == session.id).order_by(Message.id.asc()).all()
-    # Clean up stale running runs (>30 min) before returning active_run
-    stale_cutoff = datetime.now(timezone.utc) - timedelta(minutes=30)
-    stale_runs = (
-        db.query(Run)
-        .filter(
-            Run.session_id == session.id,
-            Run.status == "running",
-            Run.started_at < stale_cutoff,
-        )
-        .all()
-    )
-    for stale in stale_runs:
-        stale.status = "failed"
-        stale.completed_at = datetime.now(timezone.utc)
-    if stale_runs:
-        db.commit()
-    active_run = (
-        db.query(Run)
-        .filter(Run.session_id == session.id, Run.status == "running")
-        .order_by(Run.started_at.desc())
-        .first()
-    )
-    active_run_payload = None
-    if active_run:
-        active_run_payload = {
-            "id": active_run.id,
-            "status": active_run.status,
-            "started_at": active_run.started_at.isoformat() if active_run.started_at else None,
-        }
     return {
         "session": session_payload(session, db),
         "messages": chat_message_payloads(messages),
-        "active_run": active_run_payload,
+        "active_run": active_run_payload(db, session.id),
     }
 
 
@@ -2190,6 +2166,41 @@ def invite_payload(invite: WorkspaceInvite, *, include_token: bool = False) -> d
     if include_token:
         payload["token"] = invite.token
     return payload
+
+
+def cleanup_stale_session_runs(db: Session, session_id: int) -> None:
+    stale_cutoff = datetime.now(timezone.utc) - timedelta(minutes=30)
+    stale_runs = (
+        db.query(Run)
+        .filter(
+            Run.session_id == session_id,
+            Run.status == "running",
+            Run.started_at < stale_cutoff,
+        )
+        .all()
+    )
+    for stale in stale_runs:
+        stale.status = "failed"
+        stale.completed_at = datetime.now(timezone.utc)
+    if stale_runs:
+        db.commit()
+
+
+def active_run_payload(db: Session, session_id: int) -> dict | None:
+    cleanup_stale_session_runs(db, session_id)
+    active_run = (
+        db.query(Run)
+        .filter(Run.session_id == session_id, Run.status == "running")
+        .order_by(Run.started_at.desc())
+        .first()
+    )
+    if not active_run:
+        return None
+    return {
+        "id": active_run.id,
+        "status": active_run.status,
+        "started_at": active_run.started_at.isoformat() if active_run.started_at else None,
+    }
 
 
 def session_payload(session: ChatSession, db: Session) -> dict:

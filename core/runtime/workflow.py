@@ -33,7 +33,7 @@ from core.db.models import (
 )
 from core.integrations.llm import ChatResponse, OpenAICompatibleProvider, _CancelledError
 from core.runtime.cancel import register_run, unregister_run, is_cancelled
-from core.services.agents import get_agent_detail, normalize_memory, normalize_rag, normalize_tool_policy
+from core.services.agents import get_agent_detail, normalize_memory, normalize_rag, normalize_tool_policy, normalize_workdir
 from core.services.rag import retrieve
 from core.services.memory import format_profile_memory, get_memory_profile, memory_used_event
 from core.services.models import resolve_agent_model
@@ -296,6 +296,7 @@ class WorkflowRunner:
             "history_messages": self._session_history(chat_session.id, max_messages=int(memory_config.get("max_messages") or 12)),
             "current_message_id": None,
             "variables": self._merge_variables(runtime.settings.get("variables", []), variables or {}),
+            "agent_workdir": runtime.settings.get("workdir"),
             "memory_summary": memory.summary if memory else "",
             "profile_memory": profile_memory_text,
             "profile_memory_used": profile_memory_event,
@@ -504,6 +505,7 @@ class WorkflowRunner:
             "history_messages": self._session_history(chat_session.id, max_messages=int(memory_config.get("max_messages") or 12)),
             "current_message_id": current_message_id,
             "variables": self._merge_variables(runtime.settings.get("variables", []), variables or {}),
+            "agent_workdir": runtime.settings.get("workdir"),
             "memory_summary": memory.summary if memory else "",
             "profile_memory": profile_memory_text,
             "profile_memory_used": profile_memory_event,
@@ -671,6 +673,7 @@ class WorkflowRunner:
                         job = {
                             "tc": tc, "tool_name": tool_name, "tool_args": tool_args,
                             "matching": matching, "_session_key": _session_key,
+                            "_agent_workdir": context.get("agent_workdir"),
                             "internal": is_skill_loader,
                         }
                         jobs.append(job)
@@ -877,6 +880,7 @@ class WorkflowRunner:
                     job = {
                         "tc": tc, "tool_name": tool_name, "tool_args": tool_args,
                         "matching": matching, "_session_key": _session_key,
+                        "_agent_workdir": context.get("agent_workdir"),
                         "internal": is_skill_loader,
                     }
                     stream_jobs.append(job)
@@ -1206,7 +1210,14 @@ class WorkflowRunner:
         started = time.monotonic()
         if matching:
             try:
-                result = execute_tool(matching, {"input": tool_args, "_session_key": str(context.get("session_id") or "")})
+                result = execute_tool(
+                    matching,
+                    {
+                        "input": tool_args,
+                        "_session_key": str(context.get("session_id") or ""),
+                        "_agent_workdir": context.get("agent_workdir"),
+                    },
+                )
                 result["latency_ms"] = result.get("latency_ms", int((time.monotonic() - started) * 1000))
                 tool_content = result.get("content") or result.get("result_preview") or ""
                 event_data = {
@@ -1288,13 +1299,17 @@ class WorkflowRunner:
         tool_name = job["tool_name"]
         tool_args = job["tool_args"]
         session_key = job.get("_session_key", "")
+        agent_workdir = job.get("_agent_workdir")
 
         if not matching:
             return {"tool_name": tool_name, "error": "tool_not_found", "content": f"Tool '{tool_name}' not found", "result_preview": "", "latency_ms": 0}
 
         started = time.monotonic()
         try:
-            result = execute_tool(matching, {"input": tool_args, "_session_key": session_key})
+            result = execute_tool(
+                matching,
+                {"input": tool_args, "_session_key": session_key, "_agent_workdir": agent_workdir},
+            )
             result["latency_ms"] = result.get("latency_ms", int((time.monotonic() - started) * 1000))
             return result
         except ValueError as exc:
@@ -1539,6 +1554,7 @@ class WorkflowRunner:
                 "memory": normalize_memory(snapshot.get("memory")),
                 "rag": normalize_rag(snapshot.get("rag")),
                 "tool_policy": normalize_tool_policy(snapshot.get("tool_policy")),
+                "workdir": normalize_workdir(snapshot.get("workdir")),
                 "user_model_config_id": snapshot.get("user_model_config_id", agent.user_model_config_id),
             }
         else:
@@ -1555,6 +1571,7 @@ class WorkflowRunner:
                 "memory": normalize_memory(detail.get("memory")),
                 "rag": normalize_rag(detail.get("rag")),
                 "tool_policy": normalize_tool_policy(detail.get("tool_policy")),
+                "workdir": normalize_workdir(detail.get("workdir")),
                 "user_model_config_id": agent.user_model_config_id,
             }
 
@@ -1585,6 +1602,7 @@ class WorkflowRunner:
                 "memory": source["memory"],
                 "rag": source["rag"],
                 "tool_policy": source["tool_policy"],
+                "workdir": source["workdir"],
             },
         )
 

@@ -219,8 +219,7 @@ function App() {
   const [chatAttachments, setChatAttachments] = useState([]);
   const [uploadingAttachment, setUploadingAttachment] = useState(false);
   const [draft, setDraft] = useState('');
-  // Per-session running state: { [sessionId]: { running: true } }
-  // Only stores what's needed for UI re-renders (button state)
+  // Per-session running state used for UI re-renders.
   const [runningBySessionId, setRunningBySessionId] = useState({});
   const [activeNewRunKey, setActiveNewRunKey] = useState('');
   // Per-session mutable run state (no re-render needed): { [sessionId]: { runId, controller, genId } }
@@ -322,6 +321,27 @@ function App() {
   function setSessionRunning(sessionId) {
     if (!sessionId) return;
     setRunningBySessionId((prev) => ({ ...prev, [sessionId]: { running: true } }));
+  }
+  function syncListedSessionRuns(items) {
+    setRunningBySessionId((prev) => {
+      const next = { ...prev };
+      let changed = false;
+      (items || []).forEach((session) => {
+        const key = sessionCacheKey(session?.id);
+        if (!key) return;
+        const activeRun = session.active_run;
+        if (activeRun?.status === 'running') {
+          if (!next[key]?.running) {
+            next[key] = { running: true };
+            changed = true;
+          }
+        } else if (next[key]?.running) {
+          delete next[key];
+          changed = true;
+        }
+      });
+      return changed ? next : prev;
+    });
   }
   function clearSessionRunning(sessionId) {
     if (!sessionId) return;
@@ -732,6 +752,7 @@ function App() {
     const data = await api(`/api/agents/${agentId}/sessions`, { token });
     const items = data.items || [];
     setSessions(items);
+    syncListedSessionRuns(items);
     return items;
   }
 
@@ -1902,7 +1923,10 @@ function App() {
           }
         }
         setRunningBySessionId((prev) => {
-          const next = { ...prev, [data.session_id]: { running: true } };
+          const next = {
+            ...prev,
+            [data.session_id]: { running: true },
+          };
           delete next[ctx.placeholderId];
           return next;
         });
@@ -2016,6 +2040,9 @@ function App() {
         };
         return next;
       }, { visible });
+      if (data.session_id) clearSessionRunning(data.session_id);
+      if (sessionKey && sessionKey !== data.session_id) clearSessionRunning(sessionKey);
+      if (ctx?.placeholderId) clearSessionRunning(ctx.placeholderId);
       return;
     }
     if (event === 'token') {

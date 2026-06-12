@@ -108,7 +108,7 @@ def _exec_run_powershell(args: dict) -> dict:
             "result_preview": "Error: empty command",
         }
 
-    cwd = str(args.get("cwd") or "").strip() or None
+    cwd = str(args.get("cwd") or args.get("_agent_workdir") or "").strip() or None
     timeout = int(args.get("timeout") or 60)
     if timeout < 1:
         timeout = 60
@@ -919,7 +919,10 @@ def _execute_builtin_tool(tool: Tool, context: dict) -> dict:
         raise ValueError(f"Built-in tool '{tool.name}' is not available")
     input_data = context.get("input")
     if isinstance(input_data, dict):
-        return impl["execute"](input_data) | {"tool": tool.name, "tool_type": "builtin", "status_code": 200, "content_type": "application/json"}
+        args = dict(input_data)
+        if tool.name == "run_powershell" and context.get("_agent_workdir"):
+            args["_agent_workdir"] = context.get("_agent_workdir")
+        return impl["execute"](args) | {"tool": tool.name, "tool_type": "builtin", "status_code": 200, "content_type": "application/json"}
     return impl["execute"]({}) | {"tool": tool.name, "tool_type": "builtin", "status_code": 200, "content_type": "application/json"}
 
 

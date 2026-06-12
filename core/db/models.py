@@ -135,6 +135,7 @@ class AgentSettings(Base):
     rag: Mapped[dict] = mapped_column(JSON, default=dict)
     tool_policy: Mapped[dict] = mapped_column(JSON, default=dict)
     skill_policy: Mapped[dict] = mapped_column(JSON, default=dict)
+    workdir: Mapped[str | None] = mapped_column(String(500), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
 
 

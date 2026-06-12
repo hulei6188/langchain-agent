@@ -73,6 +73,7 @@ class AgentCreateRequest(BaseModel):
     memory: AgentMemoryConfig = Field(default_factory=AgentMemoryConfig)
     rag: AgentRagConfig = Field(default_factory=AgentRagConfig)
     tool_policy: AgentToolPolicy = Field(default_factory=AgentToolPolicy)
+    workdir: str | None = Field(default=None, max_length=500)
 
 
 class AgentUpdateRequest(BaseModel):
@@ -92,6 +93,7 @@ class AgentUpdateRequest(BaseModel):
     memory: AgentMemoryConfig | None = None
     rag: AgentRagConfig | None = None
     tool_policy: AgentToolPolicy | None = None
+    workdir: str | None = Field(default=None, max_length=500)
 
 
 class KnowledgeBaseCreateRequest(BaseModel):
