@@ -141,7 +141,21 @@ import {
 const THEME_STORAGE_KEY = 'agentbase_theme';
 const CHAT_AGENT_QUERY_PARAM = 'agent';
 const CHAT_SESSION_QUERY_PARAM = 'session';
+const APP_VIEW_QUERY_PARAM = 'view';
+const APP_NAV_QUERY_PARAM = 'nav';
 const THEME_MODES = ['light', 'dark', 'system'];
+const APP_NAV_VALUES = new Set([
+  'chat',
+  'agents',
+  'market',
+  'my-models',
+  'tools',
+  'skills',
+  'resources',
+  'knowledge',
+  'reviews',
+  'members',
+]);
 
 function initialThemeMode() {
   const stored = localStorage.getItem(THEME_STORAGE_KEY);
@@ -153,12 +167,31 @@ function sameRouteId(left, right) {
   return String(left) === String(right);
 }
 
+function normalizeAppView(value) {
+  return value === 'builder' ? 'builder' : 'home';
+}
+
+function normalizeAppNav(value, view = 'home') {
+  if (view === 'builder') return 'agents';
+  return APP_NAV_VALUES.has(value) ? value : 'chat';
+}
+
+function isChatHomeRoute(route) {
+  return route?.view === 'home' && route?.nav === 'chat';
+}
+
 function readChatRoute() {
-  if (typeof window === 'undefined') return { agentId: null, sessionId: null };
+  if (typeof window === 'undefined') {
+    return { agentId: null, sessionId: null, view: 'home', nav: 'chat' };
+  }
   const params = new URLSearchParams(window.location.search);
+  const view = normalizeAppView(params.get(APP_VIEW_QUERY_PARAM));
+  const nav = normalizeAppNav(params.get(APP_NAV_QUERY_PARAM), view);
   return {
     agentId: params.get(CHAT_AGENT_QUERY_PARAM) || null,
     sessionId: params.get(CHAT_SESSION_QUERY_PARAM) || null,
+    view,
+    nav,
   };
 }
 
@@ -180,13 +213,44 @@ function clearChatRoute(options = {}) {
   writeChatRoute(null, null, options);
 }
 
+function writePageRoute(view, nav, options = {}) {
+  if (typeof window === 'undefined') return;
+  const url = new URL(window.location.href);
+  const nextView = normalizeAppView(view);
+  const nextNav = normalizeAppNav(nav, nextView);
+  if (nextView === 'home') url.searchParams.delete(APP_VIEW_QUERY_PARAM);
+  else url.searchParams.set(APP_VIEW_QUERY_PARAM, nextView);
+  if (nextView === 'home' && nextNav === 'chat') url.searchParams.delete(APP_NAV_QUERY_PARAM);
+  else url.searchParams.set(APP_NAV_QUERY_PARAM, nextNav);
+  if (Object.prototype.hasOwnProperty.call(options, 'agentId')) {
+    if (options.agentId) url.searchParams.set(CHAT_AGENT_QUERY_PARAM, String(options.agentId));
+    else url.searchParams.delete(CHAT_AGENT_QUERY_PARAM);
+  }
+  if (nextView === 'home' && nextNav === 'chat') {
+    if (Object.prototype.hasOwnProperty.call(options, 'sessionId')) {
+      if (options.sessionId) url.searchParams.set(CHAT_SESSION_QUERY_PARAM, String(options.sessionId));
+      else url.searchParams.delete(CHAT_SESSION_QUERY_PARAM);
+    }
+  } else {
+    url.searchParams.delete(CHAT_SESSION_QUERY_PARAM);
+  }
+  const nextUrl = `${url.pathname}${url.search}${url.hash}`;
+  const currentUrl = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+  if (nextUrl === currentUrl) return;
+  const method = options.mode === 'push' ? 'pushState' : 'replaceState';
+  window.history[method]({}, '', nextUrl);
+}
+
 function systemPrefersDark() {
   return Boolean(typeof window !== 'undefined' && window.matchMedia?.('(prefers-color-scheme: dark)').matches);
 }
 
 function App() {
   const [token, setToken] = useState(initialAuthToken);
-  const [routeRestoring, setRouteRestoring] = useState(() => Boolean(initialAuthToken() && readChatRoute().sessionId));
+  const [routeRestoring, setRouteRestoring] = useState(() => {
+    const route = readChatRoute();
+    return Boolean(initialAuthToken() && isChatHomeRoute(route) && route.sessionId);
+  });
   const [me, setMe] = useState(null);
   const [workspace, setWorkspace] = useState(null);
   const [agents, setAgents] = useState([]);
@@ -369,8 +433,8 @@ function App() {
   const [docForm, setDocForm] = useState({ filename: 'guide.txt', text: '这里是一段知识库资料。', kb_id: '' });
   const [uploadingKnowledgeFile, setUploadingKnowledgeFile] = useState(false);
   const [uploadingKnowledgeItems, setUploadingKnowledgeItems] = useState([]);
-  const [view, setView] = useState('home');
-  const [activeNav, setActiveNav] = useState('chat');
+  const [view, setView] = useState(() => readChatRoute().view);
+  const [activeNav, setActiveNav] = useState(() => readChatRoute().nav);
   const [homePrompt, setHomePrompt] = useState('');
   const [submittedPromptHistory, setSubmittedPromptHistory] = useState([]);
   const [accountMenuOpen, setAccountMenuOpen] = useState(false);
@@ -446,7 +510,8 @@ function App() {
 
   useEffect(() => {
     if (token) {
-      setRouteRestoring(Boolean(readChatRoute().sessionId));
+      const route = readChatRoute();
+      setRouteRestoring(Boolean(isChatHomeRoute(route) && route.sessionId));
       bootstrap().catch((err) => {
         if (isAuthError(err)) {
           logout();
@@ -477,10 +542,17 @@ function App() {
     if (!token) return undefined;
     const handlePopState = () => {
       const route = readChatRoute();
+      const routeIsChat = isChatHomeRoute(route);
       pendingChatRestoreRef.current = route;
+      setView(route.view);
+      setActiveNav(route.nav);
       if (route.agentId && !sameRouteId(route.agentId, activeAgentIdRef.current)) {
-        setRouteRestoring(Boolean(route.sessionId));
+        setRouteRestoring(Boolean(routeIsChat && route.sessionId));
         setActiveAgentId(Number(route.agentId));
+        return;
+      }
+      if (!routeIsChat) {
+        setRouteRestoring(false);
         return;
       }
       if (route.sessionId) {
@@ -505,6 +577,16 @@ function App() {
     window.addEventListener('popstate', handlePopState);
     return () => window.removeEventListener('popstate', handlePopState);
   }, [token, activeAgentId, activeSessionId, agentForm.variables, view]);
+
+  useEffect(() => {
+    if (!token || routeRestoring) return;
+    const options = {
+      mode: 'replace',
+      sessionId: activeNav === 'chat' ? activeSessionId : null,
+    };
+    if (activeAgentId) options.agentId = activeAgentId;
+    writePageRoute(view, activeNav, options);
+  }, [token, routeRestoring, view, activeNav, activeAgentId, activeSessionId]);
 
   useEffect(() => {
     if (activeNav !== 'chat' || !chatAgents.length) return;
@@ -730,7 +812,9 @@ function App() {
     await loadMemoryProfile(agentId);
     const loadedSessions = await loadSessions(agentId);
     const rememberedRoute = pendingChatRestoreRef.current;
+    const rememberedIsChatRoute = isChatHomeRoute(rememberedRoute);
     const shouldRestoreSession = rememberedRoute?.sessionId
+      && rememberedIsChatRoute
       && sameRouteId(rememberedRoute.agentId, agentId)
       && loadedSessions.some((session) => sameRouteId(session.id, rememberedRoute.sessionId));
     if (shouldRestoreSession) {
@@ -742,7 +826,9 @@ function App() {
       }
     } else if (rememberedRoute?.agentId && sameRouteId(rememberedRoute.agentId, agentId)) {
       pendingChatRestoreRef.current = null;
-      writeChatRoute(agentId, null, { mode: 'replace' });
+      if (rememberedIsChatRoute) {
+        writeChatRoute(agentId, null, { mode: 'replace' });
+      }
       setRouteRestoring(false);
     } else {
       setRouteRestoring(false);
