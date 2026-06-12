@@ -140,6 +140,7 @@ import {
 
 const THEME_STORAGE_KEY = 'agentbase_theme';
 const SIDEBAR_COLLAPSED_STORAGE_KEY = 'agentbase_sidebar_collapsed';
+const CHAT_WELCOME_SNAPSHOT_STORAGE_KEY = 'agentbase_chat_welcome_snapshot';
 const CHAT_AGENT_QUERY_PARAM = 'agent';
 const CHAT_SESSION_QUERY_PARAM = 'session';
 const APP_VIEW_QUERY_PARAM = 'view';
@@ -166,6 +167,18 @@ function initialThemeMode() {
 function initialSidebarHidden() {
   if (typeof window === 'undefined') return false;
   return localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY) === 'true';
+}
+
+function readChatWelcomeSnapshot() {
+  if (typeof window === 'undefined') return null;
+  try {
+    const value = localStorage.getItem(CHAT_WELCOME_SNAPSHOT_STORAGE_KEY);
+    if (!value) return null;
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch {
+    return null;
+  }
 }
 
 function sameRouteId(left, right) {
@@ -443,6 +456,7 @@ function App() {
   const [uploadingKnowledgeItems, setUploadingKnowledgeItems] = useState([]);
   const [view, setView] = useState(() => readChatRoute().view);
   const [activeNav, setActiveNav] = useState(() => readChatRoute().nav);
+  const [chatWelcomeSnapshot, setChatWelcomeSnapshot] = useState(readChatWelcomeSnapshot);
   const [homePrompt, setHomePrompt] = useState('');
   const [submittedPromptHistory, setSubmittedPromptHistory] = useState([]);
   const [accountMenuOpen, setAccountMenuOpen] = useState(false);
@@ -480,6 +494,43 @@ function App() {
   const activeKbId = Number(docForm.kb_id || knowledgeBases[0]?.id || 0);
   const canManage = isAdminRole(workspace?.role);
   const canEditActive = !!activeAgent && (canManage || activeAgent.created_by === me?.id);
+
+  useEffect(() => {
+    if (appBootstrapping || activeNav !== 'chat' || !activeAgent) return;
+    const model = activeAgent.user_model_config || activeAgent.model_config || null;
+    const snapshot = {
+      agentId: activeAgent.id,
+      name: activeAgent.name || agentForm.name || '',
+      description: activeAgent.description || agentForm.description || '',
+      suggested_questions: agentForm.suggested_questions || [],
+      variables: agentForm.variables || [],
+      model: model ? {
+        id: model.id ?? null,
+        source: model.source || '',
+        model_name: model.model_name || '',
+        chat_model: model.chat_model || model.model || '',
+        supports_reasoning: Boolean(model.supports_reasoning),
+        reasoning_type: model.reasoning_type || '',
+        supports_vision: Boolean(model.supports_vision),
+        supports_file_upload: Boolean(model.supports_file_upload),
+        input_modalities: model.input_modalities || [],
+      } : null,
+    };
+    setChatWelcomeSnapshot(snapshot);
+    localStorage.setItem(CHAT_WELCOME_SNAPSHOT_STORAGE_KEY, JSON.stringify(snapshot));
+  }, [
+    appBootstrapping,
+    activeNav,
+    activeAgent?.id,
+    activeAgent?.name,
+    activeAgent?.description,
+    activeAgent?.user_model_config,
+    activeAgent?.model_config,
+    agentForm.name,
+    agentForm.description,
+    agentForm.suggested_questions,
+    agentForm.variables,
+  ]);
 
   useEffect(() => {
     document.body.classList.toggle('dark', isDarkTheme);
@@ -529,7 +580,8 @@ function App() {
           setError(errorMessage(err));
         }
         setRouteRestoring(false);
-      }).finally(() => setAppBootstrapping(false));
+        setAppBootstrapping(false);
+      });
     }
   }, [token]);
 
@@ -543,6 +595,7 @@ function App() {
           setError(errorMessage(err));
         }
         setRouteRestoring(false);
+        setAppBootstrapping(false);
       });
     }
   }, [activeAgentId]);
@@ -588,7 +641,7 @@ function App() {
   }, [token, activeAgentId, activeSessionId, agentForm.variables, view]);
 
   useEffect(() => {
-    if (!token || routeRestoring) return;
+    if (!token || routeRestoring || appBootstrapping) return;
     const currentRoute = readChatRoute();
     if (isChatHomeRoute(currentRoute) && currentRoute.sessionId && activeNav === 'chat' && !activeSessionId) {
       return;
@@ -599,7 +652,7 @@ function App() {
     };
     if (activeAgentId) options.agentId = activeAgentId;
     writePageRoute(view, activeNav, options);
-  }, [token, routeRestoring, view, activeNav, activeAgentId, activeSessionId]);
+  }, [token, routeRestoring, appBootstrapping, view, activeNav, activeAgentId, activeSessionId]);
 
   useEffect(() => {
     if (activeNav !== 'chat' || !chatAgents.length) return;
@@ -708,20 +761,27 @@ function App() {
     setMembers(memberList.items || []);
     const publishedAgents = agentList.items.filter((item) => item.status === 'published' && item.published_version_id);
     const rememberedRoute = pendingChatRestoreRef.current || readChatRoute();
+    const rememberedSnapshot = readChatWelcomeSnapshot();
     const rememberedAgent = rememberedRoute.agentId
       ? agentList.items.find((item) => sameRouteId(item.id, rememberedRoute.agentId))
+      : null;
+    const snapshotAgent = !rememberedRoute.sessionId && rememberedSnapshot?.agentId
+      ? agentList.items.find((item) => sameRouteId(item.id, rememberedSnapshot.agentId))
       : null;
     if (rememberedRoute.agentId && !rememberedAgent) {
       pendingChatRestoreRef.current = null;
       clearChatRoute();
     }
-    const fallbackAgent = rememberedAgent || publishedAgents[0] || agentList.items[0];
+    const fallbackAgent = rememberedAgent || snapshotAgent || publishedAgents[0] || agentList.items[0];
     if (!activeAgentId && fallbackAgent) {
       setActiveAgentId(fallbackAgent.id);
     } else if (activeAgentId && !agentList.items.some((item) => item.id === activeAgentId) && fallbackAgent) {
       setActiveAgentId(fallbackAgent.id);
+    } else if (activeAgentId && agentList.items.some((item) => item.id === activeAgentId)) {
+      setAppBootstrapping(false);
     } else if (!fallbackAgent) {
       setRouteRestoring(false);
+      setAppBootstrapping(false);
     }
   }
 
@@ -853,6 +913,7 @@ function App() {
     } else {
       setRouteRestoring(false);
     }
+    setAppBootstrapping(false);
   }
 
   async function loadSessions(agentId) {
@@ -2443,6 +2504,7 @@ function App() {
     chatAgents,
     chatAttachments,
     chatVariables,
+    chatWelcomeSnapshot,
     clearKnowledgeBaseDocuments,
     copyMarketAgent,
     copyBuiltinPromptTemplate,
@@ -2629,6 +2691,7 @@ function HomeView(props) {
     chatAgents,
     chatAttachments,
     chatVariables,
+    chatWelcomeSnapshot,
     clearKnowledgeBaseDocuments,
     copyBuiltinPromptTemplate,
     copyMarketAgent,
@@ -3045,6 +3108,7 @@ function HomeView(props) {
             activeSummary={activeSummary}
             appBootstrapping={appBootstrapping}
             chatAgents={chatAgents}
+            chatWelcomeSnapshot={chatWelcomeSnapshot}
             canEditActive={canEditActive}
             openBuilder={openBuilder}
             setActiveAgentId={selectChatAgent}

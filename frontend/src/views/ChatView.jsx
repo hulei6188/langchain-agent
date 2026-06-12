@@ -86,6 +86,7 @@ export function ChatView({
   activeAgent,
   appBootstrapping,
   chatAgents,
+  chatWelcomeSnapshot,
   // ChatHomeV2 props
   activeSessionId,
   agentForm,
@@ -127,6 +128,7 @@ export function ChatView({
       chatAgents={chatAgents}
       chatAttachments={chatAttachments}
       chatVariables={chatVariables}
+      chatWelcomeSnapshot={chatWelcomeSnapshot}
       error={error}
       feedbackByMessage={feedbackByMessage}
       homePrompt={homePrompt}
@@ -164,6 +166,7 @@ function ChatHomeV2({
   chatAgents,
   chatAttachments,
   chatVariables,
+  chatWelcomeSnapshot,
   error,
   feedbackByMessage,
   homePrompt,
@@ -198,7 +201,8 @@ function ChatHomeV2({
   const lastTouchYRef = useRef(null);
   const previousSessionKeyRef = useRef('');
   const previousMessageCountRef = useRef(0);
-  const currentModel = activeAgent?.user_model_config || activeAgent?.model_config || null;
+  const stableWelcome = appBootstrapping && chatWelcomeSnapshot ? chatWelcomeSnapshot : null;
+  const currentModel = stableWelcome?.model || activeAgent?.user_model_config || activeAgent?.model_config || null;
   const conversationStarted = !routeRestoring && (Boolean(activeSessionId) || messages.some((message) => message.role === 'user'));
   const [welcomeTitle, setWelcomeTitle] = useState(() => randomWelcomeTitle());
   const ragAvailable = ragRuntime.available;
@@ -215,6 +219,14 @@ function ChatHomeV2({
   const attachmentHint = chatAttachments.length ? `${chatAttachments.length} file ready` : attachmentHintForModel(currentModel);
   const runtimeWarning = modelWarning || { text: '' }; // Fallback
   const hasChatAgent = appBootstrapping || chatAgents.length > 0;
+  const displayAgentName = stableWelcome?.name || activeAgent?.name || agentForm.name || CHAT_COPY.fallbackAgent;
+  const displayAgentDesc = stableWelcome?.description || activeAgent?.description || agentForm.description || CHAT_COPY.welcomeDesc;
+  const displaySuggestedQuestions = stableWelcome?.suggested_questions?.length
+    ? stableWelcome.suggested_questions
+    : agentForm.suggested_questions?.length
+      ? agentForm.suggested_questions
+      : [CHAT_COPY.promptIntro, CHAT_COPY.promptPlan, CHAT_COPY.promptKb];
+  const displayVariables = stableWelcome?.variables || agentForm.variables || [];
   const promptHistory = useMemo(() => {
     const userMessagePrompts = (messages || [])
       .filter((message) => message?.role === 'user')
@@ -380,9 +392,9 @@ function ChatHomeV2({
         ) : !conversationStarted ? (
           <section className="welcome-panel">
             <h1>{welcomeTitle}</h1>
-            <p>{activeAgent?.description || agentForm.description || CHAT_COPY.welcomeDesc}</p>
+            <p>{displayAgentDesc}</p>
             <div className="quick-prompts">
-              {(agentForm.suggested_questions?.length ? agentForm.suggested_questions : [CHAT_COPY.promptIntro, CHAT_COPY.promptPlan, CHAT_COPY.promptKb]).map((question, index) => (
+              {displaySuggestedQuestions.map((question, index) => (
                 <button type="button" key={`${question}-${index}`} onClick={() => sendSuggestedQuestion(question)}>
                   {question}
                 </button>
@@ -399,15 +411,15 @@ function ChatHomeV2({
       </div>
       {!routeRestoring && hasChatAgent && (
         <div className="composer-dock" ref={composerDockRef}>
-          {(agentForm.variables || []).length > 0 && (
-            <VariableBar variables={agentForm.variables} values={chatVariables} onChange={updateChatVariable} />
+          {displayVariables.length > 0 && (
+            <VariableBar variables={displayVariables} values={chatVariables} onChange={updateChatVariable} />
           )}
           <ChatComposer
             className="home-composer"
             value={homePrompt}
             onChange={setHomePrompt}
             promptHistory={promptHistory}
-            placeholder={`${CHAT_COPY.sendPrefix} ${activeAgent?.name || agentForm.name || CHAT_COPY.fallbackAgent} ${CHAT_COPY.sendSuffix}`}
+            placeholder={`${CHAT_COPY.sendPrefix} ${displayAgentName} ${CHAT_COPY.sendSuffix}`}
             onSubmit={(event) => sendMessage(event, homePrompt)}
             submitDisabled={busy || uploadingAttachment || !!modelWarning || (!homePrompt.trim() && !chatAttachments.length)}
             busy={busy}
