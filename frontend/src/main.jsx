@@ -1910,6 +1910,47 @@ function App() {
       visible = _streamVisible(ctx);
     };
 
+    if (event === 'run_snapshot') {
+      const snapshotContent = String(data.content || '');
+      const snapshotReasoning = String(data.reasoning || '');
+      const snapshotSources = Array.isArray(data.sources) ? data.sources : [];
+      if (snapshotSources.length) {
+        writeSessionSources(messageKey, snapshotSources, { visible });
+      }
+      updateSessionMessages(messageKey, (currentMessages) => {
+        const { next, last, index } = ensureAssistantTail(currentMessages, {
+          pending: true,
+          reasoningVisible: Boolean(snapshotReasoning),
+          reasoningPending: Boolean(snapshotReasoning) && !snapshotContent,
+          reasoningStartedAt: snapshotReasoning ? Date.now() : null,
+        });
+        let assistant = {
+          ...last,
+          pending: true,
+          content: snapshotContent || last.content || '',
+          reasoning: snapshotReasoning || last.reasoning || '',
+          reasoningVisible: Boolean(snapshotReasoning) || last.reasoningVisible,
+          reasoningPending: Boolean(snapshotReasoning) && !snapshotContent,
+          reasoningStartedAt: snapshotReasoning ? (last.reasoningStartedAt || Date.now()) : last.reasoningStartedAt,
+          sources: snapshotSources.length ? snapshotSources : last.sources,
+          _provisionalContent: data.provisional_content || last._provisionalContent,
+        };
+        if (snapshotReasoning) {
+          assistant.reasoningTimeline = [{
+            id: `snapshot-reasoning-${data.event_index || Date.now()}`,
+            type: 'reasoning',
+            content: snapshotReasoning,
+          }];
+        }
+        (Array.isArray(data.timeline_events) ? data.timeline_events : []).forEach((item) => {
+          assistant = appendToolTimelineItem(assistant, item?.data || {}, item?.event || 'tool_call');
+        });
+        next[index] = assistant;
+        return next;
+      }, { visible });
+      return;
+    }
+
     if (event === 'run_started') {
       if (sessionKey && sessionRunRef.current[sessionKey]) {
         sessionRunRef.current[sessionKey].runId = data.run_id || null;

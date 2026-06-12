@@ -312,6 +312,61 @@ def sse_event_name(sse_str: str) -> str:
     return ""
 
 
+def sse_event_data(sse_str: str) -> dict:
+    for line in str(sse_str or "").splitlines():
+        if line.startswith("data:"):
+            raw = line.partition(":")[2].strip()
+            if not raw:
+                return {}
+            try:
+                return json.loads(raw)
+            except json.JSONDecodeError:
+                return {}
+    return {}
+
+
+def _run_stream_snapshot(run_id: int) -> dict:
+    with _run_event_lock:
+        log = list(_run_event_logs.get(run_id, []))
+
+    content = ""
+    provisional_content = ""
+    reasoning = ""
+    sources: list[dict] = []
+    timeline_events: list[dict] = []
+    for entry in log:
+        event_name = sse_event_name(entry)
+        data = sse_event_data(entry)
+        if event_name == "token":
+            content += str(data.get("content") or "")
+        elif event_name == "provisional_token":
+            chunk = str(data.get("content") or "")
+            content += chunk
+            provisional_content += chunk
+        elif event_name == "provisional_clear":
+            if provisional_content and content.endswith(provisional_content):
+                content = content[: -len(provisional_content)]
+            provisional_content = ""
+        elif event_name == "provisional_commit":
+            provisional_content = ""
+        elif event_name == "reasoning_token":
+            reasoning += str(data.get("content") or "")
+        elif event_name == "sources":
+            items = data.get("items")
+            sources = items if isinstance(items, list) else []
+        elif event_name in {"tool_call", "tool_call_start", "tool_call_result", "search_status"}:
+            timeline_events.append({"event": event_name, "data": data})
+
+    return {
+        "event_index": len(log),
+        "content": content,
+        "reasoning": reasoning,
+        "provisional_content": provisional_content,
+        "sources": sources,
+        "timeline_events": timeline_events[-200:],
+    }
+
+
 def safe_stream_error(exc: Exception) -> dict:
     message = str(exc)
     if any(public_error in message for public_error in PUBLIC_CHAT_ERRORS):
@@ -2082,6 +2137,16 @@ def stream_run_events(run_id: int, since: int = Query(0), membership: WorkspaceM
     def _event_stream() -> Iterable[str]:
         emitted = max(0, since)
         terminal_seen = False
+        if emitted == 0:
+            db_sess = SessionLocal()
+            try:
+                current = db_sess.get(Run, run_id)
+                if current is not None and current.status == "running":
+                    snapshot = _run_stream_snapshot(run_id)
+                    emitted = int(snapshot.get("event_index") or 0)
+                    yield sse_event("run_snapshot", snapshot)
+            finally:
+                db_sess.close()
         # Phase 1: replay buffered events
         while True:
             events, total = _get_run_events_since(run_id, emitted)
