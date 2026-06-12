@@ -2990,7 +2990,7 @@ function HomeView(props) {
             deleteAgent={deleteAgent}
             me={me}
             openBuilder={openBuilder}
-            setActiveAgentId={setActiveAgentId}
+            setActiveAgentId={(agentId) => selectChatAgent(agentId, { historyMode: 'replace' })}
           />
         )}
 
