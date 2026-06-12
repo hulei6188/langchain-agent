@@ -4,14 +4,10 @@ from sqlalchemy.orm import Session
 
 from core.config import get_settings
 from core.db.models import (
-    Agent,
-    AgentKnowledgeBase,
     AgentTool,
-    KnowledgeBase,
     ModelConfig,
     Tool,
     User,
-    WorkflowDefinition,
     Workspace,
     WorkspaceMember,
 )
@@ -104,38 +100,6 @@ def ensure_default_models(db: Session) -> None:
         db.commit()
 
 
-def ensure_template_agent(db: Session, owner: User, workspace: Workspace) -> Agent:
-    existing = db.query(Agent).filter(Agent.workspace_id == workspace.id, Agent.is_template.is_(True)).first()
-    if existing:
-        return existing
-    kb = KnowledgeBase(
-        workspace_id=workspace.id,
-        name="扫地机器人客服知识库",
-        description="内置模板知识库，演示智能硬件客服 RAG 场景。",
-        created_by=owner.id,
-    )
-    db.add(kb)
-    db.flush()
-    agent = Agent(
-        workspace_id=workspace.id,
-        name="扫地机器人客服",
-        avatar="SR",
-        description="面向扫地机器人售前、故障排查和维护保养的示例智能体。",
-        opening_message="你好，我可以帮你排查扫地机器人问题、解释维护建议，也可以演示知识库引用。",
-        system_prompt="你是一个谨慎的中文智能硬件客服智能体。优先基于绑定知识库回答，资料不足时明确说明。",
-        model=get_settings().openai_model,
-        temperature=0.3,
-        is_template=True,
-        created_by=owner.id,
-    )
-    db.add(agent)
-    db.flush()
-    db.add(AgentKnowledgeBase(agent_id=agent.id, knowledge_base_id=kb.id))
-    db.add(WorkflowDefinition(agent_id=agent.id, nodes=DEFAULT_WORKFLOW))
-    db.commit()
-    return agent
-
-
 def create_first_user_workspace(db: Session, *, email: str, name: str, password: str) -> tuple[User, Workspace]:
     user = User(email=email.lower(), name=name, password_hash=hash_password(password))
     workspace = Workspace(name=f"{name} 的工作台", slug="default")
@@ -145,7 +109,6 @@ def create_first_user_workspace(db: Session, *, email: str, name: str, password:
     db.commit()
     ensure_default_models(db)
     ensure_builtin_tools(db)
-    ensure_template_agent(db, user, workspace)
     return user, workspace
 
 
