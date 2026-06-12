@@ -3043,6 +3043,7 @@ function HomeView(props) {
             activeAgent={activeAgent}
             activeAgentId={activeAgentId}
             activeSummary={activeSummary}
+            appBootstrapping={appBootstrapping}
             chatAgents={chatAgents}
             canEditActive={canEditActive}
             openBuilder={openBuilder}

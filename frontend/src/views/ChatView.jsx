@@ -84,6 +84,7 @@ function isNearConversationBottom(conversation, threshold = 96) {
 
 export function ChatView({
   activeAgent,
+  appBootstrapping,
   chatAgents,
   // ChatHomeV2 props
   activeSessionId,
@@ -119,6 +120,7 @@ export function ChatView({
   return (
     <ChatHomeV2
       activeAgent={activeAgent}
+      appBootstrapping={appBootstrapping}
       activeSessionId={activeSessionId}
       agentForm={agentForm}
       busy={busy}
@@ -155,6 +157,7 @@ export function ChatView({
 
 function ChatHomeV2({
   activeAgent,
+  appBootstrapping,
   activeSessionId,
   agentForm,
   busy,
@@ -211,7 +214,7 @@ function ChatHomeV2({
   const attachmentDisabled = uploadingAttachment || !attachmentAccept;
   const attachmentHint = chatAttachments.length ? `${chatAttachments.length} file ready` : attachmentHintForModel(currentModel);
   const runtimeWarning = modelWarning || { text: '' }; // Fallback
-  const hasChatAgent = chatAgents.length > 0;
+  const hasChatAgent = appBootstrapping || chatAgents.length > 0;
   const promptHistory = useMemo(() => {
     const userMessagePrompts = (messages || [])
       .filter((message) => message?.role === 'user')
