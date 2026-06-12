@@ -139,6 +139,7 @@ import {
 } from './utils.js';
 
 const THEME_STORAGE_KEY = 'agentbase_theme';
+const SIDEBAR_COLLAPSED_STORAGE_KEY = 'agentbase_sidebar_collapsed';
 const CHAT_AGENT_QUERY_PARAM = 'agent';
 const CHAT_SESSION_QUERY_PARAM = 'session';
 const APP_VIEW_QUERY_PARAM = 'view';
@@ -160,6 +161,11 @@ const APP_NAV_VALUES = new Set([
 function initialThemeMode() {
   const stored = localStorage.getItem(THEME_STORAGE_KEY);
   return THEME_MODES.includes(stored) ? stored : 'light';
+}
+
+function initialSidebarHidden() {
+  if (typeof window === 'undefined') return false;
+  return localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY) === 'true';
 }
 
 function sameRouteId(left, right) {
@@ -251,6 +257,7 @@ function App() {
     const route = readChatRoute();
     return Boolean(initialAuthToken() && isChatHomeRoute(route) && route.sessionId);
   });
+  const initialRoute = readChatRoute();
   const [me, setMe] = useState(null);
   const [workspace, setWorkspace] = useState(null);
   const [agents, setAgents] = useState([]);
@@ -268,7 +275,7 @@ function App() {
   const [reviewItems, setReviewItems] = useState([]);
   const [members, setMembers] = useState([]);
   const [sessions, setSessions] = useState([]);
-  const [activeSessionId, setActiveSessionId] = useState(null);
+  const [activeSessionId, setActiveSessionId] = useState(() => (isChatHomeRoute(initialRoute) ? initialRoute.sessionId : null));
   const [sessionTitleDraft, setSessionTitleDraft] = useState('');
   const [messages, setMessages] = useState([]);
   const [sources, setSources] = useState([]);
@@ -580,6 +587,10 @@ function App() {
 
   useEffect(() => {
     if (!token || routeRestoring) return;
+    const currentRoute = readChatRoute();
+    if (isChatHomeRoute(currentRoute) && currentRoute.sessionId && activeNav === 'chat' && !activeSessionId) {
+      return;
+    }
     const options = {
       mode: 'replace',
       sessionId: activeNav === 'chat' ? activeSessionId : null,
@@ -776,6 +787,10 @@ function App() {
   }
 
   async function loadAgent(agentId) {
+    const rememberedRoute = pendingChatRestoreRef.current;
+    const isPendingChatSessionRestore = rememberedRoute?.sessionId
+      && isChatHomeRoute(rememberedRoute)
+      && sameRouteId(rememberedRoute.agentId, agentId);
     const data = await api(`/api/agents/${agentId}`, { token });
     const agent = data.agent;
     setActiveAgent(agent);
@@ -802,29 +817,31 @@ function App() {
     setThinkingEnabled(true);
     setSearchEnabled(false);
     setChatVariables(initVariableValues(agent.variables || []));
-    setActiveSessionId(null);
+    setActiveSessionId(isPendingChatSessionRestore ? rememberedRoute.sessionId : null);
     setActiveNewRunKey('');
     activeNewRunKeyRef.current = null;
-    replaceVisibleMessages([]);
-    setSources([]);
+    if (!isPendingChatSessionRestore) {
+      replaceVisibleMessages([]);
+      setSources([]);
+    }
     setToolDebugEvents([]);
     setFeedbackByMessage({});
     await loadMemoryProfile(agentId);
     const loadedSessions = await loadSessions(agentId);
-    const rememberedRoute = pendingChatRestoreRef.current;
-    const rememberedIsChatRoute = isChatHomeRoute(rememberedRoute);
-    const shouldRestoreSession = rememberedRoute?.sessionId
+    const latestRememberedRoute = pendingChatRestoreRef.current;
+    const rememberedIsChatRoute = isChatHomeRoute(latestRememberedRoute);
+    const shouldRestoreSession = latestRememberedRoute?.sessionId
       && rememberedIsChatRoute
-      && sameRouteId(rememberedRoute.agentId, agentId)
-      && loadedSessions.some((session) => sameRouteId(session.id, rememberedRoute.sessionId));
+      && sameRouteId(latestRememberedRoute.agentId, agentId)
+      && loadedSessions.some((session) => sameRouteId(session.id, latestRememberedRoute.sessionId));
     if (shouldRestoreSession) {
       pendingChatRestoreRef.current = null;
       try {
-        await loadSession(rememberedRoute.sessionId, { openHome: true, updateUrl: false });
+        await loadSession(latestRememberedRoute.sessionId, { openHome: true, updateUrl: false });
       } finally {
         setRouteRestoring(false);
       }
-    } else if (rememberedRoute?.agentId && sameRouteId(rememberedRoute.agentId, agentId)) {
+    } else if (latestRememberedRoute?.agentId && sameRouteId(latestRememberedRoute.agentId, agentId)) {
       pendingChatRestoreRef.current = null;
       if (rememberedIsChatRoute) {
         writeChatRoute(agentId, null, { mode: 'replace' });
@@ -2589,7 +2606,7 @@ function App() {
 
 
 function HomeView(props) {
-  const [sidebarHidden, setSidebarHidden] = useState(false);
+  const [sidebarHidden, setSidebarHidden] = useState(initialSidebarHidden);
   const [moreMenuOpen, setMoreMenuOpen] = useState(false);
   const {
     activeAgent,
@@ -2712,6 +2729,11 @@ function HomeView(props) {
     webSearchRuntime,
     thinkingEnabled,
   } = props;
+
+  useEffect(() => {
+    localStorage.setItem(SIDEBAR_COLLAPSED_STORAGE_KEY, sidebarHidden ? 'true' : 'false');
+  }, [sidebarHidden]);
+
   const [sessionMenuId, setSessionMenuId] = useState(null);
   const [sessionMenuPosition, setSessionMenuPosition] = useState(null);
   const [renamingSessionId, setRenamingSessionId] = useState(null);
@@ -2721,6 +2743,8 @@ function HomeView(props) {
     () => sessions.find((session) => session.id === sessionMenuId),
     [sessionMenuId, sessions],
   );
+  const restoringListedSession = routeRestoring
+    || (activeSessionId && !sessions.some((session) => sameRouteId(session.id, activeSessionId)));
 
   useEffect(() => {
     if (!sessionMenuId) return undefined;
@@ -2872,7 +2896,7 @@ function HomeView(props) {
             <span>会话</span>
           </div>
           <div className="session-list">
-            {!routeRestoring && sessions.map((session) => {
+            {!restoringListedSession && sessions.map((session) => {
               const isActiveSession = String(session.id) === String(activeSessionId || '');
               const isSessionRunning = !!runningBySessionId[session.id]?.running;
               return (
@@ -2941,7 +2965,7 @@ function HomeView(props) {
                 </div>
               );
             })}
-            {!routeRestoring && sessions.length === 0 && <p className="sidebar-empty">还没有历史会话</p>}
+            {!restoringListedSession && sessions.length === 0 && <p className="sidebar-empty">还没有历史会话</p>}
           </div>
         </div>
         <div className="sidebar-user-wrap">
