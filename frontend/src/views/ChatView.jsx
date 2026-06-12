@@ -1,4 +1,4 @@
-import React, { useRef, useState, useEffect, useLayoutEffect } from 'react';
+import React, { useRef, useState, useEffect, useLayoutEffect, useMemo } from 'react';
 import {
   Square,
   SquarePen,
@@ -95,6 +95,7 @@ export function ChatView({
   feedbackByMessage,
   homePrompt,
   messages,
+  submittedPromptHistory,
   onStopGeneration,
   sendMessage,
   sendSuggestedQuestion,
@@ -128,6 +129,7 @@ export function ChatView({
       feedbackByMessage={feedbackByMessage}
       homePrompt={homePrompt}
       messages={messages}
+      submittedPromptHistory={submittedPromptHistory}
       onStopGeneration={onStopGeneration}
       sendMessage={sendMessage}
       sendSuggestedQuestion={sendSuggestedQuestion}
@@ -163,6 +165,7 @@ function ChatHomeV2({
   feedbackByMessage,
   homePrompt,
   messages,
+  submittedPromptHistory,
   onStopGeneration,
   sendMessage,
   sendSuggestedQuestion,
@@ -209,6 +212,18 @@ function ChatHomeV2({
   const attachmentHint = chatAttachments.length ? `${chatAttachments.length} file ready` : attachmentHintForModel(currentModel);
   const runtimeWarning = modelWarning || { text: '' }; // Fallback
   const hasChatAgent = chatAgents.length > 0;
+  const promptHistory = useMemo(() => {
+    const userMessagePrompts = (messages || [])
+      .filter((message) => message?.role === 'user')
+      .map((message) => String(message.content || '').trim())
+      .filter(Boolean);
+    const submittedPrompts = (submittedPromptHistory || [])
+      .map((item) => String(item || '').trim())
+      .filter(Boolean);
+    return [...userMessagePrompts, ...submittedPrompts]
+      .filter((item, index, items) => index === 0 || item !== items[index - 1])
+      .slice(-100);
+  }, [messages, submittedPromptHistory]);
   const lastMessage = messages[messages.length - 1] || {};
   const lastTimelineLength = Array.isArray(lastMessage.reasoningTimeline)
     ? lastMessage.reasoningTimeline.reduce((total, item) => total + String(item?.content || item?.summary || item?.title || '').length, 0)
@@ -388,6 +403,7 @@ function ChatHomeV2({
             className="home-composer"
             value={homePrompt}
             onChange={setHomePrompt}
+            promptHistory={promptHistory}
             placeholder={`${CHAT_COPY.sendPrefix} ${activeAgent?.name || agentForm.name || CHAT_COPY.fallbackAgent} ${CHAT_COPY.sendSuffix}`}
             onSubmit={(event) => sendMessage(event, homePrompt)}
             submitDisabled={busy || uploadingAttachment || !!modelWarning || (!homePrompt.trim() && !chatAttachments.length)}
@@ -445,6 +461,7 @@ export function ChatComposer({
   onToggleSearch,
   onToggleThinking,
   placeholder,
+  promptHistory = [],
   removeAttachment,
   ragAvailable,
   ragEnabled,
@@ -459,7 +476,9 @@ export function ChatComposer({
   runtimeWarning,
 }) {
   const textareaRef = useRef(null);
+  const historyDraftRef = useRef('');
   const [dragActive, setDragActive] = useState(false);
+  const [historyCursor, setHistoryCursor] = useState(null);
 
   useEffect(() => {
     const textarea = textareaRef.current;
@@ -468,7 +487,60 @@ export function ChatComposer({
     textarea.style.height = `${Math.min(textarea.scrollHeight, 180)}px`;
   }, [value]);
 
+  useEffect(() => {
+    if (String(value || '')) return;
+    historyDraftRef.current = '';
+    setHistoryCursor(null);
+  }, [value]);
+
+  function applyPromptHistoryValue(nextCursor, nextValue) {
+    setHistoryCursor(nextCursor);
+    onChange(nextValue);
+    window.requestAnimationFrame(() => {
+      const textarea = textareaRef.current;
+      if (!textarea) return;
+      textarea.focus();
+      textarea.setSelectionRange(nextValue.length, nextValue.length);
+    });
+  }
+
+  function handleTextareaChange(event) {
+    historyDraftRef.current = '';
+    setHistoryCursor(null);
+    onChange(event.target.value);
+  }
+
   function handleKeyDown(event) {
+    const noModifier = !event.shiftKey && !event.altKey && !event.ctrlKey && !event.metaKey;
+    const historyItems = (promptHistory || []).map((item) => String(item || '').trim()).filter(Boolean);
+    const isBrowsingHistory = historyCursor !== null;
+    if (
+      event.key === 'ArrowUp'
+      && noModifier
+      && historyItems.length
+      && (!String(value || '').trim() || isBrowsingHistory)
+    ) {
+      event.preventDefault();
+      if (!isBrowsingHistory) {
+        historyDraftRef.current = String(value || '');
+      }
+      const currentCursor = isBrowsingHistory ? historyCursor : historyItems.length;
+      const nextCursor = Math.max(0, currentCursor - 1);
+      applyPromptHistoryValue(nextCursor, historyItems[nextCursor]);
+      return;
+    }
+    if (event.key === 'ArrowDown' && noModifier && isBrowsingHistory && historyItems.length) {
+      event.preventDefault();
+      const nextCursor = historyCursor + 1;
+      if (nextCursor >= historyItems.length) {
+        const restoredDraft = historyDraftRef.current;
+        historyDraftRef.current = '';
+        applyPromptHistoryValue(null, restoredDraft);
+      } else {
+        applyPromptHistoryValue(nextCursor, historyItems[nextCursor]);
+      }
+      return;
+    }
     if (event.key !== 'Enter' || event.shiftKey) return;
     event.preventDefault();
     event.currentTarget.form?.requestSubmit();
@@ -522,7 +594,7 @@ export function ChatComposer({
         className="composer-textarea"
         rows={1}
         value={value}
-        onChange={(event) => onChange(event.target.value)}
+        onChange={handleTextareaChange}
         onKeyDown={handleKeyDown}
         onPaste={onAttachmentPaste}
         placeholder={placeholder}

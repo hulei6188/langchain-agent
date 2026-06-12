@@ -372,6 +372,7 @@ function App() {
   const [view, setView] = useState('home');
   const [activeNav, setActiveNav] = useState('chat');
   const [homePrompt, setHomePrompt] = useState('');
+  const [submittedPromptHistory, setSubmittedPromptHistory] = useState([]);
   const [accountMenuOpen, setAccountMenuOpen] = useState(false);
   const [settingsDialogOpen, setSettingsDialogOpen] = useState(false);
   const [settingsPanel, setSettingsPanel] = useState('general');
@@ -1615,6 +1616,9 @@ function App() {
     if (thinkingEnabled && !thinkingCapability.supported) {
       setThinkingEnabled(false);
     }
+    if (text) {
+      setSubmittedPromptHistory((items) => [...items, text].slice(-100));
+    }
     setDraft('');
     setHomePrompt('');
     // Capture session at request start — use this throughout, never activeSessionId directly
@@ -2363,6 +2367,7 @@ function App() {
     setView,
     sources,
     startNewChat,
+    submittedPromptHistory,
     submitFeedback,
     deleteMemoryProfile,
     approveReview,
@@ -2534,6 +2539,7 @@ function HomeView(props) {
     setView,
     sources,
     startNewChat,
+    submittedPromptHistory,
     submitFeedback,
     approveReview,
     rejectReview,
@@ -2884,6 +2890,7 @@ function HomeView(props) {
             feedbackByMessage={feedbackByMessage}
             homePrompt={homePrompt}
             messages={messages}
+            submittedPromptHistory={submittedPromptHistory}
             sendMessage={sendMessage}
             sendSuggestedQuestion={sendSuggestedQuestion}
             setChatAttachments={setChatAttachments}

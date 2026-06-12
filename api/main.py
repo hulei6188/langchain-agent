@@ -2678,7 +2678,7 @@ def _resolve_title_runtime_config(db: Session, agent: Agent, user_id: int) -> di
 
 def _auto_title_session(db: Session, chat_session: ChatSession, user_message: str, answer: str, runtime_config: dict | None = None) -> None:
     """Auto-generate a session title using the LLM based on the first exchange."""
-    if chat_session.title and chat_session.title != "新会话":
+    if chat_session.title and chat_session.title not in {"新会话", "新对话"}:
         return  # Already has a meaningful title
     try:
         provider = OpenAICompatibleProvider()
