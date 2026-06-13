@@ -399,19 +399,18 @@ CREATE INDEX IF NOT EXISTS ix_runs_agent_id ON runs (agent_id);
 CREATE INDEX IF NOT EXISTS ix_runs_session_id ON runs (session_id);
 CREATE INDEX IF NOT EXISTS ix_runs_status ON runs (status);
 
-CREATE TABLE IF NOT EXISTS run_steps (
+CREATE TABLE IF NOT EXISTS run_events (
     id BIGSERIAL PRIMARY KEY,
     run_id BIGINT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
-    node_id VARCHAR(80) NOT NULL,
-    node_type VARCHAR(40) NOT NULL,
-    status VARCHAR(20) NOT NULL CHECK (status IN ('started', 'running', 'succeeded', 'failed', 'blocked')),
-    input JSONB NOT NULL DEFAULT '{}'::jsonb,
-    output JSONB NOT NULL DEFAULT '{}'::jsonb,
+    sequence INTEGER NOT NULL,
+    event VARCHAR(80) NOT NULL,
+    payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+    sse TEXT NOT NULL DEFAULT '',
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
-CREATE INDEX IF NOT EXISTS ix_run_steps_run_id ON run_steps (run_id);
-CREATE INDEX IF NOT EXISTS ix_run_steps_status ON run_steps (status);
-CREATE INDEX IF NOT EXISTS ix_run_steps_node_type ON run_steps (node_type);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_run_event_sequence ON run_events (run_id, sequence);
+CREATE INDEX IF NOT EXISTS ix_run_events_run_id ON run_events (run_id);
+CREATE INDEX IF NOT EXISTS ix_run_events_event ON run_events (event);
 
 CREATE TABLE IF NOT EXISTS session_memory (
     id BIGSERIAL PRIMARY KEY,
@@ -723,14 +722,13 @@ COMMENT ON COLUMN runs.status IS '运行状态';
 COMMENT ON COLUMN runs.started_at IS '开始时间';
 COMMENT ON COLUMN runs.completed_at IS '完成时间';
 
-COMMENT ON COLUMN run_steps.id IS '运行步骤主键';
-COMMENT ON COLUMN run_steps.run_id IS '所属运行记录 ID';
-COMMENT ON COLUMN run_steps.node_id IS '工作流节点 ID';
-COMMENT ON COLUMN run_steps.node_type IS '工作流节点类型';
-COMMENT ON COLUMN run_steps.status IS '步骤状态';
-COMMENT ON COLUMN run_steps.input IS '步骤输入快照';
-COMMENT ON COLUMN run_steps.output IS '步骤输出快照';
-COMMENT ON COLUMN run_steps.created_at IS '步骤创建时间';
+COMMENT ON COLUMN run_events.id IS '运行事件主键';
+COMMENT ON COLUMN run_events.run_id IS '所属运行记录 ID';
+COMMENT ON COLUMN run_events.sequence IS '运行内事件序号';
+COMMENT ON COLUMN run_events.event IS 'SSE 事件名称';
+COMMENT ON COLUMN run_events.payload IS '事件 payload';
+COMMENT ON COLUMN run_events.sse IS '原始 SSE 文本';
+COMMENT ON COLUMN run_events.created_at IS '事件创建时间';
 
 COMMENT ON COLUMN session_memory.id IS '会话记忆主键';
 COMMENT ON COLUMN session_memory.session_id IS '所属会话 ID';

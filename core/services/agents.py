@@ -17,7 +17,7 @@ from core.db.models import (
     Message,
     ModelConfig,
     Run,
-    RunStep,
+    RunEvent,
     Session as ChatSession,
     SessionMemory,
     Skill,
@@ -281,7 +281,7 @@ def delete_agent(db: Session, agent: Agent) -> None:
     if message_ids:
         db.query(Feedback).filter(Feedback.message_id.in_(message_ids)).delete(synchronize_session=False)
     if run_ids:
-        db.query(RunStep).filter(RunStep.run_id.in_(run_ids)).delete(synchronize_session=False)
+        db.query(RunEvent).filter(RunEvent.run_id.in_(run_ids)).delete(synchronize_session=False)
     if session_ids:
         db.query(SessionMemory).filter(SessionMemory.session_id.in_(session_ids)).delete(synchronize_session=False)
         db.query(Message).filter(Message.session_id.in_(session_ids)).delete(synchronize_session=False)

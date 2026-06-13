@@ -60,7 +60,7 @@ AgentBase 是一个全栈智能体平台：
 ### 工作流引擎
 - 基于节点的可视化工作流：`Start → Knowledge → Tool → LLM → Answer`
 - 每个智能体可自定义节点顺序
-- 运行时每个节点产出一条 `RunStep` 记录，完整追踪执行路径和输出
+- 运行时每个节点产出 `run_step` 事件，并持久化到 `run_events` 供重连回放
 - 支持草稿模式和发布模式的工作流分别存储
 
 ---
@@ -162,7 +162,7 @@ AgentBase 是一个全栈智能体平台：
 - `allowed_tool_names` 白名单：限制工具调用范围
 - 工具调用限制：单次运行最多 200 次工具调用、50 轮工具交互、1800 秒总时长
 - **并发执行**：同一轮次的多个工具调用通过 `ThreadPoolExecutor` 线程池并发执行（上限 8 并发），完成后按原始顺序处理结果，提升多工具场景下的响应速度
-- 运行追踪：每次工具调用记录到 `RunStep`，包含输入、输出、耗时、状态
+- 运行追踪：每次工具调用写入 `run_events`，包含输入、输出、耗时、状态
 
 ---
 
@@ -183,8 +183,8 @@ AgentBase 是一个全栈智能体平台：
   1. 从数据库加载历史消息
   2. 检测 `active_run`（session 下正在运行的后台 run）
   3. 若存在，通过 `GET /api/runs/{run_id}/events` 重新订阅 SSE 流
-  4. 回放已缓冲的事件，继续接收后续 token
-- 事件日志缓冲（最多 2000 条/Run），防止长输出导致内存溢出
+  4. 从数据库回放 `run_events`，继续接收后续 token
+- 事件日志持久化到 `run_events`，刷新页面或 SSE 断开后可恢复 timeline
 - 僵尸 Run 清理：启动时标记 30 分钟以上的 `running` Run 为 `failed`
 
 ### DSML 工具调用
@@ -223,7 +223,7 @@ AgentBase 是一个全栈智能体平台：
 | `session_memory` | 会话记忆摘要 |
 | `messages` | 消息（role / content / reasoning / tool_calls / sources） |
 | `runs` | 运行记录（status / started_at / completed_at） |
-| `run_steps` | 运行步骤（node_id / node_type / input / output） |
+| `run_events` | 运行事件（sequence / event / payload / sse） |
 | `feedback` | 消息反馈（rating / comment） |
 | `uploads` | 文件上传 |
 | `workflow_definitions` | 工作流定义 |
@@ -430,7 +430,7 @@ INVITE_API_ENABLED=false
 | Workflow | `GET/PATCH /api/agents/{id}/workflow` | 工作流配置 |
 | Chat | `POST /api/agents/{id}/chat/stream` | SSE 流式聊天 |
 | Sessions | `GET /api/agents/{id}/sessions` `PATCH/DELETE /api/sessions/{id}` | 会话管理 |
-| Runs | `GET /api/runs/{id}` `GET /api/runs/{id}/steps` `POST .../cancel` `GET .../events` | 运行记录/取消/重连 |
+| Runs | `GET /api/runs/{id}` `POST .../cancel` `GET .../events` | 运行记录/取消/重连 |
 | Feedback | `POST /api/messages/{id}/feedback` | 消息反馈 |
 | Knowledge | `GET/POST/DELETE /api/knowledge-bases` `POST .../documents` `POST .../index` `POST .../preview` | 知识库管理 |
 | Tools | `GET/POST /api/tools` `POST .../mcp/discover` `POST .../test` | 工具管理 |
@@ -461,7 +461,7 @@ FastAPI ── JWT 鉴权 ──→ CRUD API (Agents / Knowledge / Tools / Model
            │             ├─ [LLM]        流式调用 LLM 生成候选回答
            │             └─ [Answer]     输出最终回答 + 引用来源
            │             │
-           │             ├─→ PostgreSQL (消息/Run/RunStep/会话记忆)
+           │             ├─→ PostgreSQL (消息/Run/run_events/会话记忆)
            │             ├─→ Milvus / 内存 (向量检索)
            │             ├─→ Redis (RAG 缓存)
            │             └─→ LLM Provider (DashScope / DeepSeek / 自定义)

@@ -25,7 +25,6 @@ from core.db.models import (
     Message,
     ModelConfig,
     Run,
-    RunStep,
     Session as ChatSession,
     Skill,
     SkillKnowledgeBase,
@@ -49,6 +48,30 @@ from core.runtime.dsml import (
     strip_complete_dsml_tool_call_blocks,
     strip_or_block_leaked_tool_markup,
 )
+from core.runtime.message_utils import (
+    message_content_text as _message_content_text,
+    message_reasoning_content as _message_reasoning_content,
+    normalize_langchain_tool_calls as _normalize_langchain_tool_calls,
+)
+from core.runtime.spec import WorkflowGraphSpec, default_workflow, workflow_graph_spec
+from core.runtime.skill_selection import (
+    dedupe_skill_bindings,
+    loaded_skill_text,
+    score_runtime_skills,
+    skill_explicitly_requested,
+    skill_manifest,
+    skill_manifest_text,
+    skill_selection_text,
+)
+from core.runtime.status import (
+    merge_web_search_tool_result,
+    search_status,
+    search_status_event,
+    thinking_messages,
+    thinking_status,
+    web_source_text,
+)
+from core.runtime.tool_calls import finalize_stream_tool_calls, merge_stream_tool_call_chunks
 from core.services.agents import get_agent_detail, normalize_memory, normalize_rag, normalize_tool_policy, normalize_workdir
 from core.services.rag import run_rag_pipeline
 from core.services.memory import load_graph_memory_context, update_session_memory
@@ -60,7 +83,6 @@ from core.services.user_models import (
     resolve_user_model_config,
     user_model_runtime_config,
 )
-from core.services import web_search as web_search_service
 
 
 MAX_TOOL_CALLS_PER_RUN = 200
@@ -76,12 +98,6 @@ logger = logging.getLogger(__name__)
 class WorkflowGraphState(TypedDict):
     context: dict[str, Any]
     steps: list[dict[str, Any]]
-
-
-class WorkflowGraphSpec(TypedDict):
-    nodes: list[dict[str, Any]]
-    edges: list[dict[str, Any]]
-    checkpoint: dict[str, Any]
 
 
 class ToolGraphState(TypedDict, total=False):
@@ -108,86 +124,6 @@ class ToolGraphState(TypedDict, total=False):
 
 class ToolNodeInvokeState(TypedDict):
     messages: list[BaseMessage]
-
-
-def _message_content_text(message: BaseMessage) -> str:
-    content = message.content
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts = []
-        for item in content:
-            if isinstance(item, dict) and item.get("type") == "text":
-                parts.append(str(item.get("text", "")))
-        return "".join(parts)
-    return str(content or "")
-
-
-def _message_reasoning_content(message: BaseMessage) -> str:
-    return str(
-        getattr(message, "additional_kwargs", {}).get("reasoning_content")
-        or getattr(message, "additional_kwargs", {}).get("reasoning")
-        or getattr(message, "additional_kwargs", {}).get("thinking")
-        or ""
-    )
-
-
-def _normalize_langchain_tool_calls(tool_calls: list[dict] | None) -> list[dict[str, Any]]:
-    converted: list[dict[str, Any]] = []
-    for index, call in enumerate(tool_calls or []):
-        function = call.get("function") or {}
-        raw_args = function.get("arguments") if function else call.get("args", {})
-        try:
-            args = json.loads(raw_args) if isinstance(raw_args, str) else dict(raw_args)
-            if not isinstance(args, dict):
-                args = {"input": args}
-        except (TypeError, ValueError, json.JSONDecodeError):
-            args = {"input": str(raw_args)}
-        converted.append(
-            {
-                "name": call.get("name") or function.get("name") or "",
-                "args": args,
-                "id": call.get("id") or f"call_{index}",
-            }
-        )
-    return converted
-
-
-def default_workflow() -> list[dict]:
-    return [
-        {"id": "start", "type": "Start", "name": "接收用户输入", "config": {}},
-        {"id": "knowledge", "type": "Knowledge", "name": "检索绑定知识库", "config": {"top_k": 4}},
-        {"id": "tool", "type": "Tool", "name": "调用绑定工具", "config": {"tools": []}},
-        {"id": "llm", "type": "LLM", "name": "生成候选回答", "config": {}},
-        {"id": "answer", "type": "Answer", "name": "输出最终回答", "config": {}},
-    ]
-
-
-def workflow_graph_spec(definition: list[dict] | dict | None) -> WorkflowGraphSpec:
-    if isinstance(definition, dict) and isinstance(definition.get("nodes"), list):
-        nodes = [dict(node) for node in definition.get("nodes") or []]
-        raw_edges = definition.get("edges") if isinstance(definition.get("edges"), list) else []
-        checkpoint = dict(definition.get("checkpoint") or {})
-    else:
-        nodes = [dict(node) for node in (definition or default_workflow())]
-        raw_edges = []
-        checkpoint = {}
-    if not nodes:
-        nodes = [dict(node) for node in default_workflow()]
-    edges = []
-    node_ids = [str(node.get("id") or f"node_{index}") for index, node in enumerate(nodes)]
-    valid_ids = set(node_ids)
-    for edge in raw_edges:
-        source = str(edge.get("source") or "")
-        target = str(edge.get("target") or "")
-        if source in valid_ids and target in valid_ids:
-            edges.append({**edge, "source": source, "target": target})
-    if not edges:
-        edges = [
-            {"source": node_ids[index], "target": node_ids[index + 1], "type": "linear"}
-            for index in range(len(node_ids) - 1)
-        ]
-    return {"nodes": nodes, "edges": edges, "checkpoint": checkpoint}
 
 
 class WorkflowRunner:
@@ -223,8 +159,8 @@ class WorkflowRunner:
         upload_ids = [str(item.get("id")) for item in attachments or [] if item.get("id")]
         uploads = get_workspace_uploads(self.db, workspace_id=agent.workspace_id, upload_ids=upload_ids)
         self._validate_model_capabilities(runtime.capability_config, uploads)
-        thinking_status = self._thinking_status(runtime.capability_config, thinking_enabled)
-        search_status = self._search_status(user_message, search_enabled)
+        thinking_status_value = thinking_status(runtime.capability_config, thinking_enabled)
+        search_status_value = search_status(user_message, search_enabled)
 
         rag_config = normalize_rag({**dict(runtime.settings.get("rag") or {}), **dict(rag_options or {})})
         memory_config = normalize_memory(runtime.settings.get("memory"))
@@ -262,12 +198,12 @@ class WorkflowRunner:
             **({"rag_enabled_request": rag_enabled} if rag_enabled is not None else {}),
             "rag_top_k": rag_config["top_k"],
             "rag_config": rag_config,
-            "thinking_enabled": thinking_status["enabled"],
-            "thinking_status": thinking_status,
+            "thinking_enabled": thinking_status_value["enabled"],
+            "thinking_status": thinking_status_value,
             "reasoning_replay_required": self.provider.requires_reasoning_replay(model=runtime.model, runtime_config=runtime.runtime_config),
-            "search_enabled": search_status["enabled"],
-            "search_status": search_status,
-            "web_sources": search_status.get("sources", []),
+            "search_enabled": search_status_value["enabled"],
+            "search_status": search_status_value,
+            "web_sources": search_status_value.get("sources", []),
             "uploads": uploads,
         }
         self._apply_runtime_skills(runtime, context, chat_session)
@@ -399,8 +335,8 @@ class WorkflowRunner:
         upload_ids = [str(item.get("id")) for item in attachments or [] if item.get("id")]
         uploads = get_workspace_uploads(self.db, workspace_id=agent.workspace_id, upload_ids=upload_ids)
         self._validate_model_capabilities(runtime.capability_config, uploads)
-        thinking_status = self._thinking_status(runtime.capability_config, thinking_enabled)
-        search_status = self._search_status(user_message, search_enabled)
+        thinking_status_value = thinking_status(runtime.capability_config, thinking_enabled)
+        search_status_value = search_status(user_message, search_enabled)
 
         rag_config = normalize_rag({**dict(runtime.settings.get("rag") or {}), **dict(rag_options or {})})
         memory_config = normalize_memory(runtime.settings.get("memory"))
@@ -438,12 +374,12 @@ class WorkflowRunner:
             **({"rag_enabled_request": rag_enabled} if rag_enabled is not None else {}),
             "rag_top_k": rag_config["top_k"],
             "rag_config": rag_config,
-            "thinking_enabled": thinking_status["enabled"],
-            "thinking_status": thinking_status,
+            "thinking_enabled": thinking_status_value["enabled"],
+            "thinking_status": thinking_status_value,
             "reasoning_replay_required": self.provider.requires_reasoning_replay(model=runtime.model, runtime_config=runtime.runtime_config),
-            "search_enabled": search_status["enabled"],
-            "search_status": search_status,
-            "web_sources": search_status.get("sources", []),
+            "search_enabled": search_status_value["enabled"],
+            "search_status": search_status_value,
+            "web_sources": search_status_value.get("sources", []),
             "uploads": uploads,
         }
         self._apply_runtime_skills(runtime, context, chat_session)
@@ -527,12 +463,11 @@ class WorkflowRunner:
 
             events = list(output.pop("events", []))
             context.update(output)
-            step = self._persist_step(run, node, user_message, output)
             step_payload = {
-                "id": step.id,
-                "node_id": step.node_id,
-                "node_type": step.node_type,
-                "status": step.status,
+                "id": len(steps) + 1,
+                "node_id": str(node["id"]),
+                "node_type": str(node["type"]),
+                "status": "succeeded",
                 "output": output,
                 "events": events,
             }
@@ -556,7 +491,7 @@ class WorkflowRunner:
         return [
             {"event": "memory_used", "data": context.get("profile_memory_used", {})},
             {"event": "thinking_status", "data": context.get("thinking_status", {})},
-            {"event": "search_status", "data": self._search_status_event(context.get("search_status", {}))},
+            {"event": "search_status", "data": search_status_event(context.get("search_status", {}))},
             {"event": "skill_selection", "data": context.get("skill_selection", {})},
         ]
 
@@ -573,21 +508,6 @@ class WorkflowRunner:
             suffix += 1
         used_names.add(name)
         return name
-
-    def _persist_step(self, run: Run, node: dict, user_message: str, output: dict) -> RunStep:
-        step = RunStep(
-            run_id=run.id,
-            node_id=node["id"],
-            node_type=node["type"],
-            status="succeeded",
-            input={"input": user_message},
-            output=output,
-        )
-        self.db.add(step)
-        self.db.flush()
-        self.db.commit()
-        self.db.refresh(step)
-        return step
 
     def _execute_node(self, agent, node: dict, context: dict) -> dict:
         handlers = {
@@ -1193,8 +1113,8 @@ class WorkflowRunner:
             events.append({"event": "tool_call", "data": event_data})
 
         if matching and not result.get("error") and matching.type == "builtin_search":
-            web_sources, search_status = self._merge_web_search_tool_result(web_sources, search_status, result)
-            search_event = self._search_status_event(search_status)
+            web_sources, search_status = merge_web_search_tool_result(web_sources, search_status, result)
+            search_event = search_status_event(search_status)
             if stream:
                 search_event["tool_call_id"] = tc.get("id") or ""
                 if writer:
@@ -1285,14 +1205,14 @@ class WorkflowRunner:
             if tool_call_chunks:
                 saw_tool_call = True
                 provisional_chunks = []
-                self._merge_stream_tool_call_chunks(tool_call_builders, tool_call_chunks)
+                merge_stream_tool_call_chunks(tool_call_builders, tool_call_chunks)
             elif getattr(chunk, "tool_calls", None):
                 saw_tool_call = True
                 provisional_chunks = []
                 final_tool_calls = list(chunk.tool_calls or [])
         self._raise_if_cancelled()
         if not final_tool_calls:
-            final_tool_calls = self._finalize_stream_tool_calls(tool_call_builders)
+            final_tool_calls = finalize_stream_tool_calls(tool_call_builders)
 
         joined_content = "".join(content_chunks)
         content_for_response = joined_content
@@ -1339,51 +1259,6 @@ class WorkflowRunner:
             additional_kwargs=additional_kwargs,
             tool_calls=final_tool_calls,
         )
-
-    def _merge_stream_tool_call_chunks(self, builders: dict[int, dict], chunks: list[dict]) -> None:
-        for chunk in chunks:
-            if not isinstance(chunk, dict):
-                continue
-            try:
-                index = int(chunk.get("index")) if chunk.get("index") is not None else len(builders)
-            except (TypeError, ValueError):
-                index = len(builders)
-            call = builders.setdefault(index, {"id": "", "name": "", "args": ""})
-            if chunk.get("id"):
-                call["id"] = str(chunk.get("id"))
-            name_part = chunk.get("name")
-            if name_part:
-                name_part = str(name_part)
-                current_name = call.get("name") or ""
-                if not current_name or name_part.startswith(current_name):
-                    call["name"] = name_part
-                elif not current_name.endswith(name_part):
-                    call["name"] = current_name + name_part
-            if chunk.get("args") is not None:
-                call["args"] = (call.get("args") or "") + str(chunk.get("args"))
-
-    def _finalize_stream_tool_calls(self, builders: dict[int, dict]) -> list[dict]:
-        calls = []
-        for index in sorted(builders):
-            call = builders[index]
-            name = call.get("name") or ""
-            if not name:
-                continue
-            raw_args = call.get("args") or "{}"
-            try:
-                args = json.loads(raw_args) if isinstance(raw_args, str) else dict(raw_args)
-                if not isinstance(args, dict):
-                    args = {"input": args}
-            except (TypeError, ValueError, json.JSONDecodeError):
-                args = {"input": str(raw_args)}
-            calls.append(
-                {
-                    "id": call.get("id") or f"call_{index}",
-                    "name": name,
-                    "args": args,
-                }
-            )
-        return calls
 
     def _tool_call_start_event(self, tool: Tool | None, *, tool_name: str, tool_call_id: str, input_preview: str = "") -> dict:
         return {
@@ -1462,14 +1337,14 @@ class WorkflowRunner:
 
     def _llm_messages(self, agent, context: dict) -> list[BaseMessage]:
         source_text = "\n".join(f"- {item['title']}: {item['snippet']}" for item in context.get("sources", []))
-        web_source_text = self._web_source_text(context.get("web_sources", []))
+        web_sources_text = web_source_text(context.get("web_sources", []))
         tool_text = "\n".join(f"- {item['tool']}: {item['content']}" for item in context.get("tool_outputs", []))
         variable_text = "\n".join(f"- {key}: {value}" for key, value in context.get("variables", {}).items())
         attachment_text = self._attachment_text(context.get("uploads", []))
-        skill_manifest_text = self._skill_manifest_text(context.get("skill_manifest") or [])
-        loaded_skill_text = self._loaded_skill_text(context.get("loaded_skills") or [])
+        skill_manifest_content = skill_manifest_text(context.get("skill_manifest") or [])
+        loaded_skill_content = loaded_skill_text(context.get("loaded_skills") or [])
         thinking_blocks = []
-        thinking_msgs = self._thinking_messages(context)
+        thinking_msgs = thinking_messages(context)
         if thinking_msgs:
             thinking_blocks = [msg["content"] for msg in thinking_msgs]
         search_instruction = ""
@@ -1495,9 +1370,9 @@ class WorkflowRunner:
             agent.system_prompt or "你是一个自定义智能体。",
             *thinking_blocks,
             search_instruction,
-            skill_manifest_text,
-            loaded_skill_text,
-            f"Web search results for this turn:\n{web_source_text or 'None'}",
+            skill_manifest_content,
+            loaded_skill_content,
+            f"Web search results for this turn:\n{web_sources_text or 'None'}",
             f"可用知识片段：\n{source_text or '无'}",
             f"工具输出：\n{tool_text or '无'}",
             f"用户变量：\n{variable_text or '无'}",
@@ -1752,7 +1627,7 @@ class WorkflowRunner:
 
     def _apply_runtime_skills(self, runtime, context: dict, chat_session: ChatSession) -> None:
         bindings = list(getattr(runtime, "skill_bindings", []) or [])
-        manifest = [self._skill_manifest(item) for item in bindings]
+        manifest = [skill_manifest(item) for item in bindings]
         context["skill_manifest"] = manifest
         if not bindings:
             context["skill_selection"] = {"loaded": [], "auto_candidates": [], "threshold": SKILL_AUTO_THRESHOLD, "top_k": SKILL_AUTO_TOP_K}
@@ -1761,11 +1636,17 @@ class WorkflowRunner:
         always_skills = [item for item in bindings if item["activation_mode"] == "always"]
         manual_skills = [
             item for item in bindings
-            if item["activation_mode"] == "manual" and self._skill_explicitly_requested(item, context.get("input") or "")
+            if item["activation_mode"] == "manual" and skill_explicitly_requested(item, context.get("input") or "")
         ]
 
-        selection_text = self._skill_selection_text(runtime, context, chat_session, [item["name"] for item in always_skills + manual_skills])
-        auto_candidates = self._score_runtime_skills(
+        selection_text = skill_selection_text(
+            runtime,
+            context,
+            chat_session,
+            [item["name"] for item in always_skills + manual_skills],
+            history_limit=SKILL_SELECTION_HISTORY_MESSAGES,
+        )
+        auto_candidates = score_runtime_skills(
             selection_text,
             [item for item in bindings if item["activation_mode"] == "auto"],
         )
@@ -1775,7 +1656,7 @@ class WorkflowRunner:
             if score >= SKILL_AUTO_THRESHOLD
         ][:SKILL_AUTO_TOP_K]
 
-        loaded = self._dedupe_skill_bindings(always_skills + manual_skills + auto_skills)
+        loaded = dedupe_skill_bindings(always_skills + manual_skills + auto_skills)
         score_by_id = {item["id"]: score for item, score in auto_candidates}
 
         skill_blocks = []
@@ -1789,7 +1670,7 @@ class WorkflowRunner:
             kb_ids.extend(item.get("knowledge_base_ids") or [])
             loaded_payload.append(
                 {
-                    **self._skill_manifest(item),
+                    **skill_manifest(item),
                     "score": round(score_by_id.get(item["id"], 1.0 if item["activation_mode"] == "always" else 0.0), 4),
                     "tool_ids": item.get("tool_ids") or [],
                     "knowledge_base_ids": item.get("knowledge_base_ids") or [],
@@ -1804,119 +1685,12 @@ class WorkflowRunner:
         context["skill_selection"] = {
             "loaded": loaded_payload,
             "auto_candidates": [
-                {**self._skill_manifest(item), "score": round(score, 4)}
+                {**skill_manifest(item), "score": round(score, 4)}
                 for item, score in auto_candidates[:10]
             ],
             "threshold": SKILL_AUTO_THRESHOLD,
             "top_k": SKILL_AUTO_TOP_K,
         }
-
-    @staticmethod
-    def _skill_manifest(item: dict) -> dict:
-        tags = item.get("tags") or []
-        if isinstance(tags, str):
-            tags = [tags]
-        return {
-            "id": item["id"],
-            "name": item["name"],
-            "description": item.get("description") or "",
-            "category": item.get("category") or "general",
-            "tags": tags,
-            "activation_mode": item.get("activation_mode") or "auto",
-            "priority": item.get("priority", 0),
-        }
-
-    @staticmethod
-    def _dedupe_skill_bindings(items: list[dict]) -> list[dict]:
-        result = []
-        seen = set()
-        for item in items:
-            if item["id"] in seen:
-                continue
-            seen.add(item["id"])
-            result.append(item)
-        return result
-
-    def _skill_selection_text(self, runtime, context: dict, chat_session: ChatSession, active_skill_names: list[str]) -> str:
-        parts = [context.get("input") or ""]
-        if chat_session.title and chat_session.title != "新对话":
-            parts.append(f"会话标题：{chat_session.title}")
-        history = context.get("history_messages") or []
-        for item in history[-SKILL_SELECTION_HISTORY_MESSAGES:]:
-            role = item.get("role") or ""
-            content = str(item.get("content") or "")
-            if role in {"user", "assistant"} and content.strip():
-                parts.append(f"{role}: {content[:1200]}")
-        if context.get("memory_summary"):
-            parts.append(f"会话记忆：{str(context.get('memory_summary'))[:2000]}")
-        if active_skill_names:
-            parts.append("已加载技能：" + "、".join(active_skill_names))
-        return "\n".join(part for part in parts if str(part).strip())
-
-    @staticmethod
-    def _skill_explicitly_requested(item: dict, user_text: str) -> bool:
-        text = str(user_text or "").lower()
-        name = str(item.get("name") or "").strip().lower()
-        if not name:
-            return False
-        return name in text or f"@{name}" in text or f"#{name}" in text
-
-    def _score_runtime_skills(self, selection_text: str, skills: list[dict]) -> list[tuple[dict, float]]:
-        text = self._normalize_skill_text(selection_text)
-        scored = [(item, self._skill_match_score(text, item)) for item in skills]
-        return sorted(scored, key=lambda pair: (pair[1], pair[0].get("priority", 0)), reverse=True)
-
-    def _skill_match_score(self, normalized_text: str, item: dict) -> float:
-        if not normalized_text.strip():
-            return 0.0
-        score = 0.0
-        name = self._normalize_skill_text(item.get("name") or "")
-        if name and name in normalized_text:
-            score += 0.65
-        tags = item.get("tags") or []
-        if isinstance(tags, str):
-            tags = [tags]
-        for tag in tags:
-            tag_text = self._normalize_skill_text(tag)
-            if len(tag_text) >= 2 and tag_text in normalized_text:
-                score += 0.18
-        category = self._normalize_skill_text(item.get("category") or "")
-        if len(category) >= 2 and category in normalized_text:
-            score += 0.08
-
-        terms = self._skill_terms(item)
-        if terms:
-            matched_weight = sum(weight for term, weight in terms if term in normalized_text)
-            total_weight = sum(weight for _, weight in terms)
-            if total_weight > 0:
-                score += 0.55 * min(matched_weight / total_weight, 1.0)
-        return min(score, 1.0)
-
-    @staticmethod
-    def _normalize_skill_text(value: str) -> str:
-        return re.sub(r"\s+", " ", str(value or "").strip().lower())
-
-    def _skill_terms(self, item: dict) -> list[tuple[str, float]]:
-        tags = item.get("tags") or []
-        if isinstance(tags, str):
-            tags = [tags]
-        weighted_fields = [
-            (item.get("name") or "", 1.0),
-            (" ".join(str(tag) for tag in tags), 0.9),
-            (item.get("category") or "", 0.35),
-            (item.get("description") or "", 0.65),
-        ]
-        terms: dict[str, float] = {}
-        for text, weight in weighted_fields:
-            normalized = self._normalize_skill_text(text)
-            for token in re.findall(r"[a-z0-9_+#.-]+|[\u4e00-\u9fff]{2,}", normalized):
-                if len(token) < 2:
-                    continue
-                terms[token] = max(terms.get(token, 0.0), weight)
-                if re.fullmatch(r"[\u4e00-\u9fff]{4,}", token):
-                    for index in range(0, len(token) - 1):
-                        terms[token[index:index + 2]] = max(terms.get(token[index:index + 2], 0.0), weight * 0.35)
-        return list(terms.items())
 
     def _model_config(self, model_id: int | None, model_name: str | None) -> ModelConfig | None:
         return resolve_agent_model(self.db, model_id=model_id, model_name=model_name)
@@ -1935,168 +1709,6 @@ class WorkflowRunner:
         has_document = any(upload.kind == "document" for upload in uploads)
         if has_document and not getattr(model, "supports_document", True):
             raise ValueError("Selected model does not support document input")
-
-    def _thinking_status(self, model: ModelConfig | UserModelConfig | None, requested: bool | None) -> dict:
-        reasoning_type = str(getattr(model, "reasoning_type", "none") or "none")
-        if reasoning_type not in {"native", "prompt", "none"}:
-            reasoning_type = "none"
-        supports_reasoning = bool(getattr(model, "supports_reasoning", False)) and reasoning_type != "none"
-        label = str(getattr(model, "reasoning_label", "") or self._reasoning_label(reasoning_type))
-
-        if not requested:
-            return {
-                "enabled": False,
-                "requested": False,
-                "type": reasoning_type,
-                "label": label,
-                "reason": "not_requested",
-            }
-        if not supports_reasoning:
-            return {
-                "enabled": False,
-                "requested": True,
-                "type": "none",
-                "label": self._reasoning_label("none"),
-                "reason": "model_not_supported",
-            }
-        return {
-            "enabled": True,
-            "requested": True,
-            "type": reasoning_type,
-            "label": label,
-            "reason": "enabled",
-        }
-
-    def _thinking_messages(self, context: dict) -> list[dict]:
-        status = context.get("thinking_status") or {}
-        if not status.get("enabled"):
-            return []
-        if status.get("type") == "prompt":
-            return [
-                {
-                    "role": "system",
-                    "content": (
-                        "本轮已开启深度思考模式，但当前模型使用提示词增强，不是原生推理。"
-                        "请先进行更周全的分析，检查关键假设、约束、风险和反例，再给出清晰答案。"
-                        "不要输出隐藏推理链，只输出必要的结论、依据和可执行步骤。"
-                    ),
-                }
-            ]
-        return [
-            {
-                "role": "system",
-                "content": "本轮已开启原生深度思考能力。请给出经过审慎推理后的答案，不要输出隐藏推理链。",
-            }
-        ]
-
-    @staticmethod
-    def _reasoning_label(reasoning_type: str) -> str:
-        return {"native": "深度思考", "prompt": "提示词增强", "none": "不支持"}.get(reasoning_type, "不支持")
-
-    def _search_status(self, query: str, requested: bool | None) -> dict:
-        runtime = web_search_service.web_search_status()
-        provider = runtime.get("provider", "duckduckgo_html")
-        if not requested:
-            return {
-                "enabled": False,
-                "requested": False,
-                "query": query,
-                "provider": provider,
-                "matched_results": 0,
-                "sources_emitted": False,
-                "items": [],
-                "sources": [],
-                "reason": "not_requested",
-            }
-        if not runtime.get("configured"):
-            return {
-                "enabled": False,
-                "requested": True,
-                "query": query,
-                "provider": provider,
-                "matched_results": 0,
-                "sources_emitted": False,
-                "items": [],
-                "sources": [],
-                "reason": "web_search_unavailable",
-            }
-        return {
-            "enabled": True,
-            "requested": True,
-            "query": query,
-            "provider": provider,
-            "matched_results": 0,
-            "sources_emitted": False,
-            "items": [],
-            "sources": [],
-            "reason": "tool_available",
-        }
-
-    def _search_status_event(self, status: dict) -> dict:
-        return {key: value for key, value in status.items() if key != "sources"}
-
-    def _merge_web_search_tool_result(self, current_sources: list[dict], status: dict, result: dict) -> tuple[list[dict], dict]:
-        result_json = result.get("result_json") if isinstance(result.get("result_json"), dict) else {}
-        items = result_json.get("items") or []
-        next_sources = [dict(item) for item in current_sources]
-        new_sources = web_search_service.search_items_as_sources(items)
-        offset = len(next_sources)
-        for index, source in enumerate(new_sources, start=offset + 1):
-            source["source_id"] = f"web-{index}"
-            source["chunk_id"] = f"web-search-{index}"
-            next_sources.append(source)
-        next_status = {
-            **status,
-            "enabled": bool(next_sources),
-            "requested": True,
-            "query": result_json.get("query") or status.get("query") or "",
-            "provider": result_json.get("provider") or status.get("provider") or "duckduckgo_html",
-            "matched_results": len(next_sources),
-            "sources_emitted": bool(next_sources),
-            "items": [*(status.get("items") or []), *items],
-            "sources": next_sources,
-            "latency_ms": result.get("latency_ms", status.get("latency_ms", 0)),
-            "reason": "tool_called" if next_sources else "no_results",
-        }
-        return next_sources, next_status
-
-    def _web_source_text(self, sources: list[dict]) -> str:
-        lines = []
-        for index, item in enumerate(sources, start=1):
-            title = item.get("title") or f"Result {index}"
-            url = item.get("url") or ""
-            snippet = item.get("snippet") or ""
-            lines.append(f"{index}. {title}\nURL: {url}\nSnippet: {snippet}")
-        return "\n\n".join(lines)
-
-    def _skill_manifest_text(self, skills: list[dict]) -> str:
-        if not skills:
-            return ""
-        lines = [
-            "可用技能清单（渐进式披露）：",
-            "只有“本轮已加载技能”的完整规则已进入上下文；auto 技能需达阈值才加载，manual 技能需用户明确点名或通过 load_skill 加载，always 技能每轮加载。",
-        ]
-        for skill in skills[:80]:
-            tags = "、".join(skill.get("tags") or [])
-            desc = skill.get("description") or "无描述"
-            lines.append(
-                f"- [{skill.get('activation_mode')}] #{skill.get('id')} {skill.get('name')}: {desc}"
-                + (f"；标签：{tags}" if tags else "")
-            )
-        if len(skills) > 80:
-            lines.append(f"... 还有 {len(skills) - 80} 个技能未列出")
-        return "\n".join(lines)
-
-    def _loaded_skill_text(self, skills: list[dict]) -> str:
-        if not skills:
-            return "本轮已加载技能：无"
-        lines = ["本轮已加载技能："]
-        for skill in skills:
-            mode = skill.get("activation_mode") or "auto"
-            score = skill.get("score")
-            score_text = f"，score={score}" if score is not None else ""
-            lines.append(f"- [{mode}] {skill.get('name')}#{skill.get('id')}{score_text}")
-        return "\n".join(lines)
 
     def _skill_loader_tool(self, agent, context: dict) -> StructuredTool | None:
         schema = self._skill_loader_schema(agent, context)
@@ -2205,7 +1817,7 @@ class WorkflowRunner:
         agent.tool_ids = list(dict.fromkeys((getattr(agent, "tool_ids", []) or []) + (item.get("tool_ids") or [])))
         agent.knowledge_base_ids = list(dict.fromkeys((getattr(agent, "knowledge_base_ids", []) or []) + (item.get("knowledge_base_ids") or [])))
         payload = {
-            **self._skill_manifest(item),
+            **skill_manifest(item),
             "score": round(score, 4),
             "reason": reason,
             "tool_ids": item.get("tool_ids") or [],

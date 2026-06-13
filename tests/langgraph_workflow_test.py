@@ -12,23 +12,11 @@ from core.runtime.workflow import WorkflowRunner
 def _runner_with_fake_persistence(monkeypatch):
     runner = WorkflowRunner.__new__(WorkflowRunner)
     runner._cancel_event = None
-    persisted = []
-
-    def persist_step(run, node, user_message, output):
-        persisted.append({"node_id": node["id"], "output": dict(output)})
-        return SimpleNamespace(
-            id=len(persisted),
-            node_id=node["id"],
-            node_type=node["type"],
-            status="succeeded",
-        )
-
-    monkeypatch.setattr(runner, "_persist_step", persist_step)
-    return runner, persisted
+    return runner
 
 
 def test_langgraph_workflow_invokes_nodes_in_order(monkeypatch):
-    runner, persisted = _runner_with_fake_persistence(monkeypatch)
+    runner = _runner_with_fake_persistence(monkeypatch)
 
     def execute_node(runtime, node, context):
         return {
@@ -55,14 +43,14 @@ def test_langgraph_workflow_invokes_nodes_in_order(monkeypatch):
 
     assert final_state["context"]["trace"] == ["start", "knowledge", "answer"]
     assert [step["node_id"] for step in final_state["steps"]] == ["start", "knowledge", "answer"]
-    assert [item["node_id"] for item in persisted] == ["start", "knowledge", "answer"]
+    assert [step["id"] for step in final_state["steps"]] == [1, 2, 3]
     assert final_state["steps"][0]["events"][0]["event"] == "node_event"
     assert final_state["steps"][0]["events"][1]["event"] == "memory_used"
     assert final_state["steps"][1]["events"] == [{"event": "node_event", "data": {"node": "knowledge"}}]
 
 
 def test_langgraph_workflow_streams_custom_events(monkeypatch):
-    runner, _persisted = _runner_with_fake_persistence(monkeypatch)
+    runner = _runner_with_fake_persistence(monkeypatch)
 
     def stream_llm_node(runtime, node, context):
         yield {"event": "token", "content": "hello"}

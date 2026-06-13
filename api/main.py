@@ -1,51 +1,39 @@
 from __future__ import annotations
 
-import json
 import logging
-import queue
 import re
 import secrets
-import threading
-import time
 from datetime import datetime, timedelta, timezone
-from collections.abc import Iterable
 
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from langchain_core.messages import HumanMessage
 from sqlalchemy.orm import Session
 
-from pydantic import BaseModel, Field
 from api.deps import get_current_membership, get_current_user, require_manager
 from api.routers.health import create_health_router
+from api.routers.knowledge import router as knowledge_router
+from api.routers.memory import router as memory_router
+from api.routers.runs import router as runs_router
+from api.routers.sessions import router as sessions_router
+from api.routers.tools import router as tools_router
 from api.schemas import (
     AgentCreateRequest,
     AgentSkillsRequest,
     AgentUpdateRequest,
     ChatRequest,
-    FeedbackRequest,
     InviteAcceptRequest,
     InviteCreateRequest,
-    KnowledgeBaseCreateRequest,
-    KnowledgeDocumentBatchCreateRequest,
-    KnowledgeDocumentCreateRequest,
     LoginRequest,
-    MCPToolDiscoverRequest,
-    MemoryProfileUpdateRequest,
     ModelConfigRequest,
     ModelConfigUpdateRequest,
     PromptTemplateCopyBuiltinRequest,
     PromptTemplateRequest,
     PromptTemplateUpdateRequest,
     RegisterRequest,
-    SessionUpdateRequest,
     SkillCreateRequest,
     SkillItemIdsRequest,
     SkillUpdateRequest,
-    ToolRequest,
-    ToolTestRequest,
-    ToolUpdateRequest,
     UploadCreateRequest,
     UserProfileUpdateRequest,
     UserModelCapabilityTestRequest,
@@ -58,16 +46,10 @@ from core.db.models import (
     Agent,
     AgentSkill,
     AgentVersion,
-    Feedback,
-    KnowledgeBase,
-    KnowledgeChunk,
-    KnowledgeDocument,
     Message,
     ModelConfig,
     Run,
-    RunStep,
     Session as ChatSession,
-    SessionMemory,
     Skill,
     SkillKnowledgeBase,
     SkillTool,
@@ -79,10 +61,7 @@ from core.db.models import (
     WorkspaceMember,
 )
 from core.db.session import SessionLocal, get_db, init_db
-from core.integrations.llm import OpenAICompatibleProvider, _CancelledError
-from core.runtime.cancel import cancel_run
-from core.runtime.events import run_event_buffer
-from core.runtime.workflow import WorkflowRunner, default_workflow, workflow_graph_spec
+from core.runtime.spec import default_workflow, workflow_graph_spec
 from core.security.auth import create_access_token, hash_password, verify_password
 from core.security.permissions import can_manage, normalize_role
 from core.services.agents import (
@@ -102,32 +81,10 @@ from core.services.agents import (
 from core.services.bootstrap import (
     create_default_workspace_user,
     create_first_user_workspace,
-    ensure_builtin_tools,
     ensure_default_models,
     has_any_user,
 )
-from core.services.knowledge import (
-    KnowledgeDocumentError,
-    add_document,
-    clear_knowledge_base_documents,
-    create_knowledge_base,
-    delete_document,
-    delete_knowledge_base,
-    document_payload,
-    knowledge_base_summary,
-    list_document_chunks,
-    reindex_knowledge_base,
-    split_by_hierarchy,
-    split_parent_child,
-    index_document,
-)
-from core.services.rag_cache import redis_store
-from core.services.memory import (
-    delete_memory_profile,
-    get_memory_profile,
-    memory_profile_payload,
-    upsert_memory_profile,
-)
+from core.services.run_streams import start_workflow_stream, workflow_sse_items
 from core.services.models import create_model_config, delete_model_config, model_payload, update_model_config
 from core.services.prompt_templates import (
     copy_builtin_prompt_template,
@@ -138,17 +95,7 @@ from core.services.prompt_templates import (
     prompt_template_payload,
     update_prompt_template,
 )
-from core.services.tools import (
-    create_tool,
-    delete_tool,
-    discover_mcp_tools,
-    get_accessible_tool,
-    list_available_tools,
-    test_tool,
-    tool_payload,
-    update_tool,
-    validate_tool_ids,
-)
+from core.services.tools import validate_tool_ids
 from core.services.skills import (
     create_skill,
     delete_skill,
@@ -162,31 +109,12 @@ from core.services.user_models import (
     delete_user_model_config,
     get_owned_user_model,
     list_user_model_configs,
-    resolve_user_model_config,
     test_user_model_config,
     test_user_model_payload,
     update_user_model_config,
     user_model_payload,
-    user_model_runtime_config,
 )
 from core.services.web_search import search_web, web_search_status
-
-
-PUBLIC_CHAT_ERRORS = (
-    "Selected model does not support document input",
-    "Selected model does not support image input",
-    "Upload not found or not accessible",
-    "Stored API key is invalid",
-    "Secure API key encryption is not configured",
-    "当前智能体还没有发布版本",
-    "发布版本不存在",
-    "mode must be draft or published",
-    "Model call failed",
-    "Model returned an empty answer",
-    "Chat model API key is not configured",
-    "Embedding API key is not configured",
-    "Rerank API key is not configured",
-)
 
 
 def _version_tuple(value: str) -> tuple[int, ...]:
@@ -230,6 +158,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.include_router(create_health_router(lambda: startup_error))
+app.include_router(knowledge_router)
+app.include_router(memory_router)
+app.include_router(runs_router)
+app.include_router(sessions_router)
+app.include_router(tools_router)
 
 
 @app.on_event("startup")
@@ -270,126 +203,6 @@ def _cleanup_zombie_runs() -> None:
         logger.exception("Failed to clean up zombie runs")
     finally:
         db.close()
-
-
-def sse_event(event: str, data: dict) -> str:
-    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
-
-
-def sse_event_name(sse_str: str) -> str:
-    for line in str(sse_str or "").splitlines():
-        if line.startswith("event:"):
-            return line.partition(":")[2].strip()
-    return ""
-
-
-def sse_event_data(sse_str: str) -> dict:
-    for line in str(sse_str or "").splitlines():
-        if line.startswith("data:"):
-            raw = line.partition(":")[2].strip()
-            if not raw:
-                return {}
-            try:
-                return json.loads(raw)
-            except json.JSONDecodeError:
-                return {}
-    return {}
-
-
-def _run_stream_snapshot(run_id: int) -> dict:
-    log = run_event_buffer.snapshot(run_id)
-
-    content = ""
-    provisional_content = ""
-    reasoning = ""
-    sources: list[dict] = []
-    timeline_events: list[dict] = []
-    for entry in log:
-        event_name = sse_event_name(entry)
-        data = sse_event_data(entry)
-        if event_name == "token":
-            content += str(data.get("content") or "")
-        elif event_name == "provisional_token":
-            chunk = str(data.get("content") or "")
-            content += chunk
-            provisional_content += chunk
-        elif event_name == "provisional_clear":
-            if provisional_content and content.endswith(provisional_content):
-                content = content[: -len(provisional_content)]
-            provisional_content = ""
-        elif event_name == "provisional_commit":
-            provisional_content = ""
-        elif event_name == "reasoning_token":
-            reasoning += str(data.get("content") or "")
-        elif event_name == "sources":
-            items = data.get("items")
-            sources = items if isinstance(items, list) else []
-        elif event_name in {"tool_call", "tool_call_start", "tool_call_result", "search_status"}:
-            timeline_events.append({"event": event_name, "data": data})
-
-    return {
-        "event_index": len(log),
-        "content": content,
-        "reasoning": reasoning,
-        "provisional_content": provisional_content,
-        "sources": sources,
-        "timeline_events": timeline_events[-200:],
-    }
-
-
-def safe_stream_error(exc: Exception) -> dict:
-    message = str(exc)
-    if any(public_error in message for public_error in PUBLIC_CHAT_ERRORS):
-        return {"message": _sanitize_public_error(message), "error_code": _error_code(message)}
-    return {
-        "message": "智能体运行失败，请检查模型、知识库或附件配置后重试。",
-        "error_code": _error_code(message),
-    }
-
-
-def _error_code(message: str) -> str:
-    normalized = re.sub(r"[^a-z0-9]+", "_", message.lower()).strip("_")
-    if "model_call_failed" in normalized or "gateway" in normalized:
-        return "model_provider_error"
-    if "model" in normalized and "image" in normalized:
-        return "model_capability_error"
-    if "model" in normalized and "document" in normalized:
-        return "model_capability_error"
-    if "upload" in normalized:
-        return "attachment_error"
-    if "publish" in normalized or "发布" in message:
-        return "agent_version_error"
-    if "api_key" in normalized or "secret" in normalized:
-        return "secret_config_error"
-    return "agent_runtime_error"
-
-
-def _sanitize_public_error(message: str) -> str:
-    cleaned = re.sub(r"(?i)(sk-[A-Za-z0-9_-]+|api[_-]?key\s*[:=]\s*\S+|secret\s*[:=]\s*\S+)", "[secret]", str(message))
-    return cleaned.replace("\n", " ").replace("\r", " ").strip()[:500]
-
-
-def add_knowledge_document_from_request(
-    db: Session,
-    *,
-    workspace_id: int,
-    kb: KnowledgeBase,
-    request: KnowledgeDocumentCreateRequest,
-) -> tuple[KnowledgeDocument, dict]:
-    document = add_document(
-        db,
-        workspace_id=workspace_id,
-        kb=kb,
-        filename=request.filename,
-        title=request.title,
-        text=request.text,
-        content=request.content,
-        content_type=request.content_type,
-        content_base64=request.content_base64,
-        source_type=request.source_type,
-    )
-    payload = document_payload(document, db.query(KnowledgeChunk).filter(KnowledgeChunk.document_id == document.id).count())
-    return document, payload
 
 
 @app.get("/api/search/test")
@@ -534,78 +347,6 @@ def accept_invite(request: InviteAcceptRequest, current_user: User = Depends(get
     invite.accepted_at = datetime.now(timezone.utc)
     db.commit()
     return {"accepted": True}
-
-
-@app.get("/api/tools")
-def list_tools(membership: WorkspaceMember = Depends(get_current_membership), db: Session = Depends(get_db)):
-    ensure_builtin_tools(db)
-    tools = list_available_tools(db, workspace_id=membership.workspace_id, user_id=membership.user_id)
-    return {"items": [tool_payload(tool) for tool in tools]}
-
-
-@app.post("/api/tools")
-def create_tool_endpoint(request: ToolRequest, membership: WorkspaceMember = Depends(get_current_membership), db: Session = Depends(get_db)):
-    try:
-        tool = create_tool(db, workspace_id=membership.workspace_id, user_id=membership.user_id, payload=request.model_dump())
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {"tool": tool_payload(tool)}
-
-
-@app.post("/api/tools/mcp/discover")
-def discover_mcp_tools_endpoint(
-    request: MCPToolDiscoverRequest,
-    membership: WorkspaceMember = Depends(get_current_membership),
-    db: Session = Depends(get_db),
-):
-    existing_tool = None
-    if request.tool_id:
-        existing_tool = get_accessible_tool(
-            db,
-            workspace_id=membership.workspace_id,
-            user_id=membership.user_id,
-            tool_id=request.tool_id,
-        )
-        if not existing_tool:
-            raise HTTPException(status_code=404, detail="Tool not found")
-    try:
-        items = discover_mcp_tools(request.model_dump(), existing_tool=existing_tool)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {"items": items}
-
-
-@app.patch("/api/tools/{tool_id}")
-def patch_tool_endpoint(tool_id: int, request: ToolUpdateRequest, membership: WorkspaceMember = Depends(get_current_membership), db: Session = Depends(get_db)):
-    tool = get_accessible_tool(db, workspace_id=membership.workspace_id, user_id=membership.user_id, tool_id=tool_id)
-    if not tool:
-        raise HTTPException(status_code=404, detail="Tool not found")
-    try:
-        tool = update_tool(db, tool=tool, payload=request.model_dump(exclude_unset=True))
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {"tool": tool_payload(tool)}
-
-
-@app.delete("/api/tools/{tool_id}")
-def delete_tool_endpoint(tool_id: int, membership: WorkspaceMember = Depends(get_current_membership), db: Session = Depends(get_db)):
-    tool = get_accessible_tool(db, workspace_id=membership.workspace_id, user_id=membership.user_id, tool_id=tool_id)
-    if not tool:
-        raise HTTPException(status_code=404, detail="Tool not found")
-    try:
-        delete_tool(db, tool=tool)
-    except ValueError as exc:
-        status_code = 409 if "in use" in str(exc) else 400
-        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
-    return {"deleted": True}
-
-
-@app.post("/api/tools/{tool_id}/test")
-def test_tool_endpoint(tool_id: int, request: ToolTestRequest, membership: WorkspaceMember = Depends(get_current_membership), db: Session = Depends(get_db)):
-    tool = get_accessible_tool(db, workspace_id=membership.workspace_id, user_id=membership.user_id, tool_id=tool_id)
-    if not tool:
-        raise HTTPException(status_code=404, detail="Tool not found")
-    return test_tool(tool, input_data=request.input, body=request.body)
 
 
 # ── Skills ───────────────────────────────────────────────────────────
@@ -1028,54 +769,6 @@ def patch_agent(agent_id: int, request: AgentUpdateRequest, membership: Workspac
     return {"agent": get_agent_detail(db, agent)}
 
 
-@app.get("/api/agents/{agent_id}/memory-profile")
-def get_agent_memory_profile(agent_id: int, membership: WorkspaceMember = Depends(get_current_membership), db: Session = Depends(get_db)):
-    agent = require_workspace_agent(db, membership.workspace_id, agent_id)
-    require_agent_read_access(agent, membership)
-    profile = get_memory_profile(
-        db,
-        workspace_id=membership.workspace_id,
-        user_id=membership.user_id,
-        agent_id=agent.id,
-    )
-    return {"profile": memory_profile_payload(profile, agent_id=agent.id)}
-
-
-@app.patch("/api/agents/{agent_id}/memory-profile")
-def patch_agent_memory_profile(
-    agent_id: int,
-    request: MemoryProfileUpdateRequest,
-    membership: WorkspaceMember = Depends(get_current_membership),
-    db: Session = Depends(get_db),
-):
-    agent = require_workspace_agent(db, membership.workspace_id, agent_id)
-    require_agent_read_access(agent, membership)
-    try:
-        profile = upsert_memory_profile(
-            db,
-            workspace_id=membership.workspace_id,
-            user_id=membership.user_id,
-            agent_id=agent.id,
-            payload=request.model_dump(exclude_unset=True),
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {"profile": memory_profile_payload(profile)}
-
-
-@app.delete("/api/agents/{agent_id}/memory-profile")
-def delete_agent_memory_profile(agent_id: int, membership: WorkspaceMember = Depends(get_current_membership), db: Session = Depends(get_db)):
-    agent = require_workspace_agent(db, membership.workspace_id, agent_id)
-    require_agent_read_access(agent, membership)
-    delete_memory_profile(
-        db,
-        workspace_id=membership.workspace_id,
-        user_id=membership.user_id,
-        agent_id=agent.id,
-    )
-    return {"deleted": True}
-
-
 @app.delete("/api/agents/{agent_id}")
 def delete_agent_endpoint(agent_id: int, membership: WorkspaceMember = Depends(get_current_membership), db: Session = Depends(get_db)):
     agent = require_workspace_agent(db, membership.workspace_id, agent_id)
@@ -1175,342 +868,6 @@ def get_draft(agent_id: int, membership: WorkspaceMember = Depends(get_current_m
     return {"agent": get_agent_detail(db, agent)}
 
 
-@app.get("/api/knowledge-bases")
-def list_knowledge_bases(membership: WorkspaceMember = Depends(get_current_membership), db: Session = Depends(get_db)):
-    kbs = db.query(KnowledgeBase).filter(KnowledgeBase.workspace_id == membership.workspace_id).order_by(KnowledgeBase.id.desc()).all()
-    items = []
-    for kb in kbs:
-        count = db.query(KnowledgeDocument).filter(KnowledgeDocument.knowledge_base_id == kb.id).count()
-        items.append(knowledge_base_summary(kb, count))
-    return {"items": items}
-
-
-@app.post("/api/knowledge-bases")
-def create_kb(request: KnowledgeBaseCreateRequest, membership: WorkspaceMember = Depends(get_current_membership), db: Session = Depends(get_db)):
-    kb = create_knowledge_base(db, workspace_id=membership.workspace_id, user_id=membership.user_id, name=request.name, description=request.description)
-    return {"knowledge_base": knowledge_base_summary(kb)}
-
-
-@app.post("/api/knowledge-bases/{kb_id}/documents")
-def upload_document(kb_id: int, request: KnowledgeDocumentCreateRequest, membership: WorkspaceMember = Depends(get_current_membership), db: Session = Depends(get_db)):
-    kb = require_workspace_kb(db, membership.workspace_id, kb_id)
-    require_kb_write_access(kb, membership)
-    logger.info(
-        "Knowledge document upload request: schema=%s kb_id=%s workspace_id=%s filename=%s source_type=%s",
-        request.__class__.__name__,
-        kb.id,
-        membership.workspace_id,
-        request.filename or request.title or "",
-        request.source_type,
-    )
-    try:
-        document, payload = add_knowledge_document_from_request(db, workspace_id=membership.workspace_id, kb=kb, request=request)
-    except KnowledgeDocumentError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
-    except RuntimeError as exc:
-        db.rollback()
-        logger.exception("Knowledge document indexing failed")
-        raise HTTPException(status_code=502, detail={"message": _sanitize_public_error(str(exc)), "error_code": "knowledge_index_failed"}) from exc
-    except Exception as exc:
-        db.rollback()
-        logger.exception("Knowledge document upload failed")
-        raise HTTPException(status_code=500, detail={"message": "Knowledge document upload failed.", "error_code": "knowledge_upload_failed"}) from exc
-    if document.status == "failed":
-        raise HTTPException(status_code=422, detail={"message": document.error_message or "Document text extraction failed", "document": payload})
-    return {"document": payload}
-
-
-@app.post("/api/knowledge-bases/{kb_id}/documents/batch")
-def upload_documents_batch(kb_id: int, request: KnowledgeDocumentBatchCreateRequest, membership: WorkspaceMember = Depends(get_current_membership), db: Session = Depends(get_db)):
-    kb = require_workspace_kb(db, membership.workspace_id, kb_id)
-    require_kb_write_access(kb, membership)
-    logger.info(
-        "Knowledge document upload request: schema=%s kb_id=%s workspace_id=%s count=%s filenames=%s",
-        request.__class__.__name__,
-        kb.id,
-        membership.workspace_id,
-        len(request.documents),
-        [item.filename or item.title or f"document-{index + 1}" for index, item in enumerate(request.documents)],
-    )
-    documents = []
-    errors = []
-
-    for index, item in enumerate(request.documents):
-        filename = item.filename or item.title or f"document-{index + 1}"
-        try:
-            document, payload = add_knowledge_document_from_request(db, workspace_id=membership.workspace_id, kb=kb, request=item)
-            if document.status == "failed":
-                errors.append({
-                    "index": index,
-                    "filename": filename,
-                    "message": document.error_message or "Document text extraction failed",
-                    "document": payload,
-                })
-            else:
-                documents.append(payload)
-        except KnowledgeDocumentError as exc:
-            db.rollback()
-            errors.append({"index": index, "filename": filename, "message": str(exc), "status_code": exc.status_code})
-        except RuntimeError as exc:
-            db.rollback()
-            logger.exception("Knowledge document batch indexing failed")
-            errors.append({
-                "index": index,
-                "filename": filename,
-                "message": _sanitize_public_error(str(exc)),
-                "error_code": "knowledge_index_failed",
-            })
-        except Exception as exc:
-            db.rollback()
-            logger.exception("Knowledge document batch upload failed")
-            errors.append({
-                "index": index,
-                "filename": filename,
-                "message": "Knowledge document upload failed.",
-                "error_code": "knowledge_upload_failed",
-            })
-
-    payload = {
-        "documents": documents,
-        "errors": errors,
-        "total": len(request.documents),
-        "succeeded": len(documents),
-        "failed": len(errors),
-    }
-    return payload
-
-
-@app.get("/api/knowledge-bases/{kb_id}/documents")
-def list_documents(kb_id: int, membership: WorkspaceMember = Depends(get_current_membership), db: Session = Depends(get_db)):
-    kb = require_workspace_kb(db, membership.workspace_id, kb_id)
-    documents = db.query(KnowledgeDocument).filter(KnowledgeDocument.knowledge_base_id == kb.id).order_by(KnowledgeDocument.id.desc()).all()
-    return {
-        "items": [
-            document_payload(
-                document,
-                db.query(KnowledgeChunk).filter(KnowledgeChunk.document_id == document.id).count(),
-            )
-            for document in documents
-        ]
-    }
-
-
-@app.delete("/api/knowledge-bases/{kb_id}/documents")
-def clear_documents(kb_id: int, membership: WorkspaceMember = Depends(get_current_membership), db: Session = Depends(get_db)):
-    kb = require_workspace_kb(db, membership.workspace_id, kb_id)
-    require_kb_write_access(kb, membership)
-    try:
-        summary = clear_knowledge_base_documents(db, workspace_id=membership.workspace_id, kb=kb)
-    except Exception as exc:
-        db.rollback()
-        logger.exception(
-            "Knowledge base documents clear failed: kb_id=%s workspace_id=%s",
-            kb.id,
-            membership.workspace_id,
-        )
-        raise HTTPException(status_code=500, detail={"message": "Knowledge base documents clear failed.", "error_code": "knowledge_documents_clear_failed"}) from exc
-    logger.info(
-        "Knowledge base documents cleared: kb_id=%s workspace_id=%s documents_deleted=%s chunks_deleted=%s vectors_delete_requested=%s",
-        kb.id,
-        membership.workspace_id,
-        summary.get("documents_deleted", 0),
-        summary.get("chunks_deleted", 0),
-        summary.get("vectors_delete_requested", False),
-    )
-    return {"cleared": True, **summary}
-
-
-@app.delete("/api/knowledge-bases/{kb_id}/documents/{document_id}")
-def remove_document(kb_id: int, document_id: int, membership: WorkspaceMember = Depends(get_current_membership), db: Session = Depends(get_db)):
-    kb = require_workspace_kb(db, membership.workspace_id, kb_id)
-    require_kb_write_access(kb, membership)
-    document = db.query(KnowledgeDocument).filter(KnowledgeDocument.knowledge_base_id == kb.id, KnowledgeDocument.id == document_id).first()
-    if not document:
-        raise HTTPException(status_code=404, detail="Document not found")
-    try:
-        summary = delete_document(db, workspace_id=membership.workspace_id, document=document)
-    except Exception as exc:
-        db.rollback()
-        logger.exception(
-            "Knowledge document delete failed: kb_id=%s document_id=%s workspace_id=%s",
-            kb.id,
-            document_id,
-            membership.workspace_id,
-        )
-        raise HTTPException(status_code=500, detail={"message": "Knowledge document delete failed.", "error_code": "knowledge_document_delete_failed"}) from exc
-    logger.info(
-        "Knowledge document deleted: kb_id=%s document_id=%s workspace_id=%s chunks_deleted=%s vectors_delete_requested=%s",
-        kb.id,
-        document_id,
-        membership.workspace_id,
-        summary.get("chunks_deleted", 0),
-        summary.get("vectors_delete_requested", False),
-    )
-    return {"deleted": True, **summary}
-
-
-@app.post("/api/knowledge-bases/{kb_id}/index")
-def index_kb(kb_id: int, membership: WorkspaceMember = Depends(get_current_membership), db: Session = Depends(get_db)):
-    kb = require_workspace_kb(db, membership.workspace_id, kb_id)
-    require_kb_write_access(kb, membership)
-    job_id = f"kb-{kb.id}-sync"
-    summary = reindex_knowledge_base(db, workspace_id=membership.workspace_id, kb=kb)
-    status = "failed" if summary["documents_failed"] and not summary["documents_indexed"] else "succeeded"
-    payload = {
-        "job_id": job_id,
-        "knowledge_base_id": kb.id,
-        "status": status,
-        "message": (
-            f"Rebuilt {summary['chunks_indexed']} chunks for {summary['documents_indexed']} documents."
-            if status == "succeeded"
-            else "Knowledge base reindex failed for all documents."
-        ),
-        **summary,
-    }
-    redis_store.set_job(job_id, payload)
-    return payload
-
-
-@app.get("/api/knowledge/jobs/{job_id}")
-def get_knowledge_job(job_id: str, _: WorkspaceMember = Depends(get_current_membership)):
-    lookup = redis_store.get_job(job_id)
-    if lookup.hit and lookup.value:
-        return lookup.value
-    return {"job_id": job_id, "status": "unknown", "message": "Job state is not available or Redis is not configured."}
-
-
-@app.delete("/api/knowledge-bases/{kb_id}")
-def delete_kb(kb_id: int, membership: WorkspaceMember = Depends(get_current_membership), db: Session = Depends(get_db)):
-    kb = require_workspace_kb(db, membership.workspace_id, kb_id)
-    require_kb_write_access(kb, membership)
-    delete_knowledge_base(db, workspace_id=membership.workspace_id, kb=kb)
-    return {"deleted": True}
-
-
-@app.patch("/api/knowledge-bases/{kb_id}")
-def update_kb(kb_id: int, request: KnowledgeBaseCreateRequest, membership: WorkspaceMember = Depends(get_current_membership), db: Session = Depends(get_db)):
-    kb = require_workspace_kb(db, membership.workspace_id, kb_id)
-    require_kb_write_access(kb, membership)
-    kb.name = request.name
-    kb.description = request.description
-    db.commit()
-    db.refresh(kb)
-    return {"knowledge_base": knowledge_base_summary(kb)}
-
-
-@app.get("/api/knowledge-bases/{kb_id}/documents/{document_id}/chunks")
-def get_document_chunks(kb_id: int, document_id: int, membership: WorkspaceMember = Depends(get_current_membership), db: Session = Depends(get_db)):
-    kb = require_workspace_kb(db, membership.workspace_id, kb_id)
-    document = db.query(KnowledgeDocument).filter(
-        KnowledgeDocument.knowledge_base_id == kb.id,
-        KnowledgeDocument.id == document_id,
-    ).first()
-    if not document:
-        raise HTTPException(status_code=404, detail="Document not found")
-    chunks = list_document_chunks(db, document_id=document.id)
-    return {"document": document_payload(document, len(chunks)), "chunks": chunks}
-
-
-# Duplicate ChatRequest definition removed; model defined in api.schemas.
-
-class ResegmentRequest(BaseModel):
-    parse_mode: str = "precise"
-    segment_mode: str = "auto"
-    delimiter: str | None = "##"
-    max_chunk_len: int = 5000
-    overlap_pct: int = 10
-    hierarchy_level: int = 3
-    keep_hierarchy_info: bool = True
-
-@app.post("/api/knowledge-bases/{kb_id}/documents/{document_id}/preview")
-def preview_document_chunks(
-    kb_id: int,
-    document_id: int,
-    request: ResegmentRequest,
-    membership: WorkspaceMember = Depends(get_current_membership),
-    db: Session = Depends(get_db)
-):
-    kb = require_workspace_kb(db, membership.workspace_id, kb_id)
-    document = db.query(KnowledgeDocument).filter(
-        KnowledgeDocument.knowledge_base_id == kb.id,
-        KnowledgeDocument.id == document_id
-    ).first()
-    if not document:
-        raise HTTPException(status_code=404, detail="Document not found")
-    
-    cfg = request.model_dump()
-    seg_mode = cfg.get("segment_mode", "auto")
-    
-    # 内存直接切分并不入库
-    if seg_mode == "hierarchy":
-        chunks = split_by_hierarchy(
-            document.text,
-            kb_id=kb.id,
-            document_id=document.id,
-            max_level=cfg.get("hierarchy_level", 3),
-            keep_hierarchy_info=cfg.get("keep_hierarchy_info", True)
-        )
-    elif seg_mode == "custom":
-        chunks = split_parent_child(
-            document.text,
-            kb_id=kb.id,
-            document_id=document.id,
-            parent_size=cfg.get("max_chunk_len", 1600),
-            child_size=int(cfg.get("max_chunk_len", 1600) * 0.35),
-            overlap=int(cfg.get("max_chunk_len", 1600) * cfg.get("overlap_pct", 10) / 100)
-        )
-    else:
-        chunks = split_parent_child(document.text, kb_id=kb.id, document_id=document.id)
-        
-    return {
-        "chunks_count": len(chunks),
-        "preview_items": [
-            {
-                "chunk_index": idx,
-                "text": chunk.get("text", ""),
-                "hierarchy_path": chunk.get("section", "")
-            }
-            for idx, chunk in enumerate(chunks)
-        ]
-    }
-
-@app.post("/api/knowledge-bases/{kb_id}/documents/{document_id}/resegment")
-def resegment_document_chunks(
-    kb_id: int,
-    document_id: int,
-    request: ResegmentRequest,
-    membership: WorkspaceMember = Depends(get_current_membership),
-    db: Session = Depends(get_db)
-):
-    kb = require_workspace_kb(db, membership.workspace_id, kb_id)
-    require_kb_write_access(kb, membership)
-    document = db.query(KnowledgeDocument).filter(
-        KnowledgeDocument.knowledge_base_id == kb.id,
-        KnowledgeDocument.id == document_id
-    ).first()
-    if not document:
-        raise HTTPException(status_code=404, detail="Document not found")
-    
-    # 保存配置并同步启动重新索引
-    document.segment_config = request.model_dump()
-    db.commit()
-    
-    try:
-        chunk_count = index_document(
-            db,
-            workspace_id=membership.workspace_id,
-            kb=kb,
-            document=document,
-            clear_existing=True
-        )
-        db.commit()
-    except Exception as exc:
-        db.rollback()
-        raise HTTPException(status_code=500, detail={"message": f"Resegment index failed: {str(exc)}"})
-        
-    return {"document": document_payload(document, chunk_count)}
-
-
 @app.get("/api/agents/{agent_id}/workflow")
 def get_workflow(agent_id: int, membership: WorkspaceMember = Depends(get_current_membership), db: Session = Depends(get_db)):
     agent = require_workspace_agent(db, membership.workspace_id, agent_id)
@@ -1547,12 +904,8 @@ def chat_stream(agent_id: int, request: ChatRequest, membership: WorkspaceMember
     db.add(user_message)
     db.commit()
 
-    event_queue: queue.Queue = queue.Queue()
-
-    # Capture everything the background thread needs (don't pass ORM objects across threads)
     bg_params = {
         "agent_id": agent.id,
-        "agent_workspace_id": agent.workspace_id,
         "session_id": session.id,
         "user_id": current_user.id,
         "user_message": request.message,
@@ -1565,485 +918,7 @@ def chat_stream(agent_id: int, request: ChatRequest, membership: WorkspaceMember
         "search_enabled": request.search_enabled,
         "attachments": request.attachments,
     }
-
-    def _run_workflow_bg() -> None:
-        bg_db = SessionLocal()
-        try:
-            _execute_workflow_thread(bg_db, bg_params, event_queue)
-        except Exception:
-            logger.exception("Background workflow thread crashed")
-            # Last-resort: mark the newest running run for this session as failed
-            try:
-                zombie = (
-                    bg_db.query(Run)
-                    .filter(
-                        Run.session_id == bg_params["session_id"],
-                        Run.status == "running",
-                    )
-                    .order_by(Run.started_at.desc())
-                    .first()
-                )
-                if zombie is not None:
-                    zombie.status = "failed"
-                    zombie.completed_at = datetime.now(timezone.utc)
-                    bg_db.commit()
-                    logger.warning("Marked zombie run %s as failed after thread crash", zombie.id)
-            except Exception:
-                bg_db.rollback()
-                logger.exception("Failed to mark zombie run after thread crash")
-        finally:
-            event_queue.put(None)  # sentinel
-            bg_db.close()
-
-    thread = threading.Thread(target=_run_workflow_bg, name=f"wf-{session.id}", daemon=True)
-    thread.start()
-
-    def _sse_generator() -> Iterable[str]:
-        while True:
-            item = event_queue.get()
-            if item is None:  # sentinel — workflow finished
-                break
-            yield item
-
-    return StreamingResponse(_sse_generator(), media_type="text/event-stream")
-
-
-@app.get("/api/agents/{agent_id}/sessions")
-def list_agent_sessions(agent_id: int, membership: WorkspaceMember = Depends(get_current_membership), db: Session = Depends(get_db)):
-    agent = require_workspace_agent(db, membership.workspace_id, agent_id)
-    require_agent_read_access(agent, membership)
-    query = db.query(ChatSession).filter(
-        ChatSession.workspace_id == membership.workspace_id,
-        ChatSession.agent_id == agent.id,
-        ChatSession.is_debug == False,
-    )
-    if not can_manage(membership.role):
-        query = query.filter(ChatSession.user_id == membership.user_id)
-    sessions = query.order_by(ChatSession.updated_at.desc()).all()
-    items = []
-    for session in sessions:
-        payload = session_payload(session, db)
-        payload["active_run"] = active_run_payload(db, session.id)
-        items.append(payload)
-    return {"items": items}
-
-
-@app.get("/api/sessions/{session_id}")
-def get_session(session_id: int, membership: WorkspaceMember = Depends(get_current_membership), db: Session = Depends(get_db)):
-    session = db.get(ChatSession, session_id)
-    if not session or session.workspace_id != membership.workspace_id:
-        raise HTTPException(status_code=404, detail="Session not found")
-    require_session_access(session, membership)
-    messages = db.query(Message).filter(Message.session_id == session.id).order_by(Message.id.asc()).all()
-    return {
-        "session": session_payload(session, db),
-        "messages": chat_message_payloads(messages),
-        "active_run": active_run_payload(db, session.id),
-    }
-
-
-@app.patch("/api/sessions/{session_id}")
-def patch_session(session_id: int, request: SessionUpdateRequest, membership: WorkspaceMember = Depends(get_current_membership), db: Session = Depends(get_db)):
-    session = db.get(ChatSession, session_id)
-    if not session or session.workspace_id != membership.workspace_id:
-        raise HTTPException(status_code=404, detail="Session not found")
-    require_session_access(session, membership)
-    session.title = request.title.strip()
-    db.commit()
-    db.refresh(session)
-    return {"session": session_payload(session, db)}
-
-
-@app.delete("/api/sessions/{session_id}")
-def delete_session(session_id: int, membership: WorkspaceMember = Depends(get_current_membership), db: Session = Depends(get_db)):
-    session = db.get(ChatSession, session_id)
-    if not session or session.workspace_id != membership.workspace_id:
-        raise HTTPException(status_code=404, detail="Session not found")
-    require_session_access(session, membership)
-
-    message_ids = [
-        row.id
-        for row in db.query(Message.id).filter(Message.session_id == session.id).all()
-    ]
-    run_ids = [
-        row.id
-        for row in db.query(Run.id).filter(Run.session_id == session.id).all()
-    ]
-    if message_ids:
-        db.query(Feedback).filter(Feedback.message_id.in_(message_ids)).delete(synchronize_session=False)
-    if run_ids:
-        db.query(RunStep).filter(RunStep.run_id.in_(run_ids)).delete(synchronize_session=False)
-    db.query(SessionMemory).filter(SessionMemory.session_id == session.id).delete(synchronize_session=False)
-    db.query(Message).filter(Message.session_id == session.id).delete(synchronize_session=False)
-    db.query(Run).filter(Run.session_id == session.id).delete(synchronize_session=False)
-    db.delete(session)
-    db.commit()
-    return {"deleted": True}
-
-
-def _execute_workflow_thread(db: Session, params: dict, q: queue.Queue) -> None:
-    """Execute the workflow in a background thread with its own DB session.
-
-    Puts SSE event strings onto *q*.  Puts ``None`` as a sentinel when done.
-    All DB writes happen here, so the run lifecycle is independent of the
-    SSE connection.
-    """
-    agent = db.get(Agent, params["agent_id"])
-    if not agent:
-        q.put(sse_event("error", {"message": "Agent not found"}))
-        return
-    chat_session = db.get(ChatSession, params["session_id"])
-    if not chat_session:
-        q.put(sse_event("error", {"message": "Session not found"}))
-        return
-
-    runner = WorkflowRunner(db)
-    _tracked_run_id: int | None = None
-
-    def _emit(event_name: str, data: dict | None = None) -> None:
-        """Push an SSE event to the queue AND the replay log."""
-        sse_str = sse_event(event_name, data or {})
-        q.put(sse_str)
-        if _tracked_run_id is not None:
-            run_event_buffer.append(_tracked_run_id, sse_str)
-    answer = ""
-    provisional_answer = ""
-    sources: list[dict] = []
-    reasoning = ""
-    reasoning_started_at: float | None = None
-    reasoning_duration_ms: int | None = None
-    run: Run | None = None
-    assistant_saved = False
-    used_tools = False
-    requires_reasoning_replay = False
-
-    try:
-        for event in runner.run_events(
-            agent=agent,
-            chat_session=chat_session,
-            user_message=params["user_message"],
-            mode=params["mode"],
-            variables=params["variables"],
-            rag_enabled=params["rag_enabled"],
-            rag_options=params["rag_options"],
-            thinking_enabled=params["thinking_enabled"],
-            search_enabled=params["search_enabled"],
-            attachments=params["attachments"],
-            current_message_id=params["user_message_id"],
-        ):
-            if event["event"] == "run_started":
-                _tracked_run_id = event["run_id"]
-                run = db.get(Run, _tracked_run_id)
-                _emit("run_started", {"run_id": _tracked_run_id, "session_id": chat_session.id})
-            elif event["event"] == "token":
-                if reasoning_started_at is not None and reasoning_duration_ms is None:
-                    reasoning_duration_ms = int((time.perf_counter() - reasoning_started_at) * 1000)
-                answer += event.get("content", "")
-                _emit("token", {"content": event.get("content", "")})
-            elif event["event"] == "provisional_token":
-                content = event.get("content", "")
-                if reasoning_started_at is not None and reasoning_duration_ms is None:
-                    reasoning_duration_ms = int((time.perf_counter() - reasoning_started_at) * 1000)
-                provisional_answer += content
-                _emit("provisional_token", {"content": content})
-            elif event["event"] == "reasoning_token":
-                content = event.get("content", "")
-                if reasoning_started_at is None:
-                    reasoning_started_at = time.perf_counter()
-                reasoning += content
-                _emit("reasoning_token", {"content": content})
-            elif event["event"] == "provisional_clear":
-                provisional_answer = ""
-                if not reasoning:
-                    reasoning_started_at = None
-                    reasoning_duration_ms = None
-                _emit("provisional_clear", event.get("data", {}) or {})
-            elif event["event"] == "provisional_commit":
-                if provisional_answer:
-                    answer += provisional_answer
-                provisional_answer = ""
-                _emit("provisional_commit", event.get("data", {}) or {})
-            elif event["event"] in {
-                "tool_call_start",
-                "tool_call_result",
-                "tool_call",
-                "search_status",
-                "rag_status",
-                "memory_used",
-                "thinking_status",
-            }:
-                _emit(event["event"], event.get("data", {}) or {})
-            elif event["event"] == "step":
-                step = event["step"]
-                for runtime_event in step.get("events", []):
-                    runtime_event_name = runtime_event.get("event", "tool_call")
-                    runtime_event_data = runtime_event.get("data", {}) or {}
-                    if runtime_event_name == "reasoning_token":
-                        content = runtime_event_data.get("content", "")
-                        if content:
-                            if reasoning_started_at is None:
-                                reasoning_started_at = time.perf_counter()
-                            reasoning += content
-                        _emit("reasoning_token", {"content": content})
-                        continue
-                    _emit(runtime_event_name, runtime_event_data)
-                _emit("run_step", step)
-            elif event["event"] == "cancelled":
-                run = db.get(Run, event["run_id"])
-                if reasoning_started_at is not None and reasoning_duration_ms is None:
-                    reasoning_duration_ms = int((time.perf_counter() - reasoning_started_at) * 1000)
-                cancel_answer = answer + provisional_answer
-                cancel_reasoning = reasoning
-                assistant = Message(
-                    session_id=chat_session.id,
-                    role="assistant",
-                    content=cancel_answer,
-                    reasoning=cancel_reasoning,
-                    reasoning_duration_ms=reasoning_duration_ms,
-                    sources=sources,
-                    meta={"cancelled": True},
-                )
-                db.add(assistant)
-                db.commit()
-                db.refresh(assistant)
-                assistant_saved = True
-                _emit("cancelled", {
-                    "session_id": chat_session.id,
-                    "message_id": assistant.id,
-                    "run_id": event["run_id"],
-                    "content": cancel_answer,
-                })
-                return
-            elif event["event"] == "complete":
-                run = event["run"]
-                answer = event["answer"] or answer + provisional_answer
-                sources = event["sources"]
-                used_tools = any(
-                    (step.get("node_type") == "Tool")
-                    and int(((step.get("output") or {}).get("tool_stats") or {}).get("total_calls") or 0) > 0
-                    for step in event.get("steps", [])
-                )
-                requires_reasoning_replay = any(
-                    bool((step.get("output") or {}).get("reasoning_replay_required"))
-                    for step in event.get("steps", [])
-                )
-
-        if reasoning_started_at is not None and reasoning_duration_ms is None:
-            reasoning_duration_ms = int((time.perf_counter() - reasoning_started_at) * 1000)
-        if sources:
-            _emit("sources", {"items": sources})
-        assistant = Message(
-            session_id=chat_session.id,
-            role="assistant",
-            content=answer,
-            reasoning=reasoning,
-            reasoning_duration_ms=reasoning_duration_ms,
-            sources=sources,
-            meta={
-                **({"used_tools": True} if used_tools else {}),
-                **({"reasoning_includes_intermediate": True} if used_tools and reasoning else {}),
-                **({"requires_reasoning_replay": True} if used_tools and requires_reasoning_replay else {}),
-            },
-        )
-        db.add(assistant)
-        db.commit()
-        db.refresh(assistant)
-        assistant_saved = True
-        # Auto-generate session title BEFORE emitting done so frontend receives it immediately
-        # Resolve the agent's runtime config so the title uses the same model provider
-        title_runtime_config = _resolve_title_runtime_config(db, agent, params["user_id"])
-        _auto_title_session(db, chat_session, params["user_message"], answer, runtime_config=title_runtime_config)
-        _emit("done", {
-            "session_id": chat_session.id,
-            "message_id": assistant.id,
-            "run_id": run.id,
-            "content": answer,
-            "reasoning_duration_ms": reasoning_duration_ms,
-            "title": chat_session.title,
-        })
-    except _CancelledError:
-        # Workflow was cancelled — run status already set by run_events()
-        partial_answer = answer + provisional_answer
-        partial_reasoning = reasoning
-        if not assistant_saved and partial_answer:
-            try:
-                if reasoning_started_at is not None and reasoning_duration_ms is None:
-                    reasoning_duration_ms = int((time.perf_counter() - reasoning_started_at) * 1000)
-                assistant = Message(
-                    session_id=chat_session.id,
-                    role="assistant",
-                    content=partial_answer,
-                    reasoning=partial_reasoning,
-                    reasoning_duration_ms=reasoning_duration_ms,
-                    sources=sources,
-                    meta={"cancelled": True, "partial": True},
-                )
-                db.add(assistant)
-                db.commit()
-            except Exception:
-                db.rollback()
-        _emit("cancelled", {
-            "session_id": chat_session.id,
-            "run_id": run.id if run else (_tracked_run_id or None),
-            "content": partial_answer,
-        })
-    except Exception as exc:
-        # Resolve run if we have tracked_run_id but run is None
-        resolved_run = run
-        if resolved_run is None and _tracked_run_id is not None:
-            resolved_run = db.get(Run, _tracked_run_id)
-        if resolved_run is not None and resolved_run.status == "running":
-            try:
-                resolved_run.status = "failed"
-                resolved_run.completed_at = datetime.now(timezone.utc)
-                db.commit()
-            except Exception:
-                db.rollback()
-                logger.exception("Failed to mark run %s as failed", getattr(resolved_run, 'id', None))
-        logger.exception("Agent chat stream failed")
-        _emit("error", safe_stream_error(exc))
-        # Safety net: persist partial answer
-        partial_answer = answer + provisional_answer
-        partial_reasoning = reasoning
-        if not assistant_saved and partial_answer:
-            try:
-                if reasoning_started_at is not None and reasoning_duration_ms is None:
-                    reasoning_duration_ms = int((time.perf_counter() - reasoning_started_at) * 1000)
-                assistant = Message(
-                    session_id=chat_session.id,
-                    role="assistant",
-                    content=partial_answer,
-                    reasoning=partial_reasoning,
-                    reasoning_duration_ms=reasoning_duration_ms,
-                    sources=sources,
-                    meta={"cancelled": True, "partial": True},
-                )
-                db.add(assistant)
-                db.commit()
-            except Exception:
-                db.rollback()
-    finally:
-        pass  # Don't immediately clean up event log — keep for reconnection
-
-
-@app.get("/api/runs/{run_id}")
-def get_run(run_id: int, membership: WorkspaceMember = Depends(get_current_membership), db: Session = Depends(get_db)):
-    run = db.get(Run, run_id)
-    if not run or run.workspace_id != membership.workspace_id:
-        raise HTTPException(status_code=404, detail="Run not found")
-    session = db.get(ChatSession, run.session_id)
-    if session:
-        require_session_access(session, membership)
-    return {"run": {"id": run.id, "status": run.status, "agent_id": run.agent_id, "session_id": run.session_id}}
-
-
-@app.post("/api/runs/{run_id}/cancel")
-def cancel_run_endpoint(run_id: int, membership: WorkspaceMember = Depends(get_current_membership), db: Session = Depends(get_db)):
-    run = db.get(Run, run_id)
-    if not run or run.workspace_id != membership.workspace_id:
-        raise HTTPException(status_code=404, detail="Run not found")
-    session = db.get(ChatSession, run.session_id)
-    if session:
-        require_session_access(session, membership)
-    if cancel_run(run_id):
-        return {"cancelled": True, "run_id": run_id}
-    return {"cancelled": False, "run_id": run_id, "message": "Run not active or already completed"}
-
-
-@app.get("/api/runs/{run_id}/events")
-def stream_run_events(run_id: int, since: int = Query(0), membership: WorkspaceMember = Depends(get_current_membership), db: Session = Depends(get_db)):
-    """Reconnect to an in-progress run's SSE event stream after page refresh.
-
-    Replays buffered events then streams new events as they arrive.
-    If the run is already finished, returns buffered events and closes.
-
-    Supports ?since=N to skip already-consumed events (for session switch-back).
-    """
-    run = db.get(Run, run_id)
-    if not run or run.workspace_id != membership.workspace_id:
-        raise HTTPException(status_code=404, detail="Run not found")
-    session = db.get(ChatSession, run.session_id)
-    if session:
-        require_session_access(session, membership)
-
-    def _event_stream() -> Iterable[str]:
-        emitted = max(0, since)
-        terminal_seen = False
-        if emitted == 0:
-            db_sess = SessionLocal()
-            try:
-                current = db_sess.get(Run, run_id)
-                if current is not None and current.status == "running":
-                    snapshot = _run_stream_snapshot(run_id)
-                    emitted = int(snapshot.get("event_index") or 0)
-                    yield sse_event("run_snapshot", snapshot)
-            finally:
-                db_sess.close()
-        # Phase 1: replay buffered events
-        while True:
-            events, total = run_event_buffer.since(run_id, emitted)
-            for sse_str in events:
-                if sse_event_name(sse_str) in {"done", "cancelled", "error"}:
-                    terminal_seen = True
-                yield sse_str
-                emitted += 1
-            # Check if run is still active
-            db_sess = SessionLocal()
-            try:
-                current = db_sess.get(Run, run_id)
-                if current is None or current.status != "running":
-                    # Send terminal event if no done/cancelled/error was in the log
-                    if not terminal_seen:
-                        final_status = current.status if current else "unknown"
-                        terminal_payload = {"run_id": run_id, "session_id": run.session_id, "status": final_status}
-                        if final_status == "succeeded":
-                            yield sse_event("done", terminal_payload)
-                        elif final_status == "cancelled":
-                            yield sse_event("cancelled", terminal_payload)
-                        elif final_status == "failed":
-                            yield sse_event("error", {**terminal_payload, "message": "Run failed"})
-                        else:
-                            yield sse_event("done", terminal_payload)
-                    break
-            finally:
-                db_sess.close()
-            time.sleep(0.3)
-
-    return StreamingResponse(_event_stream(), media_type="text/event-stream")
-
-
-@app.get("/api/runs/{run_id}/steps")
-def get_run_steps(run_id: int, membership: WorkspaceMember = Depends(get_current_membership), db: Session = Depends(get_db)):
-    run = db.get(Run, run_id)
-    if not run or run.workspace_id != membership.workspace_id:
-        raise HTTPException(status_code=404, detail="Run not found")
-    session = db.get(ChatSession, run.session_id)
-    if session:
-        require_session_access(session, membership)
-    steps = db.query(RunStep).filter(RunStep.run_id == run.id).order_by(RunStep.id.asc()).all()
-    return {"items": [{"id": step.id, "node_id": step.node_id, "node_type": step.node_type, "status": step.status, "output": step.output} for step in steps]}
-
-
-@app.post("/api/messages/{message_id}/feedback")
-def create_feedback(
-    message_id: int,
-    request: FeedbackRequest,
-    current_user: User = Depends(get_current_user),
-    membership: WorkspaceMember = Depends(get_current_membership),
-    db: Session = Depends(get_db),
-):
-    message = db.get(Message, message_id)
-    if not message:
-        raise HTTPException(status_code=404, detail="Message not found")
-    session = db.get(ChatSession, message.session_id)
-    if not session or session.workspace_id != membership.workspace_id:
-        raise HTTPException(status_code=404, detail="Message not found")
-    require_session_access(session, membership)
-    feedback = Feedback(message_id=message.id, user_id=current_user.id, rating=request.rating, comment=request.comment)
-    db.add(feedback)
-    db.commit()
-    db.refresh(feedback)
-    return {"feedback": {"id": feedback.id, "rating": feedback.rating, "comment": feedback.comment}}
+    return StreamingResponse(workflow_sse_items(start_workflow_stream(bg_params)), media_type="text/event-stream")
 
 
 def user_payload(user: User) -> dict:
@@ -2063,377 +938,6 @@ def invite_payload(invite: WorkspaceInvite, *, include_token: bool = False) -> d
     if include_token:
         payload["token"] = invite.token
     return payload
-
-
-def cleanup_stale_session_runs(db: Session, session_id: int) -> None:
-    stale_cutoff = datetime.now(timezone.utc) - timedelta(minutes=30)
-    stale_runs = (
-        db.query(Run)
-        .filter(
-            Run.session_id == session_id,
-            Run.status == "running",
-            Run.started_at < stale_cutoff,
-        )
-        .all()
-    )
-    for stale in stale_runs:
-        stale.status = "failed"
-        stale.completed_at = datetime.now(timezone.utc)
-    if stale_runs:
-        db.commit()
-
-
-def active_run_payload(db: Session, session_id: int) -> dict | None:
-    cleanup_stale_session_runs(db, session_id)
-    active_run = (
-        db.query(Run)
-        .filter(Run.session_id == session_id, Run.status == "running")
-        .order_by(Run.started_at.desc())
-        .first()
-    )
-    if not active_run:
-        return None
-    return {
-        "id": active_run.id,
-        "status": active_run.status,
-        "started_at": active_run.started_at.isoformat() if active_run.started_at else None,
-    }
-
-
-def session_payload(session: ChatSession, db: Session) -> dict:
-    messages = db.query(Message).filter(Message.session_id == session.id).all()
-    count = len([message for message in messages if visible_chat_message(message)])
-    return {
-        "id": session.id,
-        "agent_id": session.agent_id,
-        "title": session.title,
-        "message_count": count,
-        "created_at": session.created_at.isoformat() if session.created_at else None,
-        "updated_at": session.updated_at.isoformat() if session.updated_at else None,
-    }
-
-
-def chat_message_payloads(messages: list[Message]) -> list[dict]:
-    payloads: list[dict] = []
-    pending_reasoning: list[str] = []
-    pending_timeline: list[dict] = []
-    for message in messages:
-        meta = message.meta or {}
-        if message.role == "user":
-            pending_reasoning = []
-            pending_timeline = []
-            if visible_chat_message(message):
-                payloads.append(message_payload(message))
-            continue
-        if message.role == "assistant" and meta.get("is_intermediate"):
-            if message.reasoning:
-                pending_reasoning.append(message.reasoning)
-                pending_timeline.append(
-                    {
-                        "id": f"stored-reasoning-{message.id}",
-                        "type": "reasoning",
-                        "content": message.reasoning,
-                    }
-                )
-            continue
-        if message.role == "tool":
-            item = tool_message_timeline_item(message)
-            if item:
-                pending_timeline.append(item)
-            continue
-        if not visible_chat_message(message):
-            continue
-        payload = message_payload(message)
-        if message.role == "assistant":
-            payload_meta = payload.get("meta") or {}
-            if pending_reasoning and not payload_meta.get("reasoning_includes_intermediate"):
-                payload["reasoning"] = merge_reasoning_parts([*pending_reasoning, payload.get("reasoning") or ""])
-            timeline = [*pending_timeline]
-            final_reasoning = remaining_reasoning(payload.get("reasoning") or message.reasoning or "", pending_reasoning)
-            if final_reasoning:
-                timeline.append(
-                    {
-                        "id": f"stored-final-reasoning-{message.id}",
-                        "type": "reasoning",
-                        "content": final_reasoning,
-                    }
-                )
-            if timeline:
-                payload["reasoningTimeline"] = timeline
-            pending_reasoning = []
-            pending_timeline = []
-        payloads.append(payload)
-    return payloads
-
-
-def merge_reasoning_parts(parts: list[str]) -> str:
-    return "\n\n".join(part.strip() for part in parts if part and part.strip())
-
-
-def remaining_reasoning(full_reasoning: str, consumed_parts: list[str]) -> str:
-    remaining = full_reasoning or ""
-    for part in consumed_parts:
-        candidates = [part or "", (part or "").strip()]
-        for candidate in candidates:
-            if not candidate:
-                continue
-            index = remaining.find(candidate)
-            if index >= 0:
-                remaining = remaining[index + len(candidate) :]
-                break
-    return remaining.strip()
-
-
-def tool_message_timeline_item(message: Message) -> dict | None:
-    meta = message.meta or {}
-    if not meta.get("is_intermediate"):
-        return None
-    tool_name = str(meta.get("tool_name") or meta.get("tool") or message.tool_name or message.tool_call_id or "tool")
-    tool_type = str(meta.get("tool_type") or "tool")
-    status = str(meta.get("status") or ("error" if meta.get("error_code") else "success"))
-    is_search = tool_type == "builtin_search" or tool_name == "web_search"
-    raw_input = str(meta.get("input_preview") or "")
-    raw_result = str(meta.get("error") or message.content or meta.get("result_preview") or "")
-    input_summary = summarize_tool_input(raw_input)
-    return {
-        "id": f"stored-tool-{message.id}",
-        "type": "search" if is_search else "tool",
-        "status": status,
-        "toolCallId": message.tool_call_id or str(meta.get("tool_call_id") or ""),
-        "title": "调用联网搜索" if is_search else f"调用 {tool_name}",
-        "meta": " · ".join(part for part in [tool_type, tool_status_label(status)] if part),
-        "latency": timeline_latency(meta.get("latency_ms")),
-        "inputLabel": input_summary["label"],
-        "inputPreview": input_summary["text"],
-        "summary": summarize_tool_result(raw_result, status=status),
-        "rawInput": raw_input,
-        "rawResult": raw_result,
-    }
-
-
-def tool_status_label(status: str) -> str:
-    if status == "error":
-        return "失败"
-    if status == "running":
-        return "运行中"
-    return "完成"
-
-
-def timeline_latency(value) -> str:
-    try:
-        ms = float(value or 0)
-    except (TypeError, ValueError):
-        return ""
-    if ms <= 0:
-        return ""
-    if ms < 1000:
-        return f"{round(ms)}ms"
-    seconds = ms / 1000
-    return f"{seconds:.1f}s" if ms < 10000 else f"{seconds:.0f}s"
-
-
-def compact_timeline_text(value, limit: int = 220) -> str:
-    if value is None:
-        return ""
-    text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
-    compact = " ".join(str(text).split())
-    return f"{compact[:limit]}..." if len(compact) > limit else compact
-
-
-def summarize_tool_input(raw_input: str) -> dict:
-    data = parse_json_preview(raw_input)
-    if isinstance(data, dict):
-        query = first_string_value(data, ["command", "query", "q", "keyword", "keywords", "search", "text", "input"])
-        count = first_scalar_value(data, ["count", "limit", "top_k", "max_results", "num_results"])
-        if query:
-            is_command = "command" in data
-            label = "命令" if is_command else "查询"
-            suffix_parts = []
-            if count:
-                suffix_parts.append(f"数量 {count}")
-            if is_command:
-                cwd_val = str(data.get("cwd", "")).strip()
-                if cwd_val:
-                    suffix_parts.append(f"目录: {cwd_val}")
-            suffix = " · " + " · ".join(suffix_parts) if suffix_parts else ""
-            return {"label": label, "text": compact_timeline_text(f"{query}{suffix}", 120)}
-        keys = [key for key, value in data.items() if value not in (None, "")]
-        if keys:
-            if len(keys) <= 3:
-                preview = " · ".join(f"{key}: {compact_param_value(data.get(key))}" for key in keys)
-            else:
-                preview = f"已传入 {len(keys)} 个参数：" + "、".join(keys[:3])
-            return {"label": "参数", "text": compact_timeline_text(preview, 140)}
-    text = "已传入结构化参数。" if looks_like_json_text(raw_input) else compact_timeline_text(raw_input or "", 120)
-    return {"label": "参数", "text": text}
-
-
-def summarize_tool_result(raw_result: str, *, status: str = "success") -> str:
-    if status == "running":
-        return ""
-    if status == "error":
-        return f"调用失败：{compact_timeline_text(raw_result, 140)}" if raw_result else "调用失败。"
-    data = parse_json_preview(raw_result)
-    # PowerShell / command execution result
-    if isinstance(data, dict) and "exit_code" in data and "command" in data:
-        exit_code = data.get("exit_code", -1)
-        is_timeout = bool(data.get("timeout"))
-        stdout = str(data.get("stdout") or "")
-        stderr = str(data.get("stderr") or "")
-        duration_ms = data.get("duration_ms", 0)
-        truncated = bool(data.get("truncated"))
-        parts = []
-        if is_timeout:
-            parts.append("[timeout] 命令执行超时")
-        elif exit_code == 0:
-            parts.append("[OK] 命令执行成功")
-        else:
-            parts.append(f"[exit={exit_code}] 命令执行失败")
-        duration_str = ""
-        try:
-            ms = int(duration_ms or 0)
-            if ms >= 1000:
-                duration_str = f"{ms / 1000:.1f}s"
-            elif ms > 0:
-                duration_str = f"{ms}ms"
-        except (TypeError, ValueError):
-            pass
-        if duration_str:
-            parts.append(f"耗时 {duration_str}")
-        if truncated:
-            parts.append("输出已截断")
-        if stderr and not is_timeout:
-            parts.append(f"stderr: {compact_timeline_text(stderr, 80)}")
-        if stdout:
-            preview = stdout.strip()[:120]
-            parts.append(compact_timeline_text(preview, 120))
-        return " · ".join(parts)
-    items = collect_result_items(data)
-    if items:
-        return summarize_result_items(items, raw_result)
-    fallback_count = count_json_field(raw_result, "snippet") or count_json_field(raw_result, "title")
-    if fallback_count:
-        dates = extract_date_signals(raw_result)
-        parts = [f"搜索到约 {fallback_count} 条结果"]
-        if dates:
-            parts.append(f"结果中出现 {'、'.join(dates[:3])} 等日期")
-        return compact_timeline_text("；".join(parts), 180)
-    if isinstance(data, dict):
-        error = first_string_value(data, ["error", "message", "detail"])
-        if error:
-            return compact_timeline_text(error, 160)
-        keys = [key for key in data.keys() if key]
-        if keys:
-            return f"工具返回 {len(keys)} 个字段：" + "、".join(keys[:4])
-    if isinstance(data, list):
-        return f"工具返回 {len(data)} 条结构化结果。"
-    if looks_like_json_text(raw_result):
-        return "工具返回了结构化结果，原始内容可展开查看。"
-    return compact_timeline_text(raw_result or "", 160)
-
-
-def summarize_result_items(items: list, raw_result: str) -> str:
-    names = []
-    for item in items[:3]:
-        if not isinstance(item, dict):
-            continue
-        name = item.get("title") or item.get("name") or item.get("hostname") or item.get("source") or item.get("url")
-        if name:
-            names.append(str(name))
-    dates = extract_date_signals(raw_result or json.dumps(items, ensure_ascii=False))
-    parts = [f"搜索到 {len(items)} 条结果"]
-    if names:
-        parts.append("包括 " + "、".join(names))
-    if dates:
-        parts.append(f"结果中出现 {'、'.join(dates[:3])} 等日期")
-    return compact_timeline_text("；".join(parts), 180)
-
-
-def parse_json_preview(value):
-    if not value or not isinstance(value, str):
-        return value or None
-    try:
-        return json.loads(value)
-    except json.JSONDecodeError:
-        return None
-
-
-def looks_like_json_text(value: str) -> bool:
-    text = str(value or "").strip()
-    return text.startswith("{") or text.startswith("[")
-
-
-def collect_result_items(data) -> list:
-    if isinstance(data, list):
-        return [item for item in data if isinstance(item, dict)]
-    if not isinstance(data, dict):
-        return []
-    for key in ["pages", "items", "results", "data", "documents"]:
-        value = data.get(key)
-        if isinstance(value, list):
-            return [item for item in value if isinstance(item, dict)]
-    return []
-
-
-def first_string_value(data: dict, keys: list[str]) -> str:
-    for key in keys:
-        value = data.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    return ""
-
-
-def first_scalar_value(data: dict, keys: list[str]):
-    for key in keys:
-        value = data.get(key)
-        if isinstance(value, (str, int, float)):
-            return value
-    return ""
-
-
-def compact_param_value(value) -> str:
-    if isinstance(value, (str, int, float, bool)):
-        return compact_timeline_text(str(value), 50)
-    if isinstance(value, list):
-        return f"{len(value)} 项"
-    if isinstance(value, dict):
-        return "对象"
-    return ""
-
-
-def count_json_field(value: str, field_name: str) -> int:
-    if not value:
-        return 0
-    return len(re.findall(rf'"{re.escape(field_name)}"\s*:', value))
-
-
-def extract_date_signals(value: str) -> list[str]:
-    if not value:
-        return []
-    matches = re.findall(r"20\d{2}年\d{1,2}月\d{1,2}日|20\d{2}[-/.]\d{1,2}(?:[-/.]\d{1,2})?|20\d{2}年\d{1,2}月?", value)
-    return list(dict.fromkeys(matches))[:5]
-
-
-def message_payload(message: Message) -> dict:
-    return {
-        "id": message.id,
-        "role": message.role,
-        "content": message.content,
-        "reasoning": message.reasoning or "",
-        "reasoningDurationMs": message.reasoning_duration_ms,
-        "sources": message.sources or [],
-        "toolCalls": message.tool_calls or [],
-        "toolCallId": message.tool_call_id or "",
-        "toolName": message.tool_name or "",
-        "meta": message.meta or {},
-        "created_at": message.created_at.isoformat() if message.created_at else None,
-    }
-
-
-def visible_chat_message(message: Message) -> bool:
-    if message.role == "tool":
-        return False
-    return not bool((message.meta or {}).get("is_intermediate"))
 
 
 def invite_workspace(db: Session, workspace_id: int):
@@ -2468,14 +972,6 @@ def require_agent_write_access(agent: Agent, membership: WorkspaceMember) -> Non
     raise HTTPException(status_code=403, detail="Agent edit denied")
 
 
-def require_session_access(session: ChatSession, membership: WorkspaceMember) -> None:
-    if can_manage(membership.role):
-        return
-    if session.user_id == membership.user_id:
-        return
-    raise HTTPException(status_code=404, detail="Session not found")
-
-
 def review_payload(db: Session, agent: Agent) -> dict:
     version = db.query(AgentVersion).filter(AgentVersion.agent_id == agent.id).order_by(AgentVersion.version.desc()).first()
     return {
@@ -2485,26 +981,11 @@ def review_payload(db: Session, agent: Agent) -> dict:
     }
 
 
-def require_workspace_kb(db: Session, workspace_id: int, kb_id: int) -> KnowledgeBase:
-    kb = db.query(KnowledgeBase).filter(KnowledgeBase.workspace_id == workspace_id, KnowledgeBase.id == kb_id).first()
-    if not kb:
-        raise HTTPException(status_code=404, detail="Knowledge base not found")
-    return kb
-
-
 def require_workspace_skill(db: Session, workspace_id: int, skill_id: int) -> Skill:
     skill = db.query(Skill).filter(Skill.workspace_id == workspace_id, Skill.id == skill_id).first()
     if not skill:
         raise HTTPException(status_code=404, detail="Skill not found")
     return skill
-
-
-def require_kb_write_access(kb: KnowledgeBase, membership: WorkspaceMember) -> None:
-    if can_manage(membership.role):
-        return
-    if kb.created_by == membership.user_id:
-        return
-    raise HTTPException(status_code=403, detail="Knowledge base edit denied")
 
 
 def validate_workflow_nodes(nodes: list[dict]) -> None:
@@ -2562,49 +1043,6 @@ def apply_model_selection(db: Session, payload: dict, *, user_id: int) -> dict:
     return payload
 
 
-def _resolve_title_runtime_config(db: Session, agent: Agent, user_id: int) -> dict | None:
-    """Resolve the runtime config for the agent's model to use for auto-titling."""
-    try:
-        user_model_config = resolve_user_model_config(db, user_id=user_id, config_id=agent.user_model_config_id)
-        if user_model_config:
-            return user_model_runtime_config(user_model_config)
-    except Exception:
-        logger.exception("Failed to resolve runtime config for auto-title, using defaults")
-    return None
-
-
-def _auto_title_session(db: Session, chat_session: ChatSession, user_message: str, answer: str, runtime_config: dict | None = None) -> None:
-    """Auto-generate a session title using the LLM based on the first exchange."""
-    if chat_session.title and chat_session.title not in {"新会话", "新对话"}:
-        return  # Already has a meaningful title
-    try:
-        provider = OpenAICompatibleProvider()
-        title_prompt = (
-            "你是一个会话标题生成助手。请根据用户和助手之间的对话内容，生成一个简洁的会话标题。\n"
-            "要求：\n"
-            "- 标题长度不超过20个字\n"
-            "- 只返回标题本身，不要加引号或其他说明\n"
-            "- 标题应反映用户问题的核心主题\n\n"
-            f"用户：{user_message[:200]}\n"
-            f"助手：{answer[:300]}"
-        )
-        response = provider.invoke(
-            [HumanMessage(content=title_prompt)],
-            temperature=0.3,
-            runtime_config=runtime_config,
-        )
-        title = (response.content or "").strip()
-        # Clean up common LLM artifacts
-        title = title.replace('"', '').replace('「', '').replace('」', '').replace('\n', ' ')
-        title = title.strip()[:60]
-        if title:
-            chat_session.title = title
-            db.commit()
-            logger.info("Auto-titled session %d to: %s", chat_session.id, title)
-    except Exception:
-        logger.exception("Failed to auto-title session %d", chat_session.id)
-
-
 def get_or_create_session(db: Session, agent: Agent, user_id: int, session_id: int | None, title_seed: str, is_debug: bool = False) -> ChatSession:
     if session_id:
         session = db.get(ChatSession, session_id)
@@ -2621,8 +1059,3 @@ def get_or_create_session(db: Session, agent: Agent, user_id: int, session_id: i
     db.commit()
     db.refresh(session)
     return session
-
-
-def chunk_text(text: str, size: int = 28) -> Iterable[str]:
-    for index in range(0, len(text), size):
-        yield text[index : index + size]

@@ -12,7 +12,7 @@ from core.db.models import (
     WorkspaceMember,
 )
 from core.security.auth import hash_password
-from core.services.tools import BUILTIN_TOOLS
+from core.services.builtin_tools import BUILTIN_TOOLS
 
 
 DEFAULT_WORKFLOW = [

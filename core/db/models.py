@@ -411,16 +411,16 @@ class Run(Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
-class RunStep(Base):
-    __tablename__ = "run_steps"
+class RunEvent(Base):
+    __tablename__ = "run_events"
+    __table_args__ = (UniqueConstraint("run_id", "sequence", name="uq_run_event_sequence"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     run_id: Mapped[int] = mapped_column(ForeignKey("runs.id", ondelete="CASCADE"), index=True)
-    node_id: Mapped[str] = mapped_column(String(80))
-    node_type: Mapped[str] = mapped_column(String(40))
-    status: Mapped[str] = mapped_column(String(20))
-    input: Mapped[dict] = mapped_column(JSON, default=dict)
-    output: Mapped[dict] = mapped_column(JSON, default=dict)
+    sequence: Mapped[int] = mapped_column(Integer)
+    event: Mapped[str] = mapped_column(String(80), index=True)
+    payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    sse: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
 
 

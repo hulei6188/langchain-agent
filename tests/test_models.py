@@ -30,6 +30,38 @@ def test_knowledge_document_segment_config():
         db.close()
 
 
+def test_run_events_persist_replay_and_snapshot():
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from core.db.base import Base
+    from core.db.models import Run
+    from core.services.run_events import append_run_event, list_run_events_since, run_stream_snapshot
+
+    engine = create_engine("sqlite:///:memory:", future=True)
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine, future=True)
+    db = Session()
+    try:
+        db.add(Run(id=1, workspace_id=1, agent_id=1, session_id=1, status="running"))
+        db.commit()
+
+        append_run_event(db, run_id=1, event="token", payload={"content": "hello "}, sse="event: token\ndata: {}\n\n")
+        append_run_event(db, run_id=1, event="token", payload={"content": "world"}, sse="event: token\ndata: {}\n\n")
+        append_run_event(db, run_id=1, event="sources", payload={"items": [{"title": "doc"}]}, sse="event: sources\ndata: {}\n\n")
+
+        replay = list_run_events_since(db, run_id=1, since=1)
+        assert [event.sequence for event in replay] == [1, 2]
+        assert [event.event for event in replay] == ["token", "sources"]
+
+        snapshot = run_stream_snapshot(db, run_id=1)
+        assert snapshot["event_index"] == 3
+        assert snapshot["content"] == "hello world"
+        assert snapshot["sources"] == [{"title": "doc"}]
+    finally:
+        db.close()
+
+
 import json
 
 def test_calculator_ast_security():
