@@ -15,20 +15,16 @@ from api.routers.health import create_health_router
 from api.routers.knowledge import router as knowledge_router
 from api.routers.memory import router as memory_router
 from api.routers.models import router as models_router
+from api.routers.prompt_templates import router as prompt_templates_router
 from api.routers.runs import router as runs_router
 from api.routers.sessions import router as sessions_router
+from api.routers.skills import router as skills_router
 from api.routers.tools import router as tools_router
 from api.schemas import (
     AgentCreateRequest,
     AgentSkillsRequest,
     AgentUpdateRequest,
     ChatRequest,
-    PromptTemplateCopyBuiltinRequest,
-    PromptTemplateRequest,
-    PromptTemplateUpdateRequest,
-    SkillCreateRequest,
-    SkillItemIdsRequest,
-    SkillUpdateRequest,
     UploadCreateRequest,
     WorkflowUpdateRequest,
 )
@@ -69,23 +65,7 @@ from core.services.agents import (
     update_agent,
 )
 from core.services.run_streams import stream_workflow_sse
-from core.services.prompt_templates import (
-    copy_builtin_prompt_template,
-    create_prompt_template,
-    delete_prompt_template,
-    get_owned_prompt_template,
-    list_prompt_templates,
-    prompt_template_payload,
-    update_prompt_template,
-)
 from core.services.tools import validate_tool_ids
-from core.services.skills import (
-    create_skill,
-    delete_skill,
-    get_skill_detail,
-    list_workspace_skills,
-    update_skill,
-)
 from core.services.uploads import create_upload, upload_payload
 from core.services.web_search import search_web, web_search_status
 
@@ -135,8 +115,10 @@ app.include_router(auth_router)
 app.include_router(knowledge_router)
 app.include_router(memory_router)
 app.include_router(models_router)
+app.include_router(prompt_templates_router)
 app.include_router(runs_router)
 app.include_router(sessions_router)
+app.include_router(skills_router)
 app.include_router(tools_router)
 
 
@@ -193,126 +175,6 @@ def test_web_search(q: str = Query(min_length=1, max_length=300), membership: Wo
         return {"ok": False, "query": q, "provider": web_search_status().get("provider", settings.web_search_provider), "items": [], "error_code": str(exc)}
 
 
-# ── Skills ───────────────────────────────────────────────────────────
-
-
-@app.get("/api/skills")
-def list_skills(
-    membership: WorkspaceMember = Depends(get_current_membership),
-    db: Session = Depends(get_db),
-):
-    items = list_workspace_skills(db, workspace_id=membership.workspace_id)
-    return {"items": items}
-
-
-@app.post("/api/skills")
-def create_skill_endpoint(
-    request: SkillCreateRequest,
-    membership: WorkspaceMember = Depends(get_current_membership),
-    db: Session = Depends(get_db),
-):
-    if request.tool_ids:
-        try:
-            validate_tool_ids(
-                db,
-                workspace_id=membership.workspace_id,
-                user_id=membership.user_id,
-                tool_ids=request.tool_ids,
-            )
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-    skill = create_skill(
-        db,
-        workspace_id=membership.workspace_id,
-        user_id=membership.user_id,
-        payload=request.model_dump(),
-    )
-    return {"skill": get_skill_detail(db, skill)}
-
-
-@app.get("/api/skills/{skill_id}")
-def get_skill(
-    skill_id: int,
-    membership: WorkspaceMember = Depends(get_current_membership),
-    db: Session = Depends(get_db),
-):
-    skill = require_workspace_skill(db, membership.workspace_id, skill_id)
-    return {"skill": get_skill_detail(db, skill)}
-
-
-@app.patch("/api/skills/{skill_id}")
-def patch_skill(
-    skill_id: int,
-    request: SkillUpdateRequest,
-    membership: WorkspaceMember = Depends(get_current_membership),
-    db: Session = Depends(get_db),
-):
-    skill = require_workspace_skill(db, membership.workspace_id, skill_id)
-    if request.tool_ids is not None:
-        try:
-            validate_tool_ids(
-                db,
-                workspace_id=membership.workspace_id,
-                user_id=membership.user_id,
-                tool_ids=request.tool_ids,
-            )
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-    skill = update_skill(db, skill=skill, payload=request.model_dump(exclude_unset=True))
-    return {"skill": get_skill_detail(db, skill)}
-
-
-@app.delete("/api/skills/{skill_id}")
-def delete_skill_endpoint(
-    skill_id: int,
-    membership: WorkspaceMember = Depends(get_current_membership),
-    db: Session = Depends(get_db),
-):
-    skill = require_workspace_skill(db, membership.workspace_id, skill_id)
-    delete_skill(db, skill=skill)
-    return {"deleted": True}
-
-
-@app.put("/api/skills/{skill_id}/tools")
-def update_skill_tools(
-    skill_id: int,
-    request: SkillItemIdsRequest,
-    membership: WorkspaceMember = Depends(get_current_membership),
-    db: Session = Depends(get_db),
-):
-    skill = require_workspace_skill(db, membership.workspace_id, skill_id)
-    from core.services.skills import _replace_skill_tools
-
-    if request.ids:
-        try:
-            validate_tool_ids(
-                db,
-                workspace_id=membership.workspace_id,
-                user_id=membership.user_id,
-                tool_ids=request.ids,
-            )
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-    _replace_skill_tools(db, skill.id, request.ids)
-    db.commit()
-    return {"skill": get_skill_detail(db, skill)}
-
-
-@app.put("/api/skills/{skill_id}/knowledge-bases")
-def update_skill_knowledge_bases(
-    skill_id: int,
-    request: SkillItemIdsRequest,
-    membership: WorkspaceMember = Depends(get_current_membership),
-    db: Session = Depends(get_db),
-):
-    skill = require_workspace_skill(db, membership.workspace_id, skill_id)
-    from core.services.skills import _replace_skill_kbs
-
-    _replace_skill_kbs(db, skill.id, request.ids)
-    db.commit()
-    return {"skill": get_skill_detail(db, skill)}
-
-
 # ── Agent Skills ─────────────────────────────────────────────────────
 
 
@@ -337,86 +199,6 @@ def update_agent_skills(
         db.add(AgentSkill(agent_id=agent.id, skill_id=skill_id))
     db.commit()
     return {"agent": get_agent_detail(db, agent)}
-
-
-@app.get("/api/prompt-templates")
-def list_prompt_templates_endpoint(
-    include_disabled: bool = Query(default=False),
-    membership: WorkspaceMember = Depends(get_current_membership),
-    db: Session = Depends(get_db),
-):
-    return {
-        "items": list_prompt_templates(
-            db,
-            workspace_id=membership.workspace_id,
-            user_id=membership.user_id,
-            include_disabled=include_disabled,
-        )
-    }
-
-
-@app.post("/api/prompt-templates")
-def create_prompt_template_endpoint(
-    request: PromptTemplateRequest,
-    membership: WorkspaceMember = Depends(get_current_membership),
-    db: Session = Depends(get_db),
-):
-    try:
-        template = create_prompt_template(
-            db,
-            workspace_id=membership.workspace_id,
-            user_id=membership.user_id,
-            payload=request.model_dump(),
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {"template": prompt_template_payload(template)}
-
-
-@app.patch("/api/prompt-templates/{template_id}")
-def patch_prompt_template_endpoint(
-    template_id: int,
-    request: PromptTemplateUpdateRequest,
-    membership: WorkspaceMember = Depends(get_current_membership),
-    db: Session = Depends(get_db),
-):
-    template = get_owned_prompt_template(db, workspace_id=membership.workspace_id, user_id=membership.user_id, template_id=template_id)
-    if not template:
-        raise HTTPException(status_code=404, detail="Prompt template not found")
-    try:
-        template = update_prompt_template(db, template=template, payload=request.model_dump(exclude_unset=True))
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {"template": prompt_template_payload(template)}
-
-
-@app.delete("/api/prompt-templates/{template_id}")
-def delete_prompt_template_endpoint(template_id: int, membership: WorkspaceMember = Depends(get_current_membership), db: Session = Depends(get_db)):
-    template = get_owned_prompt_template(db, workspace_id=membership.workspace_id, user_id=membership.user_id, template_id=template_id)
-    if not template:
-        raise HTTPException(status_code=404, detail="Prompt template not found")
-    delete_prompt_template(db, template=template)
-    return {"deleted": True}
-
-
-@app.post("/api/prompt-templates/copy-builtin")
-def copy_builtin_prompt_template_endpoint(
-    request: PromptTemplateCopyBuiltinRequest,
-    membership: WorkspaceMember = Depends(get_current_membership),
-    db: Session = Depends(get_db),
-):
-    try:
-        template = copy_builtin_prompt_template(
-            db,
-            workspace_id=membership.workspace_id,
-            user_id=membership.user_id,
-            builtin_id=request.builtin_id,
-            title=request.title,
-        )
-    except ValueError as exc:
-        status_code = 404 if "not found" in str(exc).lower() else 400
-        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
-    return {"template": prompt_template_payload(template)}
 
 
 @app.post("/api/uploads")
@@ -659,13 +441,6 @@ def review_payload(db: Session, agent: Agent) -> dict:
         "submitted_version": version.version if version else None,
         "submitted_at": version.created_at.isoformat() if version and version.created_at else None,
     }
-
-
-def require_workspace_skill(db: Session, workspace_id: int, skill_id: int) -> Skill:
-    skill = db.query(Skill).filter(Skill.workspace_id == workspace_id, Skill.id == skill_id).first()
-    if not skill:
-        raise HTTPException(status_code=404, detail="Skill not found")
-    return skill
 
 
 def validate_workflow_nodes(nodes: list[dict]) -> None:
