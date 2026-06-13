@@ -6,6 +6,7 @@ from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, Too
 
 from core.integrations import mcp_client as mcp_client_module
 from core.integrations.mcp_client import _adapter_connection, _adapter_tool_result, _stdio_adapter_connection
+from core.integrations.vector_store import MemoryVectorStore
 from core.runtime.agent_runtime import validate_model_capabilities
 from core.runtime.langgraph_persistence import postgres_conn_string
 from core.runtime.memory_runtime import save_runtime_memory_state
@@ -93,6 +94,30 @@ def test_mcp_adapter_tool_result_preserves_structured_payload():
     assert payload["content"] == "done"
     assert payload["content_type"] == "application/json"
     assert payload["result_json"] == {"ok": True}
+
+
+def test_memory_vector_store_uses_langchain_vector_api():
+    store = MemoryVectorStore()
+    store.add_texts(
+        ["alpha", "beta"],
+        metadatas=[
+            {"workspace_id": 1, "knowledge_base_id": 1, "chunk_id": "a"},
+            {"workspace_id": 2, "knowledge_base_id": 1, "chunk_id": "b"},
+        ],
+        ids=["vec-a", "vec-b"],
+        vectors=[[1.0, 0.0], [0.0, 1.0]],
+    )
+
+    documents = store.similarity_search_by_vector([1.0, 0.0], k=2, filter={"workspace_id": 1})
+    assert [document.page_content for document in documents] == ["alpha"]
+    assert documents[0].metadata["vector_id"] == "vec-a"
+    assert documents[0].metadata["_score"] == 1.0
+
+    hits = store.search([1.0, 0.0], limit=2, filters={"knowledge_base_id": 1})
+    assert [hit.vector_id for hit in hits] == ["vec-a", "vec-b"]
+
+    store.delete(ids=["vec-a"])
+    assert store.similarity_search_by_vector([1.0, 0.0], k=2, filter={"knowledge_base_id": 1})[0].page_content == "beta"
 
 
 def test_pooled_stdio_session_invokes_langchain_adapter_tool(monkeypatch):

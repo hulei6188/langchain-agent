@@ -142,6 +142,15 @@ class RerankCompressor(BaseDocumentCompressor):
         return [_hit_to_document(hit) for hit in reranked]
 
 
+class StaticDocumentRetriever(BaseRetriever):
+    documents: list[Document]
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    def _get_relevant_documents(self, query: str, *, run_manager) -> list[Document]:
+        return list(self.documents)
+
+
 def build_rag_pipeline(
     db: Session,
     *,
@@ -276,7 +285,7 @@ def _rerank_runnable(state: dict) -> dict:
                 model=settings.rag_rerank_model,
             )
             compression_retriever = ContextualCompressionRetriever(
-                base_retriever=RunnableLambda(lambda _query: [_hit_to_document(hit) for hit in final_hits]),
+                base_retriever=StaticDocumentRetriever(documents=[_hit_to_document(hit) for hit in final_hits]),
                 base_compressor=compressor,
             )
             final_hits = _documents_to_hits(compression_retriever.invoke(state["query"]))
@@ -355,19 +364,20 @@ def _base_status(query: str, knowledge_base_ids: list[int], config: dict) -> dic
 def _dense_search(*, workspace_id: int, knowledge_base_ids: list[int], query_vector: list[float], limit: int) -> list[dict]:
     hits = []
     for kb_id in knowledge_base_ids:
-        for hit in vector_store_module.vector_store.search(
+        for document in vector_store_module.vector_store.similarity_search_by_vector(
             query_vector,
-            limit=limit,
-            filters={"workspace_id": workspace_id, "knowledge_base_id": kb_id},
+            k=limit,
+            filter={"workspace_id": workspace_id, "knowledge_base_id": kb_id},
         ):
-            metadata = hit.metadata or {}
+            metadata = {key: value for key, value in (document.metadata or {}).items() if key != "_score"}
+            score = float((document.metadata or {}).get("_score") or 0)
             hits.append(
                 {
-                    "id": metadata.get("chunk_id") or hit.vector_id,
-                    "vector_id": hit.vector_id,
-                    "text": hit.text,
-                    "score": float(hit.score),
-                    "dense_score": float(hit.score),
+                    "id": metadata.get("chunk_id") or metadata.get("vector_id") or "",
+                    "vector_id": metadata.get("vector_id") or "",
+                    "text": document.page_content,
+                    "score": score,
+                    "dense_score": score,
                     "retrieval_channel": "dense",
                     "metadata": metadata,
                 }

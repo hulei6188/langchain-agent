@@ -157,26 +157,16 @@ async def _discover_stdio_mcp_tools(
     timeout_seconds: int,
 ) -> list[dict]:
     _require_stdio_sdk()
-    try:
-        tools = await _load_stdio_adapter_tools(
+    tools = await _map_mcp_errors(
+        _load_stdio_adapter_tools(
             command,
             args,
             env=env,
             cwd=cwd,
             timeout_seconds=timeout_seconds,
         )
-    except MCPClientError:
-        raise
-    except BaseException as exc:
-        _raise_mcp_client_error(exc)
-    return [
-        {
-            "name": str(getattr(tool, "name", "") or ""),
-            "description": str(getattr(tool, "description", "") or ""),
-            "input_schema": _langchain_tool_schema(tool),
-        }
-        for tool in tools
-    ]
+    )
+    return _adapter_tools_metadata(tools)
 
 
 async def _call_stdio_mcp_tool(
@@ -190,8 +180,8 @@ async def _call_stdio_mcp_tool(
     timeout_seconds: int,
 ) -> dict:
     _require_stdio_sdk()
-    try:
-        return await _call_stdio_adapter_tool(
+    return await _map_mcp_errors(
+        _call_stdio_adapter_tool(
             command,
             args,
             tool_name,
@@ -200,34 +190,21 @@ async def _call_stdio_mcp_tool(
             cwd=cwd,
             timeout_seconds=timeout_seconds,
         )
-    except MCPClientError:
-        raise
-    except BaseException as exc:
-        _raise_mcp_client_error(exc)
+    )
 
 
 async def _discover_mcp_tools(server_url: str, *, headers: dict[str, str], transport: str, timeout_seconds: int) -> list[dict]:
     timeout_seconds = _normalize_timeout(timeout_seconds)
     await _ensure_server_reachable(server_url, timeout_seconds=timeout_seconds)
-    try:
-        tools = await _load_adapter_tools(
+    tools = await _map_mcp_errors(
+        _load_adapter_tools(
             server_url,
             headers=headers,
             transport=transport,
             timeout_seconds=timeout_seconds,
         )
-    except MCPClientError:
-        raise
-    except BaseException as exc:
-        _raise_mcp_client_error(exc)
-    return [
-        {
-            "name": str(getattr(tool, "name", "") or ""),
-            "description": str(getattr(tool, "description", "") or ""),
-            "input_schema": _langchain_tool_schema(tool),
-        }
-        for tool in tools
-    ]
+    )
+    return _adapter_tools_metadata(tools)
 
 
 async def _load_adapter_tools(
@@ -270,6 +247,26 @@ async def _load_stdio_adapter_tools(
             timeout_seconds=timeout_seconds,
         ),
     )
+
+
+async def _map_mcp_errors(awaitable):
+    try:
+        return await awaitable
+    except MCPClientError:
+        raise
+    except BaseException as exc:
+        _raise_mcp_client_error(exc)
+
+
+def _adapter_tools_metadata(tools) -> list[dict]:
+    return [
+        {
+            "name": str(getattr(tool, "name", "") or ""),
+            "description": str(getattr(tool, "description", "") or ""),
+            "input_schema": _langchain_tool_schema(tool),
+        }
+        for tool in tools
+    ]
 
 
 def _adapter_connection(
@@ -337,17 +334,16 @@ async def _call_adapter_tool(
     transport: str,
     timeout_seconds: int,
 ) -> dict:
-    tools = await _load_adapter_tools(
-        server_url,
-        headers=headers,
-        transport=transport,
-        timeout_seconds=timeout_seconds,
+    return await _invoke_adapter_tool(
+        await _load_adapter_tools(
+            server_url,
+            headers=headers,
+            transport=transport,
+            timeout_seconds=timeout_seconds,
+        ),
+        tool_name,
+        arguments,
     )
-    tool = next((item for item in tools if item.name == tool_name), None)
-    if tool is None:
-        raise MCPClientError(f"MCP tool '{tool_name}' not found")
-    result = await tool.ainvoke(arguments or {})
-    return _adapter_tool_result(result)
 
 
 async def _call_stdio_adapter_tool(
@@ -360,18 +356,30 @@ async def _call_stdio_adapter_tool(
     cwd: str | None,
     timeout_seconds: int,
 ) -> dict:
-    tools = await _load_stdio_adapter_tools(
-        command,
-        args,
-        env=env,
-        cwd=cwd,
-        timeout_seconds=timeout_seconds,
+    return await _invoke_adapter_tool(
+        await _load_stdio_adapter_tools(
+            command,
+            args,
+            env=env,
+            cwd=cwd,
+            timeout_seconds=timeout_seconds,
+        ),
+        tool_name,
+        arguments,
     )
+
+
+async def _invoke_adapter_tool(tools, tool_name: str, arguments: dict[str, Any]) -> dict:
+    tool = _adapter_tool_by_name(tools, tool_name)
+    result = await tool.ainvoke(arguments or {})
+    return _adapter_tool_result(result)
+
+
+def _adapter_tool_by_name(tools, tool_name: str):
     tool = next((item for item in tools if item.name == tool_name), None)
     if tool is None:
         raise MCPClientError(f"MCP tool '{tool_name}' not found")
-    result = await tool.ainvoke(arguments or {})
-    return _adapter_tool_result(result)
+    return tool
 
 
 def _adapter_tool_result(result) -> dict:
@@ -429,8 +437,8 @@ async def _call_mcp_tool(
 ) -> dict:
     timeout_seconds = _normalize_timeout(timeout_seconds)
     await _ensure_server_reachable(server_url, timeout_seconds=timeout_seconds)
-    try:
-        return await _call_adapter_tool(
+    return await _map_mcp_errors(
+        _call_adapter_tool(
             server_url,
             tool_name,
             arguments=arguments,
@@ -438,10 +446,7 @@ async def _call_mcp_tool(
             transport=transport,
             timeout_seconds=timeout_seconds,
         )
-    except MCPClientError:
-        raise
-    except BaseException as exc:
-        _raise_mcp_client_error(exc)
+    )
 
 
 def _require_stdio_sdk() -> None:
@@ -646,14 +651,7 @@ class _PooledSession:
                         timeout=_normalize_timeout(timeout_seconds),
                     )
                     self.touch()
-                    return [
-                        {
-                            "name": str(getattr(tool, "name", "") or ""),
-                            "description": str(getattr(tool, "description", "") or ""),
-                            "input_schema": _langchain_tool_schema(tool),
-                        }
-                        for tool in tools
-                    ]
+                    return _adapter_tools_metadata(tools)
                 except BaseException:
                     logger.warning("MCP stdio session [%s] list_tools failed", self.key, exc_info=True)
                     self._dead = True
@@ -663,11 +661,7 @@ class _PooledSession:
                     raise
 
     async def _adapter_tool(self, tool_name: str):
-        tools = await load_adapter_mcp_tools(self._session)
-        tool = next((item for item in tools if item.name == tool_name), None)
-        if tool is None:
-            raise MCPClientError(f"MCP tool '{tool_name}' not found")
-        return tool
+        return _adapter_tool_by_name(await load_adapter_mcp_tools(self._session), tool_name)
 
 
 class _StdioSessionPool:
