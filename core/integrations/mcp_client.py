@@ -90,24 +90,14 @@ def discover_stdio_mcp_tools(
             )
         )
     pool = _get_stdio_pool()
-    raw_result = pool.discover_tools(
+    return pool.discover_tools(
         session_key,
         command,
         effective_args,
         env=env,
         cwd=cwd,
+        timeout_seconds=timeout_seconds,
     )
-    tools = []
-    for item in getattr(raw_result, "tools", []) or []:
-        input_schema = _jsonable(getattr(item, "inputSchema", None) or getattr(item, "input_schema", None) or {}) or {}
-        tools.append(
-            {
-                "name": str(getattr(item, "name", "") or ""),
-                "description": str(getattr(item, "description", "") or ""),
-                "input_schema": input_schema if isinstance(input_schema, dict) else {},
-            }
-        )
-    return tools
 
 
 def call_stdio_mcp_tool(
@@ -146,7 +136,7 @@ def call_stdio_mcp_tool(
             )
         )
     pool = _get_stdio_pool()
-    raw_result = pool.call_tool(
+    return pool.call_tool(
         session_key,
         command,
         effective_args,
@@ -156,29 +146,6 @@ def call_stdio_mcp_tool(
         cwd=cwd,
         timeout_seconds=timeout_seconds,
     )
-    structured = _jsonable(getattr(raw_result, "structuredContent", None) or getattr(raw_result, "structured_content", None))
-    content_blocks = [_jsonable(item) for item in (getattr(raw_result, "content", None) or [])]
-    text_parts = [part for part in (_content_text(block) for block in content_blocks) if part]
-    if not text_parts and structured is not None:
-        text_parts.append(json.dumps(structured, ensure_ascii=False))
-    if not text_parts and content_blocks:
-        payload = content_blocks[0] if len(content_blocks) == 1 else content_blocks
-        text_parts.append(json.dumps(payload, ensure_ascii=False))
-    text_content = "\n\n".join(text_parts).strip()
-    is_error = bool(getattr(raw_result, "isError", False) or getattr(raw_result, "is_error", False))
-    if is_error:
-        detail = text_content or json.dumps(structured or content_blocks or {"error": "MCP tool returned error"}, ensure_ascii=False)
-        raise MCPClientError(detail[:500])
-    result_json = structured
-    if result_json is None and content_blocks:
-        result_json = content_blocks[0] if len(content_blocks) == 1 else {"content": content_blocks}
-    return {
-        "status_code": 200,
-        "content_type": "application/json" if result_json is not None else "text/plain",
-        "content": text_content,
-        "result_preview": text_content[:500],
-        "result_json": result_json,
-    }
 
 
 async def _discover_stdio_mcp_tools(
@@ -644,7 +611,7 @@ class _PooledSession:
         async with self._lock:
             await self._stop_locked()
 
-    async def call_tool(self, tool_name: str, arguments: dict, timeout_seconds: int):
+    async def call_tool(self, tool_name: str, arguments: dict, timeout_seconds: int) -> dict:
         async with self._lock:
             for attempt in range(2):
                 if self._session is None or self._dead:
@@ -652,13 +619,12 @@ class _PooledSession:
                         await self._stop_locked()
                     await self._start_locked()
                 try:
-                    result = await self._session.call_tool(
-                        tool_name,
-                        arguments=arguments,
-                        read_timeout_seconds=timedelta(seconds=timeout_seconds),
-                    )
+                    tool = await self._adapter_tool(tool_name)
+                    result = await asyncio.wait_for(tool.ainvoke(arguments or {}), timeout=timeout_seconds)
                     self.touch()
-                    return result
+                    return _adapter_tool_result(result)
+                except MCPClientError:
+                    raise
                 except BaseException:
                     logger.warning("MCP stdio session [%s] call_tool failed", self.key, exc_info=True)
                     self._dead = True
@@ -667,7 +633,7 @@ class _PooledSession:
                         continue
                     raise
 
-    async def list_tools(self):
+    async def list_tools(self, timeout_seconds: int) -> list[dict]:
         async with self._lock:
             for attempt in range(2):
                 if self._session is None or self._dead:
@@ -675,9 +641,19 @@ class _PooledSession:
                         await self._stop_locked()
                     await self._start_locked()
                 try:
-                    result = await self._session.list_tools()
+                    tools = await asyncio.wait_for(
+                        load_adapter_mcp_tools(self._session),
+                        timeout=_normalize_timeout(timeout_seconds),
+                    )
                     self.touch()
-                    return result
+                    return [
+                        {
+                            "name": str(getattr(tool, "name", "") or ""),
+                            "description": str(getattr(tool, "description", "") or ""),
+                            "input_schema": _langchain_tool_schema(tool),
+                        }
+                        for tool in tools
+                    ]
                 except BaseException:
                     logger.warning("MCP stdio session [%s] list_tools failed", self.key, exc_info=True)
                     self._dead = True
@@ -686,12 +662,19 @@ class _PooledSession:
                         continue
                     raise
 
+    async def _adapter_tool(self, tool_name: str):
+        tools = await load_adapter_mcp_tools(self._session)
+        tool = next((item for item in tools if item.name == tool_name), None)
+        if tool is None:
+            raise MCPClientError(f"MCP tool '{tool_name}' not found")
+        return tool
+
 
 class _StdioSessionPool:
     """Per-session-key pool of persistent stdio MCP sessions.
 
     Single background event-loop thread; per-session asyncio locks serialize
-    access to each ClientSession, and threading.Lock protects the sync map.
+    access to each adapter-backed session, and threading.Lock protects the sync map.
     """
 
     def __init__(self):
@@ -804,10 +787,11 @@ class _StdioSessionPool:
         *,
         env: dict | None = None,
         cwd: str | None = None,
+        timeout_seconds: int = 15,
     ):
         session = self._acquire_session(session_key, command, args, env, cwd)
         try:
-            return self._run_coroutine(self._discover_with_retry(session))
+            return self._run_coroutine(self._discover_with_retry(session, timeout_seconds))
         except BaseException:
             with self._sync_lock:
                 removed = self._sessions.pop(session.key, None) if self._sessions.get(session.key) is session else None
@@ -821,8 +805,8 @@ class _StdioSessionPool:
     async def _call_tool_with_retry(self, session, tool_name, arguments, timeout_seconds):
         return await session.call_tool(tool_name, arguments, timeout_seconds)
 
-    async def _discover_with_retry(self, session):
-        return await session.list_tools()
+    async def _discover_with_retry(self, session, timeout_seconds):
+        return await session.list_tools(timeout_seconds)
 
     # ── lifecycle ──
 

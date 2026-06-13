@@ -136,9 +136,10 @@ def execute_workflow_stream(db: Session, params: dict) -> Iterable[str]:
 
     stream_state = RunStreamState()
     run: Run | None = None
+    workflow_stream = None
 
     try:
-        for event in runner.run_events(
+        workflow_stream = runner.start_stream_run(
             agent=agent,
             chat_session=chat_session,
             user_message=params["user_message"],
@@ -150,13 +151,21 @@ def execute_workflow_stream(db: Session, params: dict) -> Iterable[str]:
             search_enabled=params["search_enabled"],
             attachments=params["attachments"],
             current_message_id=params["user_message_id"],
-        ):
+        )
+        tracked_run_id = workflow_stream.run.id
+        run = workflow_stream.run
+        yield emit("run_started", {"run_id": tracked_run_id, "session_id": chat_session.id})
+
+        final_state = None
+        for part in runner.stream_graph_parts(workflow_stream):
+            if part["type"] == "values":
+                final_state = part["data"]
+                continue
+            if part["type"] != "custom":
+                continue
+            event = part["data"]
             event_name = event["event"]
-            if event_name == "run_started":
-                tracked_run_id = event["run_id"]
-                run = db.get(Run, tracked_run_id)
-                yield emit("run_started", {"run_id": tracked_run_id, "session_id": chat_session.id})
-            elif event_name == "token":
+            if event_name == "token":
                 content = event.get("content", "")
                 stream_state.add_token(content)
                 yield emit("token", {"content": content})
@@ -196,37 +205,22 @@ def execute_workflow_stream(db: Session, params: dict) -> Iterable[str]:
                         continue
                     yield emit(runtime_event_name, runtime_event_data)
                 yield emit("run_step", step)
-            elif event_name == "cancelled":
-                run = db.get(Run, event["run_id"])
-                stream_state.finish_reasoning_duration()
-                cancel_answer = stream_state.partial_answer
-                cancel_reasoning = stream_state.reasoning
-                assistant = Message(
-                    session_id=chat_session.id,
-                    role="assistant",
-                    content=cancel_answer,
-                    reasoning=cancel_reasoning,
-                    reasoning_duration_ms=stream_state.reasoning_duration_ms,
-                    sources=stream_state.sources,
-                    meta={"cancelled": True},
-                )
-                db.add(assistant)
-                db.commit()
-                db.refresh(assistant)
-                stream_state.assistant_saved = True
-                yield emit(
-                    "cancelled",
-                    {
-                        "session_id": chat_session.id,
-                        "message_id": assistant.id,
-                        "run_id": event["run_id"],
-                        "content": cancel_answer,
-                    },
-                )
-                return
-            elif event_name == "complete":
-                run = event["run"]
-                stream_state.apply_complete(event)
+
+        context = final_state["context"] if final_state is not None else workflow_stream.context
+        steps = final_state["steps"] if final_state is not None else []
+        final_answer, sources = runner.complete_stream_run(
+            stream_run=workflow_stream,
+            chat_session=chat_session,
+            user_message=params["user_message"],
+            context=context,
+        )
+        stream_state.apply_complete(
+            {
+                "answer": final_answer,
+                "sources": sources,
+                "steps": steps,
+            }
+        )
 
         stream_state.finish_reasoning_duration()
         if stream_state.sources:
@@ -262,6 +256,8 @@ def execute_workflow_stream(db: Session, params: dict) -> Iterable[str]:
             },
         )
     except _CancelledError:
+        if run is not None:
+            runner.mark_stream_run_cancelled(run)
         partial_answer = stream_state.partial_answer
         partial_reasoning = stream_state.reasoning
         if not stream_state.assistant_saved and partial_answer:
@@ -308,6 +304,9 @@ def execute_workflow_stream(db: Session, params: dict) -> Iterable[str]:
                 reasoning_duration_ms=stream_state.reasoning_duration_ms,
                 sources=stream_state.sources,
             )
+    finally:
+        if run is not None:
+            runner.close_stream_run(run)
 
 
 def safe_stream_error(exc: Exception) -> dict:

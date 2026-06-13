@@ -2,7 +2,7 @@ from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage
 from langchain_core.tools import StructuredTool
 
 from core.config import get_settings
-from core.integrations import llm as llm_module
+from core.integrations import chat_models as chat_models_module
 from core.integrations.llm import OpenAICompatibleProvider
 from core.integrations.model_clients import OpenAICompatibleEmbeddings, OpenAICompatibleReranker
 
@@ -39,7 +39,7 @@ def _sample_tool(query: str) -> str:
 
 def test_provider_delegates_chat_to_chat_openai(monkeypatch):
     FakeChatOpenAI.instances = []
-    monkeypatch.setattr(llm_module, "ChatOpenAI", FakeChatOpenAI)
+    monkeypatch.setattr(chat_models_module, "ChatOpenAI", FakeChatOpenAI)
     monkeypatch.setenv("OPENAI_API_KEY", "env-key")
     get_settings.cache_clear()
 
@@ -75,7 +75,7 @@ def test_provider_delegates_chat_to_chat_openai(monkeypatch):
 
 def test_provider_delegates_stream_to_chat_openai(monkeypatch):
     FakeChatOpenAI.instances = []
-    monkeypatch.setattr(llm_module, "ChatOpenAI", FakeChatOpenAI)
+    monkeypatch.setattr(chat_models_module, "ChatOpenAI", FakeChatOpenAI)
     monkeypatch.setenv("OPENAI_API_KEY", "env-key")
     get_settings.cache_clear()
 
@@ -96,6 +96,23 @@ def test_provider_delegates_stream_to_chat_openai(monkeypatch):
     instance = FakeChatOpenAI.instances[0]
     assert instance.kwargs["streaming"] is True
     assert instance.kwargs["extra_body"] == {"enable_thinking": False}
+
+
+def test_chat_model_factory_reasoning_kwargs():
+    assert chat_models_module.chat_model_kwargs(
+        api_base="https://gateway.example/v1",
+        model="gpt-5-mini",
+        thinking_enabled=True,
+    ) == {"reasoning_effort": "high"}
+    assert chat_models_module.chat_model_kwargs(
+        api_base="https://api.deepseek.com",
+        model="deepseek-reasoner",
+        thinking_enabled=False,
+    ) == {"extra_body": {"thinking": {"type": "disabled"}}}
+    assert chat_models_module.requires_reasoning_replay(
+        api_base="https://api.deepseek.com",
+        model="deepseek-chat",
+    ) is True
 
 
 def test_embedding_client_mock_mode_is_deterministic(monkeypatch):

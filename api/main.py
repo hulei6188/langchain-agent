@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 import re
-import secrets
 from datetime import datetime, timedelta, timezone
 
 from fastapi import Depends, FastAPI, HTTPException, Query
@@ -11,9 +10,11 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from api.deps import get_current_membership, get_current_user, require_manager
+from api.routers.auth import router as auth_router
 from api.routers.health import create_health_router
 from api.routers.knowledge import router as knowledge_router
 from api.routers.memory import router as memory_router
+from api.routers.models import router as models_router
 from api.routers.runs import router as runs_router
 from api.routers.sessions import router as sessions_router
 from api.routers.tools import router as tools_router
@@ -22,23 +23,13 @@ from api.schemas import (
     AgentSkillsRequest,
     AgentUpdateRequest,
     ChatRequest,
-    InviteAcceptRequest,
-    InviteCreateRequest,
-    LoginRequest,
-    ModelConfigRequest,
-    ModelConfigUpdateRequest,
     PromptTemplateCopyBuiltinRequest,
     PromptTemplateRequest,
     PromptTemplateUpdateRequest,
-    RegisterRequest,
     SkillCreateRequest,
     SkillItemIdsRequest,
     SkillUpdateRequest,
     UploadCreateRequest,
-    UserProfileUpdateRequest,
-    UserModelCapabilityTestRequest,
-    UserModelConfigRequest,
-    UserModelConfigUpdateRequest,
     WorkflowUpdateRequest,
 )
 from core.config import get_settings
@@ -57,14 +48,12 @@ from core.db.models import (
     User,
     UserModelConfig,
     WorkflowDefinition,
-    WorkspaceInvite,
     WorkspaceMember,
 )
 from core.db.session import SessionLocal, get_db, init_db
 from core.runtime.spec import default_workflow, workflow_graph_spec
 from core.runtime.langgraph_persistence import close_langgraph_persistence
-from core.security.auth import create_access_token, hash_password, verify_password
-from core.security.permissions import can_manage, normalize_role
+from core.security.permissions import can_manage
 from core.services.agents import (
     agent_summary,
     approve_agent,
@@ -79,14 +68,7 @@ from core.services.agents import (
     reject_agent,
     update_agent,
 )
-from core.services.bootstrap import (
-    create_default_workspace_user,
-    create_first_user_workspace,
-    ensure_default_models,
-    has_any_user,
-)
 from core.services.run_streams import stream_workflow_sse
-from core.services.models import create_model_config, delete_model_config, model_payload, update_model_config
 from core.services.prompt_templates import (
     copy_builtin_prompt_template,
     create_prompt_template,
@@ -105,16 +87,6 @@ from core.services.skills import (
     update_skill,
 )
 from core.services.uploads import create_upload, upload_payload
-from core.services.user_models import (
-    create_user_model_config,
-    delete_user_model_config,
-    get_owned_user_model,
-    list_user_model_configs,
-    test_user_model_config,
-    test_user_model_payload,
-    update_user_model_config,
-    user_model_payload,
-)
 from core.services.web_search import search_web, web_search_status
 
 
@@ -159,8 +131,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.include_router(create_health_router(lambda: startup_error))
+app.include_router(auth_router)
 app.include_router(knowledge_router)
 app.include_router(memory_router)
+app.include_router(models_router)
 app.include_router(runs_router)
 app.include_router(sessions_router)
 app.include_router(tools_router)
@@ -217,142 +191,6 @@ def test_web_search(q: str = Query(min_length=1, max_length=300), membership: Wo
         return {"ok": True, **search_web(q)}
     except ValueError as exc:
         return {"ok": False, "query": q, "provider": web_search_status().get("provider", settings.web_search_provider), "items": [], "error_code": str(exc)}
-
-
-@app.post("/api/auth/register")
-def register(request: RegisterRequest, db: Session = Depends(get_db)):
-    if db.query(User).filter(User.email == request.email.lower()).first():
-        raise HTTPException(status_code=409, detail="Email already registered")
-    invite = None
-    if request.invite_token:
-        invite = (
-            db.query(WorkspaceInvite)
-            .filter(
-                WorkspaceInvite.token == request.invite_token,
-                WorkspaceInvite.accepted_at.is_(None),
-                WorkspaceInvite.email == request.email.lower(),
-            )
-            .first()
-        )
-        if not invite:
-            raise HTTPException(status_code=404, detail="Invite not found")
-    if invite:
-        user = User(email=request.email.lower(), name=request.name, password_hash=hash_password(request.password))
-        db.add(user)
-        db.flush()
-        db.add(WorkspaceMember(workspace_id=invite.workspace_id, user_id=user.id, role=normalize_role(invite.role)))
-        invite.accepted_at = datetime.now(timezone.utc)
-        db.commit()
-        workspace = invite_workspace(db, invite.workspace_id)
-        role = normalize_role(invite.role)
-    elif has_any_user(db):
-        user, workspace = create_default_workspace_user(db, email=request.email, name=request.name, password=request.password)
-        role = "user"
-    else:
-        user, workspace = create_first_user_workspace(db, email=request.email, name=request.name, password=request.password)
-        role = "admin"
-    token = create_access_token(user.id, workspace.id)
-    return {"access_token": token, "token_type": "bearer", "user": user_payload(user), "workspace": workspace_payload(workspace, role)}
-
-
-@app.post("/api/auth/login")
-def login(request: LoginRequest, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.email == request.email.lower()).first()
-    if not user or not verify_password(request.password, user.password_hash):
-        raise HTTPException(status_code=401, detail="Invalid email or password")
-    membership = db.query(WorkspaceMember).filter(WorkspaceMember.user_id == user.id).first()
-    token = create_access_token(user.id, membership.workspace_id if membership else None)
-    return {"access_token": token, "token_type": "bearer", "user": user_payload(user)}
-
-
-@app.get("/api/auth/me")
-def me(current_user: User = Depends(get_current_user), membership: WorkspaceMember = Depends(get_current_membership)):
-    return {"user": user_payload(current_user), "membership": membership_payload(membership)}
-
-
-@app.patch("/api/auth/me")
-def update_me(request: UserProfileUpdateRequest, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    patch = request.model_dump(exclude_unset=True)
-    user = db.get(User, current_user.id)
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    if "name" in patch and patch["name"] is not None:
-        user.name = patch["name"].strip()
-    if "avatar_url" in patch:
-        avatar_url = patch["avatar_url"] or ""
-        if avatar_url and not avatar_url.startswith("data:image/"):
-            raise HTTPException(status_code=400, detail="avatar_url must be an image data URL")
-        user.avatar_url = avatar_url
-    db.commit()
-    db.refresh(user)
-    return {"user": user_payload(user)}
-
-
-@app.get("/api/workspaces/current")
-def current_workspace(membership: WorkspaceMember = Depends(get_current_membership)):
-    return {"workspace": workspace_payload(membership.workspace, membership.role), "membership": membership_payload(membership)}
-
-
-@app.get("/api/workspaces/invites")
-def list_invites(membership: WorkspaceMember = Depends(require_manager), db: Session = Depends(get_db)):
-    if not settings.invite_api_enabled:
-        raise HTTPException(status_code=404, detail="Invite API is disabled")
-    invites = db.query(WorkspaceInvite).filter(WorkspaceInvite.workspace_id == membership.workspace_id).all()
-    return {"items": [invite_payload(invite, include_token=False) for invite in invites]}
-
-
-@app.get("/api/workspaces/members")
-def list_members(membership: WorkspaceMember = Depends(require_manager), db: Session = Depends(get_db)):
-    rows = (
-        db.query(WorkspaceMember)
-        .filter(WorkspaceMember.workspace_id == membership.workspace_id)
-        .order_by(WorkspaceMember.id.asc())
-        .all()
-    )
-    return {
-        "items": [
-            {
-                "id": row.id,
-                "role": normalize_role(row.role),
-                "user": user_payload(row.user),
-                "created_at": row.created_at.isoformat() if row.created_at else None,
-            }
-            for row in rows
-        ]
-    }
-
-
-@app.post("/api/workspaces/invites")
-def create_invite(request: InviteCreateRequest, membership: WorkspaceMember = Depends(require_manager), db: Session = Depends(get_db)):
-    if not settings.invite_api_enabled:
-        raise HTTPException(status_code=404, detail="Invite API is disabled")
-    if normalize_role(request.role) != "user":
-        raise HTTPException(status_code=400, detail="Invite role must be user")
-    invite = WorkspaceInvite(
-        workspace_id=membership.workspace_id,
-        email=request.email.lower(),
-        role="user",
-        token=secrets.token_urlsafe(24),
-    )
-    db.add(invite)
-    db.commit()
-    db.refresh(invite)
-    return {"invite": invite_payload(invite, include_token=False)}
-
-
-@app.post("/api/workspaces/invites/accept")
-def accept_invite(request: InviteAcceptRequest, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    if not settings.invite_api_enabled:
-        raise HTTPException(status_code=404, detail="Invite API is disabled")
-    invite = db.query(WorkspaceInvite).filter(WorkspaceInvite.token == request.token, WorkspaceInvite.accepted_at.is_(None)).first()
-    if not invite:
-        raise HTTPException(status_code=404, detail="Invite not found")
-    existing = db.query(WorkspaceMember).filter(WorkspaceMember.workspace_id == invite.workspace_id, WorkspaceMember.user_id == current_user.id).first()
-    if not existing:
-        db.add(WorkspaceMember(workspace_id=invite.workspace_id, user_id=current_user.id, role=normalize_role(invite.role)))
-    invite.accepted_at = datetime.now(timezone.utc)
-    db.commit()
-    return {"accepted": True}
 
 
 # ── Skills ───────────────────────────────────────────────────────────
@@ -581,142 +419,6 @@ def copy_builtin_prompt_template_endpoint(
     return {"template": prompt_template_payload(template)}
 
 
-@app.get("/api/models")
-def list_models(
-    include_disabled: bool = Query(default=False),
-    membership: WorkspaceMember = Depends(get_current_membership),
-    db: Session = Depends(get_db),
-):
-    ensure_default_models(db)
-    query = db.query(ModelConfig)
-    if include_disabled:
-        if not can_manage(membership.role):
-            raise HTTPException(status_code=403, detail="Admin role required")
-    else:
-        query = query.filter(ModelConfig.enabled.is_(True))
-    models = query.order_by(ModelConfig.id.asc()).all()
-    return {"items": [model_payload(model) for model in models]}
-
-
-@app.post("/api/admin/models")
-def create_model(request: ModelConfigRequest, _: WorkspaceMember = Depends(require_manager), db: Session = Depends(get_db)):
-    if db.query(ModelConfig).filter(ModelConfig.model_name == request.model_name).first():
-        raise HTTPException(status_code=409, detail="Model already exists")
-    model = create_model_config(db, request.model_dump())
-    return {"model": model_payload(model)}
-
-
-@app.patch("/api/admin/models/{model_id}")
-def patch_model(model_id: int, request: ModelConfigUpdateRequest, _: WorkspaceMember = Depends(require_manager), db: Session = Depends(get_db)):
-    model = db.get(ModelConfig, model_id)
-    if not model:
-        raise HTTPException(status_code=404, detail="Model not found")
-    payload = request.model_dump(exclude_unset=True)
-    if "model_name" in payload and payload["model_name"] != model.model_name:
-        existing = db.query(ModelConfig).filter(ModelConfig.model_name == payload["model_name"]).first()
-        if existing:
-            raise HTTPException(status_code=409, detail="Model already exists")
-    model = update_model_config(db, model, payload)
-    return {"model": model_payload(model)}
-
-
-@app.delete("/api/admin/models/{model_id}")
-def delete_model(model_id: int, _: WorkspaceMember = Depends(require_manager), db: Session = Depends(get_db)):
-    model = db.get(ModelConfig, model_id)
-    if not model:
-        raise HTTPException(status_code=404, detail="Model not found")
-    try:
-        delete_model_config(db, model)
-    except ValueError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    return {"deleted": True}
-
-
-@app.get("/api/user-models")
-def list_user_models(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    configs = list_user_model_configs(db, user_id=current_user.id)
-    return {"items": [user_model_payload(config) for config in configs]}
-
-
-@app.post("/api/user-models")
-def create_user_model(request: UserModelConfigRequest, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    try:
-        config = create_user_model_config(db, user_id=current_user.id, payload=request.model_dump())
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {"model_config": user_model_payload(config)}
-
-
-@app.post("/api/user-models/test")
-def test_user_model_draft(request: UserModelCapabilityTestRequest, current_user: User = Depends(get_current_user)):
-    payload = request.model_dump()
-    try:
-        detect_image = bool(payload.pop("detect_image", False))
-        return test_user_model_payload(payload, detect_image=detect_image)
-    except ValueError as exc:
-        logger.warning(
-            "User model draft test rejected: %s; user_id=%s; fields=%s",
-            str(exc),
-            current_user.id,
-            _user_model_draft_log_context(payload),
-        )
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-def _user_model_draft_log_context(payload: dict) -> dict:
-    return {
-        "display_name_present": bool(str(payload.get("display_name") or "").strip()),
-        "provider": payload.get("provider"),
-        "base_url_present": bool(str(payload.get("base_url") or "").strip()),
-        "api_key_present": bool(str(payload.get("api_key") or "").strip()),
-        "chat_model_present": bool(str(payload.get("chat_model") or "").strip()),
-        "reasoning_type": payload.get("reasoning_type"),
-        "detect_image": bool(payload.get("detect_image")),
-    }
-
-
-@app.patch("/api/user-models/{config_id}")
-def patch_user_model(
-    config_id: int,
-    request: UserModelConfigUpdateRequest,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    config = get_owned_user_model(db, user_id=current_user.id, config_id=config_id)
-    if not config:
-        raise HTTPException(status_code=404, detail="Model config not found")
-    try:
-        config = update_user_model_config(db, config=config, payload=request.model_dump(exclude_unset=True))
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {"model_config": user_model_payload(config)}
-
-
-@app.delete("/api/user-models/{config_id}")
-def delete_user_model(config_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    config = get_owned_user_model(db, user_id=current_user.id, config_id=config_id)
-    if not config:
-        raise HTTPException(status_code=404, detail="Model config not found")
-    try:
-        delete_user_model_config(db, config=config)
-    except ValueError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    return {"deleted": True}
-
-
-@app.post("/api/user-models/{config_id}/test")
-def test_user_model(
-    config_id: int,
-    detect_image: bool = Query(default=True),
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    config = get_owned_user_model(db, user_id=current_user.id, config_id=config_id)
-    if not config:
-        raise HTTPException(status_code=404, detail="Model config not found")
-    return test_user_model_config(config, detect_image=detect_image)
-
-
 @app.post("/api/uploads")
 def upload_file(request: UploadCreateRequest, membership: WorkspaceMember = Depends(get_current_membership), current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     try:
@@ -925,34 +627,6 @@ def chat_stream(agent_id: int, request: ChatRequest, membership: WorkspaceMember
         "attachments": request.attachments,
     }
     return StreamingResponse(stream_workflow_sse(bg_params), media_type="text/event-stream")
-
-
-def user_payload(user: User) -> dict:
-    return {"id": user.id, "email": user.email, "name": user.name, "avatar_url": user.avatar_url or ""}
-
-
-def workspace_payload(workspace, role: str) -> dict:
-    return {"id": workspace.id, "name": workspace.name, "slug": workspace.slug, "role": normalize_role(role)}
-
-
-def membership_payload(membership: WorkspaceMember) -> dict:
-    return {"workspace_id": membership.workspace_id, "user_id": membership.user_id, "role": normalize_role(membership.role)}
-
-
-def invite_payload(invite: WorkspaceInvite, *, include_token: bool = False) -> dict:
-    payload = {"id": invite.id, "email": invite.email, "role": normalize_role(invite.role), "accepted_at": invite.accepted_at.isoformat() if invite.accepted_at else None}
-    if include_token:
-        payload["token"] = invite.token
-    return payload
-
-
-def invite_workspace(db: Session, workspace_id: int):
-    from core.db.models import Workspace
-
-    workspace = db.get(Workspace, workspace_id)
-    if not workspace:
-        raise HTTPException(status_code=404, detail="Workspace not found")
-    return workspace
 
 
 def require_workspace_agent(db: Session, workspace_id: int, agent_id: int) -> Agent:

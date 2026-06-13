@@ -4,7 +4,7 @@ import hashlib
 import json
 import logging
 import threading
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from typing import Any
 
 import httpx
@@ -19,13 +19,11 @@ from langchain_core.messages import (
 from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
 from langchain_core.runnables import Runnable
 from langchain_core.utils.function_calling import convert_to_openai_tool
-from langchain_openai import ChatOpenAI
 from pydantic import PrivateAttr
 
 from core.config import get_settings
+from core.integrations.chat_models import create_chat_openai, requires_reasoning_replay
 from core.integrations.model_clients import (
-    DASHSCOPE_COMPATIBLE_BASE,
-    OPENAI_COMPATIBLE_DEFAULT_BASE,
     api_base,
     api_key,
 )
@@ -137,7 +135,7 @@ class OpenAICompatibleProvider(BaseChatModel):
 
         chat_api_base = api_base(settings, runtime_config, purpose="chat")
         chat_model = model or (runtime_config or {}).get("chat_model") or settings.openai_model
-        llm, http_client = self._chat_openai(
+        llm, http_client = create_chat_openai(
             api_base=chat_api_base,
             api_key=chat_api_key,
             model=chat_model,
@@ -206,7 +204,7 @@ class OpenAICompatibleProvider(BaseChatModel):
 
         chat_api_base = api_base(settings, runtime_config, purpose="chat")
         chat_model = model or (runtime_config or {}).get("chat_model") or settings.openai_model
-        llm, http_client = self._chat_openai(
+        llm, http_client = create_chat_openai(
             api_base=chat_api_base,
             api_key=chat_api_key,
             model=chat_model,
@@ -234,45 +232,13 @@ class OpenAICompatibleProvider(BaseChatModel):
         settings = get_settings()
         chat_api_base = api_base(settings, runtime_config, purpose="chat")
         chat_model = model or (runtime_config or {}).get("chat_model") or settings.openai_model
-        return self._is_deepseek(chat_api_base, chat_model)
+        return requires_reasoning_replay(api_base=chat_api_base, model=chat_model)
 
     # ── private helpers ──────────────────────────────────────────
 
-    def _chat_openai(
-        self,
-        *,
-        api_base: str,
-        api_key: str,
-        model: str,
-        temperature: float,
-        thinking_enabled: bool | None,
-        streaming: bool,
-    ) -> tuple[ChatOpenAI, httpx.Client]:
-        timeout = httpx.Timeout(120.0 if streaming else 60.0)
-        http_client = httpx.Client(timeout=timeout)
-        model_kwargs = self._chat_model_kwargs(
-            api_base=api_base,
-            model=model,
-            thinking_enabled=thinking_enabled,
-        )
-        return (
-            ChatOpenAI(
-                api_key=api_key,
-                base_url=api_base.rstrip("/") or None,
-                model=model,
-                temperature=temperature,
-                streaming=streaming,
-                timeout=timeout,
-                max_retries=0,
-                http_client=http_client,
-                **model_kwargs,
-            ),
-            http_client,
-        )
-
     def _bind_chat_tools(
         self,
-        llm: ChatOpenAI,
+        llm: Runnable,
         tools: Sequence[dict[str, Any] | Any] | None,
         *,
         tool_choice: str | dict | bool | None = None,
@@ -280,22 +246,6 @@ class OpenAICompatibleProvider(BaseChatModel):
         if not tools:
             return llm
         return llm.bind_tools(list(tools), tool_choice=tool_choice or "auto")
-
-    def _chat_model_kwargs(self, *, api_base: str, model: str, thinking_enabled: bool | None) -> dict[str, Any]:
-        kwargs: dict[str, Any] = {}
-        extra_body: dict[str, Any] = {}
-        if self._is_deepseek(api_base, model):
-            enabled = bool(thinking_enabled)
-            extra_body["thinking"] = {"type": "enabled" if enabled else "disabled"}
-            if enabled:
-                kwargs["reasoning_effort"] = "high"
-        elif thinking_enabled is not None and self._is_dashscope_qwen(api_base, model):
-            extra_body["enable_thinking"] = bool(thinking_enabled)
-        elif thinking_enabled and self._is_openai_reasoning_model(api_base, model):
-            kwargs["reasoning_effort"] = "high"
-        if extra_body:
-            kwargs["extra_body"] = extra_body
-        return kwargs
 
     def _ensure_ai_message(self, message: BaseMessage) -> AIMessage:
         if isinstance(message, AIMessage):
@@ -336,36 +286,6 @@ class OpenAICompatibleProvider(BaseChatModel):
                 }
             )
         return chunks
-
-    @staticmethod
-    def _is_openai_reasoning_model(api_base: str, model: str) -> bool:
-        normalized_model = (model or "").lower().strip()
-        if not normalized_model:
-            return False
-        # OpenAI-compatible gateways usually keep the original OpenAI model
-        # name even when api_base is not api.openai.com, so prefer model-name
-        # detection here instead of only checking the base URL.
-        openai_reasoning_prefixes = (
-            "gpt-5",
-            "o1",
-            "o3",
-            "o4",
-        )
-        return normalized_model.startswith(openai_reasoning_prefixes)
-
-    @staticmethod
-    def _is_dashscope_qwen(api_base: str, model: str) -> bool:
-        normalized_base = (api_base or "").lower()
-        normalized_model = (model or "").lower()
-        return (
-            ("dashscope.aliyuncs.com" in normalized_base or "dashscope-intl.aliyuncs.com" in normalized_base)
-            and normalized_model.startswith("qwen")
-        )
-
-    @staticmethod
-    def _is_deepseek(api_base: str, model: str) -> bool:
-        normalized_base = (api_base or "").lower()
-        return "api.deepseek.com" in normalized_base
 
     def _content_text(self, content) -> str:
         if isinstance(content, str):

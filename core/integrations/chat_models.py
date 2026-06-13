@@ -1,0 +1,86 @@
+from __future__ import annotations
+
+from typing import Any
+
+import httpx
+from langchain_openai import ChatOpenAI
+
+
+def create_chat_openai(
+    *,
+    api_base: str,
+    api_key: str,
+    model: str,
+    temperature: float,
+    thinking_enabled: bool | None,
+    streaming: bool,
+) -> tuple[ChatOpenAI, httpx.Client]:
+    timeout = httpx.Timeout(120.0 if streaming else 60.0)
+    http_client = httpx.Client(timeout=timeout)
+    model_kwargs = chat_model_kwargs(
+        api_base=api_base,
+        model=model,
+        thinking_enabled=thinking_enabled,
+    )
+    return (
+        ChatOpenAI(
+            api_key=api_key,
+            base_url=api_base.rstrip("/") or None,
+            model=model,
+            temperature=temperature,
+            streaming=streaming,
+            timeout=timeout,
+            max_retries=0,
+            http_client=http_client,
+            **model_kwargs,
+        ),
+        http_client,
+    )
+
+
+def chat_model_kwargs(*, api_base: str, model: str, thinking_enabled: bool | None) -> dict[str, Any]:
+    kwargs: dict[str, Any] = {}
+    extra_body: dict[str, Any] = {}
+    if is_deepseek(api_base, model):
+        enabled = bool(thinking_enabled)
+        extra_body["thinking"] = {"type": "enabled" if enabled else "disabled"}
+        if enabled:
+            kwargs["reasoning_effort"] = "high"
+    elif thinking_enabled is not None and is_dashscope_qwen(api_base, model):
+        extra_body["enable_thinking"] = bool(thinking_enabled)
+    elif thinking_enabled and is_openai_reasoning_model(api_base, model):
+        kwargs["reasoning_effort"] = "high"
+    if extra_body:
+        kwargs["extra_body"] = extra_body
+    return kwargs
+
+
+def requires_reasoning_replay(*, api_base: str, model: str) -> bool:
+    return is_deepseek(api_base, model)
+
+
+def is_openai_reasoning_model(api_base: str, model: str) -> bool:
+    normalized_model = (model or "").lower().strip()
+    if not normalized_model:
+        return False
+    openai_reasoning_prefixes = (
+        "gpt-5",
+        "o1",
+        "o3",
+        "o4",
+    )
+    return normalized_model.startswith(openai_reasoning_prefixes)
+
+
+def is_dashscope_qwen(api_base: str, model: str) -> bool:
+    normalized_base = (api_base or "").lower()
+    normalized_model = (model or "").lower()
+    return (
+        ("dashscope.aliyuncs.com" in normalized_base or "dashscope-intl.aliyuncs.com" in normalized_base)
+        and normalized_model.startswith("qwen")
+    )
+
+
+def is_deepseek(api_base: str, model: str) -> bool:
+    normalized_base = (api_base or "").lower()
+    return "api.deepseek.com" in normalized_base

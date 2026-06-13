@@ -1,8 +1,10 @@
+import asyncio
 from types import SimpleNamespace
 
 from datetime import timedelta
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, ToolMessage
 
+from core.integrations import mcp_client as mcp_client_module
 from core.integrations.mcp_client import _adapter_connection, _adapter_tool_result, _stdio_adapter_connection
 from core.runtime.agent_runtime import validate_model_capabilities
 from core.runtime.langgraph_persistence import postgres_conn_string
@@ -91,6 +93,61 @@ def test_mcp_adapter_tool_result_preserves_structured_payload():
     assert payload["content"] == "done"
     assert payload["content_type"] == "application/json"
     assert payload["result_json"] == {"ok": True}
+
+
+def test_pooled_stdio_session_invokes_langchain_adapter_tool(monkeypatch):
+    fake_session = SimpleNamespace(initialized=False)
+
+    async def initialize():
+        fake_session.initialized = True
+
+    fake_session.initialize = initialize
+
+    class FakeSessionContext:
+        def __init__(self, connection):
+            self.connection = connection
+            self.exited = False
+
+        async def __aenter__(self):
+            return fake_session
+
+        async def __aexit__(self, exc_type, exc, tb):
+            self.exited = True
+
+    class FakeAdapterTool:
+        name = "browser_click"
+        description = "Click in browser"
+        args_schema = {"type": "object", "properties": {"selector": {"type": "string"}}}
+
+        async def ainvoke(self, arguments):
+            return {"clicked": arguments["selector"]}
+
+    monkeypatch.setattr(mcp_client_module, "create_adapter_session", FakeSessionContext)
+
+    async def fake_load_mcp_tools(session):
+        assert session is fake_session
+        return [FakeAdapterTool()]
+
+    monkeypatch.setattr(mcp_client_module, "load_adapter_mcp_tools", fake_load_mcp_tools)
+    pooled = mcp_client_module._PooledSession("key", "npx", ["@playwright/mcp"], None, None)
+
+    async def scenario():
+        result = await pooled.call_tool("browser_click", {"selector": "#submit"}, timeout_seconds=3)
+        tools = await pooled.list_tools(timeout_seconds=3)
+        await pooled._stop()
+        return result, tools
+
+    result, tools = asyncio.run(scenario())
+
+    assert fake_session.initialized is True
+    assert result["result_json"] == {"clicked": "#submit"}
+    assert tools == [
+        {
+            "name": "browser_click",
+            "description": "Click in browser",
+            "input_schema": {"type": "object", "properties": {"selector": {"type": "string"}}},
+        }
+    ]
 
 
 def test_tool_graph_limit_and_event_helpers():

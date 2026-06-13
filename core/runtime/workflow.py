@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 import logging
 import threading
@@ -41,6 +42,14 @@ from core.services.rag import run_rag_pipeline
 from core.services.uploads import get_workspace_uploads
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class WorkflowStreamRun:
+    runtime: Any
+    run: Run
+    context: dict
+    graph: Any
 
 
 class WorkflowRunner:
@@ -104,7 +113,7 @@ class WorkflowRunner:
         )
         return run, final_answer, sources, steps
 
-    def run_events(
+    def start_stream_run(
         self,
         *,
         agent: Agent,
@@ -118,7 +127,7 @@ class WorkflowRunner:
         search_enabled: bool | None = None,
         attachments: list[dict] | None = None,
         current_message_id: int | None = None,
-    ):
+    ) -> WorkflowStreamRun:
         runtime, run, context = self._start_run(
             agent=agent,
             chat_session=chat_session,
@@ -132,58 +141,48 @@ class WorkflowRunner:
             attachments=attachments,
             current_message_id=current_message_id,
         )
-        # Emit run_id immediately so frontend can cancel
-        yield {"event": "run_started", "run_id": run.id}
-        # Register for cancellation
         self._cancel_event = register_run(run.id, self.provider)
+        graph = self._build_langgraph_workflow(
+            runtime=runtime,
+            run=run,
+            user_message=user_message,
+            stream=True,
+        )
+        return WorkflowStreamRun(runtime=runtime, run=run, context=context, graph=graph)
 
-        steps: list[dict] = []
-        try:
-            graph = self._build_langgraph_workflow(
-                runtime=runtime,
-                run=run,
-                user_message=user_message,
-                stream=True,
-            )
-            final_state: WorkflowGraphState | None = None
-            for part in graph.stream(
-                {"context": context, "steps": []},
-                config=workflow_thread_config(context),
-                stream_mode=["custom", "values"],
-                version="v2",
-            ):
-                self._raise_if_cancelled()
-                if part["type"] == "custom":
-                    yield part["data"]
-                    continue
-                if part["type"] == "values":
-                    final_state = part["data"]
+    def stream_graph_parts(self, stream_run: WorkflowStreamRun):
+        for part in stream_run.graph.stream(
+            {"context": stream_run.context, "steps": []},
+            config=workflow_thread_config(stream_run.context),
+            stream_mode=["custom", "values"],
+            version="v2",
+        ):
+            self._raise_if_cancelled()
+            yield part
 
-            if final_state is not None:
-                context = final_state["context"]
-                steps = final_state["steps"]
+    def complete_stream_run(
+        self,
+        *,
+        stream_run: WorkflowStreamRun,
+        chat_session: ChatSession,
+        user_message: str,
+        context: dict,
+    ) -> tuple[str, list[dict]]:
+        return self._complete_run_success(
+            run=stream_run.run,
+            chat_session=chat_session,
+            runtime=stream_run.runtime,
+            user_message=user_message,
+            context=context,
+        )
 
-            final_answer, sources = self._complete_run_success(
-                run=run,
-                chat_session=chat_session,
-                runtime=runtime,
-                user_message=user_message,
-                context=context,
-            )
-            yield {
-                "event": "complete",
-                "run": run,
-                "answer": final_answer,
-                "sources": sources,
-                "steps": steps,
-            }
-        except _CancelledError:
-            run.status = "cancelled"
-            run.completed_at = datetime.utcnow()
-            self.db.commit()
-            yield {"event": "cancelled", "run_id": run.id}
-        finally:
-            unregister_run(run.id)
+    def mark_stream_run_cancelled(self, run: Run) -> None:
+        run.status = "cancelled"
+        run.completed_at = datetime.utcnow()
+        self.db.commit()
+
+    def close_stream_run(self, run: Run) -> None:
+        unregister_run(run.id)
 
     def _start_run(
         self,

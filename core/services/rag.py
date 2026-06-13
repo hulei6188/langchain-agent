@@ -12,6 +12,7 @@ from langchain_core.documents import BaseDocumentCompressor
 from langchain_core.documents import Document
 from langchain_core.retrievers import BaseRetriever
 from langchain_core.runnables import RunnableLambda
+from langchain_classic.retrievers import ContextualCompressionRetriever, EnsembleRetriever
 from pydantic import ConfigDict
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -79,21 +80,46 @@ class BM25Retriever(BaseRetriever):
         return [_hit_to_document(hit) for hit in hits]
 
 
-class HybridRRFRetriever(BaseRetriever):
-    dense_retriever: DenseRetriever
-    bm25_retriever: BM25Retriever
-    rrf_k: int
+class HybridRRFRetriever(EnsembleRetriever):
+    channel_names: list[str] = ["dense", "bm25"]
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
+    @classmethod
+    def from_retrievers(
+        cls,
+        *,
+        dense_retriever: DenseRetriever,
+        bm25_retriever: BM25Retriever,
+        rrf_k: int,
+    ) -> "HybridRRFRetriever":
+        return cls(
+            retrievers=[dense_retriever, bm25_retriever],
+            weights=[1.0, 1.0],
+            c=rrf_k,
+            id_key="_rag_id",
+            channel_names=["dense", "bm25"],
+        )
+
     def retrieve_with_components(self, query: str) -> dict[str, list[dict]]:
-        dense_hits = _documents_to_hits(self.dense_retriever.invoke(query))
-        bm25_hits = _documents_to_hits(self.bm25_retriever.invoke(query))
-        fused_hits = _rrf(dense_hits, bm25_hits, k=self.rrf_k)
+        dense_documents = self.retrievers[0].invoke(query)
+        bm25_documents = self.retrievers[1].invoke(query)
+        dense_hits = _documents_to_hits(dense_documents)
+        bm25_hits = _documents_to_hits(bm25_documents)
+        fused_hits = _documents_to_hits(self.weighted_reciprocal_rank([dense_documents, bm25_documents]))
         return {"dense_hits": dense_hits, "bm25_hits": bm25_hits, "fused_hits": fused_hits}
 
-    def _get_relevant_documents(self, query: str, *, run_manager) -> list[Document]:
-        return [_hit_to_document(hit) for hit in self.retrieve_with_components(query)["fused_hits"]]
+    def weighted_reciprocal_rank(self, doc_lists: list[list[Document]]) -> list[Document]:
+        hit_lists = [_documents_to_hits(documents) for documents in doc_lists]
+        return [
+            _hit_to_document(hit)
+            for hit in _fuse_hit_lists(
+                hit_lists,
+                channel_names=self.channel_names,
+                weights=[float(weight) for weight in self.weights],
+                k=int(self.c),
+            )
+        ]
 
 
 class RerankCompressor(BaseDocumentCompressor):
@@ -219,7 +245,7 @@ def _hybrid_retriever_runnable(state: dict) -> dict:
         knowledge_base_ids=state["knowledge_base_ids"],
         limit=int(config.get("bm25_top_k") or settings.rag_bm25_top_k),
     )
-    hybrid_retriever = HybridRRFRetriever(
+    hybrid_retriever = HybridRRFRetriever.from_retrievers(
         dense_retriever=dense_retriever,
         bm25_retriever=bm25_retriever,
         rrf_k=int(config.get("rrf_k") or settings.rag_rrf_k),
@@ -249,12 +275,11 @@ def _rerank_runnable(state: dict) -> dict:
                 top_n=int(config.get("rerank_top_n") or settings.rag_rerank_top_n),
                 model=settings.rag_rerank_model,
             )
-            final_hits = _documents_to_hits(
-                compressor.compress_documents(
-                    [_hit_to_document(hit) for hit in final_hits],
-                    query=state["query"],
-                )
+            compression_retriever = ContextualCompressionRetriever(
+                base_retriever=RunnableLambda(lambda _query: [_hit_to_document(hit) for hit in final_hits]),
+                base_compressor=compressor,
             )
+            final_hits = _documents_to_hits(compression_retriever.invoke(state["query"]))
             rerank_applied = True
         except Exception as exc:
             rerank_error = str(exc)[:240]
@@ -456,12 +481,27 @@ def _bm25_search(db: Session, *, workspace_id: int, knowledge_base_ids: list[int
 
 
 def _rrf(dense_hits: list[dict], bm25_hits: list[dict], *, k: int) -> list[dict]:
+    return _fuse_hit_lists(
+        [dense_hits, bm25_hits],
+        channel_names=["dense", "bm25"],
+        weights=[1.0, 1.0],
+        k=k,
+    )
+
+
+def _fuse_hit_lists(
+    hit_lists: list[list[dict]],
+    *,
+    channel_names: list[str],
+    weights: list[float],
+    k: int,
+) -> list[dict]:
     combined: dict[str, dict] = {}
-    for channel, hits in (("dense", dense_hits), ("bm25", bm25_hits)):
+    for channel, hits, weight in zip(channel_names, hit_lists, weights, strict=False):
         for rank, hit in enumerate(hits, start=1):
             key = hit["id"]
             item = combined.setdefault(key, {**hit, "score": 0.0, "channels": set()})
-            item["score"] += 1 / (k + rank)
+            item["score"] += float(weight) / (k + rank)
             item["channels"].add(channel)
             if channel == "dense":
                 item["dense_score"] = hit.get("dense_score", hit.get("score", 0.0))
@@ -496,7 +536,7 @@ def _rerank(reranker: OpenAICompatibleReranker, *, query: str, hits: list[dict],
 def _hit_to_document(hit: dict) -> Document:
     return Document(
         page_content=hit.get("text") or "",
-        metadata={**(hit.get("metadata") or {}), "_rag_hit": hit},
+        metadata={**(hit.get("metadata") or {}), "_rag_hit": hit, "_rag_id": hit.get("id")},
     )
 
 
