@@ -17,7 +17,7 @@ class Settings(BaseSettings):
     cors_origins: str = Field(default="http://127.0.0.1:5174,http://localhost:5174", alias="CORS_ORIGINS")
 
     database_url: str = Field(
-        default="postgresql+psycopg2://agentbase:agentbase@192.168.150.101:5433/agentbase",
+        default="postgresql+psycopg://agentbase:agentbase@192.168.150.101:5433/agentbase",
         alias="DATABASE_URL",
     )
     redis_url: str | None = Field(default=None, alias="REDIS_URL")

@@ -32,7 +32,7 @@
       context: .
       dockerfile: Dockerfile.api
     environment:
-      DATABASE_URL: postgresql+psycopg2://agentbase:agentbase@postgres:5432/agentbase
+      DATABASE_URL: postgresql+psycopg://agentbase:agentbase@postgres:5432/agentbase
       REDIS_URL: redis://redis:6379/0
       AGENTBASE_VECTOR_BACKEND: milvus
       MILVUS_URI: http://milvus:19530

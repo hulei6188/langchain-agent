@@ -37,12 +37,24 @@ from core.db.models import (
 )
 from core.integrations.llm import OpenAICompatibleProvider, _CancelledError
 from core.runtime.cancel import register_run, unregister_run, is_cancelled
+from core.runtime.dsml import (
+    DSML_TOOL_MARKUP_ERROR,
+    buffer_stream_content,
+    contains_dsml_tool_calls,
+    contains_leaked_tool_markup,
+    dsml_preview,
+    dsml_tool_call_parser,
+    dsml_tool_names,
+    parse_dsml_tool_calls,
+    strip_complete_dsml_tool_call_blocks,
+    strip_or_block_leaked_tool_markup,
+)
 from core.services.agents import get_agent_detail, normalize_memory, normalize_rag, normalize_tool_policy, normalize_workdir
 from core.services.rag import run_rag_pipeline
 from core.services.memory import load_graph_memory_context, update_session_memory
 from core.services.models import resolve_agent_model
 from core.services.skills import normalize_activation_mode
-from core.services.tools import build_langchain_tool, openai_schema_for_langchain_tool, tool_call_event
+from core.services.tools import build_langchain_tool, tool_call_event
 from core.services.uploads import get_workspace_uploads
 from core.services.user_models import (
     resolve_user_model_config,
@@ -57,9 +69,6 @@ MAX_TOOL_WALL_TIME_SECONDS = 1800
 SKILL_AUTO_TOP_K = 3
 SKILL_AUTO_THRESHOLD = 0.25
 SKILL_SELECTION_HISTORY_MESSAGES = 8
-DSML_TOOL_MARKUP_ERROR = "工具调用格式异常，未能正确执行，请重试。"
-DSML_TOOL_CALL_START_MARKER = "<||DSML||tool_calls>"
-DSML_STREAM_GUARD_TAIL_CHARS = len(DSML_TOOL_CALL_START_MARKER) - 1
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +90,6 @@ class ToolGraphState(TypedDict, total=False):
     messages: list[BaseMessage]
     bound_tools: list[Tool]
     langchain_tools: list[Any]
-    tool_schemas: list[dict[str, Any]]
     allowed_names: set[str]
     total_calls: int
     tools_used: list[str]
@@ -100,124 +108,6 @@ class ToolGraphState(TypedDict, total=False):
 
 class ToolNodeInvokeState(TypedDict):
     messages: list[BaseMessage]
-
-
-_DSML_TOOL_CALLS_BLOCK_RE = re.compile(
-    r"<\|\|DSML\|\|tool_calls\s*>(?P<body>.*?)</\|\|DSML\|\|tool_calls\s*>",
-    re.DOTALL,
-)
-_DSML_INVOKE_RE = re.compile(
-    r"<\|\|DSML\|\|invoke\b(?P<attrs>[^>]*)>(?P<body>.*?)</\|\|DSML\|\|invoke\s*>",
-    re.DOTALL,
-)
-_DSML_PARAMETER_RE = re.compile(
-    r"<\|\|DSML\|\|parameter\b(?P<attrs>[^>]*)>(?P<body>.*?)</\|\|DSML\|\|parameter\s*>",
-    re.DOTALL,
-)
-
-
-def _normalize_dsml_markup(text: str) -> str:
-    return text.replace("｜", "|")
-
-
-def contains_dsml_tool_calls(text: str | None) -> bool:
-    if not text:
-        return False
-    return DSML_TOOL_CALL_START_MARKER in _normalize_dsml_markup(text)
-
-
-def _dsml_attr(attrs: str, name: str) -> str:
-    match = re.search(rf"\b{re.escape(name)}\s*=\s*([\"'])(.*?)\1", attrs or "", re.DOTALL)
-    return match.group(2) if match else ""
-
-
-def parse_dsml_tool_calls(text: str) -> list[dict]:
-    if not text or not contains_dsml_tool_calls(text):
-        return []
-
-    normalized = _normalize_dsml_markup(text)
-    tool_calls: list[dict] = []
-    dsml_blocks_found = 0
-    for block_match in _DSML_TOOL_CALLS_BLOCK_RE.finditer(normalized):
-        dsml_blocks_found += 1
-        body_start = block_match.start("body")
-        body_end = block_match.end("body")
-        normalized_body = normalized[body_start:body_end]
-        original_body = text[body_start:body_end]
-        for invoke_match in _DSML_INVOKE_RE.finditer(normalized_body):
-            tool_name = _dsml_attr(invoke_match.group("attrs"), "name")
-            if not tool_name:
-                continue
-            invoke_body_start = invoke_match.start("body")
-            invoke_body_end = invoke_match.end("body")
-            normalized_invoke_body = normalized_body[invoke_body_start:invoke_body_end]
-            original_invoke_body = original_body[invoke_body_start:invoke_body_end]
-            params: dict[str, str] = {}
-            for param_match in _DSML_PARAMETER_RE.finditer(normalized_invoke_body):
-                param_name = _dsml_attr(param_match.group("attrs"), "name")
-                if not param_name:
-                    continue
-                params[param_name] = original_invoke_body[param_match.start("body") : param_match.end("body")]
-            tool_calls.append(
-                {
-                    "id": f"call_dsml_{len(tool_calls)}",
-                    "type": "function",
-                    "function": {
-                        "name": tool_name,
-                        "arguments": json.dumps(params, ensure_ascii=False),
-                    },
-                }
-            )
-    if dsml_blocks_found > 0 and not tool_calls:
-        logger.warning("DSML tool call parsing failed: found %d DSML block(s) but extracted 0 valid tool calls. Raw content:\n%s", dsml_blocks_found, text)
-    return tool_calls
-
-
-def _strip_complete_dsml_tool_call_blocks(text: str) -> str:
-    if not text:
-        return ""
-    normalized = _normalize_dsml_markup(text)
-    spans = [match.span() for match in _DSML_TOOL_CALLS_BLOCK_RE.finditer(normalized)]
-    if not spans:
-        return text
-    pieces: list[str] = []
-    last = 0
-    for start, end in spans:
-        pieces.append(text[last:start])
-        last = end
-    pieces.append(text[last:])
-    return "".join(pieces)
-
-
-def _contains_leaked_tool_markup(text: str | None) -> bool:
-    if not text:
-        return False
-    normalized = _normalize_dsml_markup(text)
-    return (
-        contains_dsml_tool_calls(normalized)
-        or "<||DSML||tool_calls" in normalized
-        or "<||DSML||invoke" in normalized
-        or bool(re.search(r"\binvoke\s+name\s*=\s*([\"'])", normalized))
-    )
-
-
-def strip_or_block_leaked_tool_markup(text: str) -> str:
-    if not text:
-        return ""
-    if not _contains_leaked_tool_markup(text):
-        return text
-    cleaned = _strip_complete_dsml_tool_call_blocks(text).strip()
-    if cleaned and not _contains_leaked_tool_markup(cleaned):
-        return cleaned
-    return DSML_TOOL_MARKUP_ERROR
-
-
-def _dsml_preview(text: str | None) -> str:
-    return (text or "")[:500]
-
-
-def _dsml_tool_names(tool_calls: list[dict]) -> list[str]:
-    return [str((call.get("function") or {}).get("name") or "") for call in tool_calls if (call.get("function") or {}).get("name")]
 
 
 def _message_content_text(message: BaseMessage) -> str:
@@ -242,28 +132,11 @@ def _message_reasoning_content(message: BaseMessage) -> str:
     )
 
 
-def _coerce_dsml_tool_calls(response: AIMessage, *, stage: str) -> AIMessage:
-    content = _message_content_text(response)
-    if not content or response.tool_calls or not contains_dsml_tool_calls(content):
-        return response
-    logger.warning("Detected DSML tool call markup in assistant content during %s", stage)
-    dsml_calls = parse_dsml_tool_calls(content)
-    if dsml_calls:
-        logger.warning("Parsed DSML tool calls during %s: tools=%s", stage, _dsml_tool_names(dsml_calls))
-        return AIMessage(
-            content="",
-            additional_kwargs=response.additional_kwargs,
-            tool_calls=_openai_tool_calls_to_langchain(dsml_calls),
-        )
-    logger.warning("Failed to parse DSML tool calls during %s; full content:\n%s", stage, content)
-    return AIMessage(content=DSML_TOOL_MARKUP_ERROR, additional_kwargs=response.additional_kwargs)
-
-
-def _openai_tool_calls_to_langchain(tool_calls: list[dict] | None) -> list[dict[str, Any]]:
+def _normalize_langchain_tool_calls(tool_calls: list[dict] | None) -> list[dict[str, Any]]:
     converted: list[dict[str, Any]] = []
     for index, call in enumerate(tool_calls or []):
         function = call.get("function") or {}
-        raw_args = function.get("arguments") or "{}"
+        raw_args = function.get("arguments") if function else call.get("args", {})
         try:
             args = json.loads(raw_args) if isinstance(raw_args, str) else dict(raw_args)
             if not isinstance(args, dict):
@@ -272,57 +145,12 @@ def _openai_tool_calls_to_langchain(tool_calls: list[dict] | None) -> list[dict[
             args = {"input": str(raw_args)}
         converted.append(
             {
-                "name": function.get("name") or "",
+                "name": call.get("name") or function.get("name") or "",
                 "args": args,
                 "id": call.get("id") or f"call_{index}",
             }
         )
     return converted
-
-
-def _langchain_tool_calls_to_openai(tool_calls: list[dict] | None) -> list[dict[str, Any]]:
-    normalized = []
-    for index, call in enumerate(tool_calls or []):
-        normalized.append(
-            {
-                "id": call.get("id") or f"call_{index}",
-                "type": "function",
-                "function": {
-                    "name": call.get("name") or "",
-                    "arguments": json.dumps(call.get("args") or {}, ensure_ascii=False),
-                },
-            }
-        )
-    return normalized
-
-
-def _buffer_stream_content(
-    pending: str,
-    content: str,
-    suppress_content_stream: bool,
-) -> tuple[str, bool, list[str]]:
-    if suppress_content_stream:
-        return pending, True, []
-    pending += content
-    normalized = _normalize_dsml_markup(pending)
-    marker_index = normalized.find(DSML_TOOL_CALL_START_MARKER)
-    if marker_index >= 0:
-        safe_prefix = pending[:marker_index]
-        return "", True, [safe_prefix] if safe_prefix else []
-
-    # Keep only the suffix that could become the start marker after the next chunk.
-    # The previous implementation kept a fixed marker-length tail for every chunk,
-    # which made normal streaming appear in larger delayed bursts.
-    tail_length = 0
-    max_tail = min(len(normalized), DSML_STREAM_GUARD_TAIL_CHARS)
-    for length in range(max_tail, 0, -1):
-        if DSML_TOOL_CALL_START_MARKER.startswith(normalized[-length:]):
-            tail_length = length
-            break
-    if tail_length <= 0:
-        return "", False, [pending] if pending else []
-    safe_content = pending[:-tail_length]
-    return pending[-tail_length:], False, [safe_content] if safe_content else []
 
 
 def default_workflow() -> list[dict]:
@@ -843,7 +671,7 @@ class WorkflowRunner:
         messages: list[BaseMessage],
         context: dict,
         *,
-        tools: list[dict] | None = None,
+        tools: list[Any] | None = None,
     ) -> AIMessage:
         response = self.provider.invoke(
             messages,
@@ -877,8 +705,8 @@ class WorkflowRunner:
     def _initial_tool_graph_state(self, agent, node: dict, context: dict) -> ToolGraphState:
         tool_policy = agent.settings.get("tool_policy") or {}
         allowed_names = set(tool_policy.get("allowed_tool_names") or [])
-        bound_tools, langchain_tools, tool_schemas = self._tool_runtime_bindings(agent, node, context, allowed_names)
-        if not tool_schemas:
+        bound_tools, langchain_tools = self._tool_runtime_bindings(agent, node, context, allowed_names)
+        if not langchain_tools:
             return {
                 "context": context,
                 "node": node,
@@ -890,7 +718,6 @@ class WorkflowRunner:
             "messages": self._llm_messages(agent, context),
             "bound_tools": bound_tools,
             "langchain_tools": langchain_tools,
-            "tool_schemas": tool_schemas,
             "allowed_names": allowed_names,
             "total_calls": 0,
             "tools_used": [],
@@ -906,7 +733,7 @@ class WorkflowRunner:
             "loaded_skill_this_round": False,
         }
 
-    def _tool_runtime_bindings(self, agent, node: dict, context: dict, allowed_names: set[str]) -> tuple[list[Tool], list[Any], list[dict]]:
+    def _tool_runtime_bindings(self, agent, node: dict, context: dict, allowed_names: set[str]) -> tuple[list[Tool], list[Any]]:
         bound_tools = self._runtime_tools(agent, node, context)
         if allowed_names:
             bound_tools = [tool for tool in bound_tools if tool.name in allowed_names or tool.type == "builtin_search"]
@@ -918,12 +745,10 @@ class WorkflowRunner:
             )
             for tool in bound_tools
         ]
-        tool_schemas = [openai_schema_for_langchain_tool(tool) for tool in langchain_tools]
         skill_loader_tool = self._skill_loader_tool(agent, context)
         if skill_loader_tool:
             langchain_tools.append(skill_loader_tool)
-            tool_schemas.append(openai_schema_for_langchain_tool(skill_loader_tool))
-        return bound_tools, langchain_tools, tool_schemas
+        return bound_tools, langchain_tools
 
     def _build_tool_loop_graph(
         self,
@@ -975,18 +800,18 @@ class WorkflowRunner:
                 state.get("messages", []),
                 context,
                 writer,
-                tools=state.get("tool_schemas") or [],
+                tools=state.get("langchain_tools") or [],
                 provisional_stream=True,
             )
-            response = _coerce_dsml_tool_calls(response, stage=f"tool node stream round {round_index}")
+            response = dsml_tool_call_parser.invoke(response, stage=f"tool node stream round {round_index}")
         else:
             response = self._invoke_chat_model(
                 agent,
                 state.get("messages", []),
                 context,
-                tools=state.get("tool_schemas") or [],
+                tools=state.get("langchain_tools") or [],
             )
-            response = _coerce_dsml_tool_calls(response, stage=f"tool node non-stream round {round_index}")
+            response = dsml_tool_call_parser.invoke(response, stage=f"tool node non-stream round {round_index}")
 
         state["latest_response"] = response
         state["pending_calls"] = []
@@ -999,9 +824,8 @@ class WorkflowRunner:
             return state
 
         remaining_calls = max(0, int(state.get("max_tool_calls") or MAX_TOOL_CALLS_PER_RUN) - int(state.get("total_calls") or 0))
-        ai_calls_this_round = response.tool_calls[:remaining_calls]
-        calls_this_round = _langchain_tool_calls_to_openai(ai_calls_this_round)
-        if not ai_calls_this_round:
+        calls_this_round = response.tool_calls[:remaining_calls]
+        if not calls_this_round:
             return state
         events = list(state.get("events") or [])
         if response_reasoning and context.get("thinking_enabled") and not stream:
@@ -1013,7 +837,7 @@ class WorkflowRunner:
             AIMessage(
                 content=response_content,
                 additional_kwargs=response.additional_kwargs,
-                tool_calls=ai_calls_this_round,
+                tool_calls=calls_this_round,
             )
         )
         self._persist_intermediate_message(
@@ -1090,7 +914,7 @@ class WorkflowRunner:
 
         if loaded_skill_this_round:
             self._refresh_system_message(messages, agent, context)
-            bound_tools, langchain_tools, tool_schemas = self._tool_runtime_bindings(
+            bound_tools, langchain_tools = self._tool_runtime_bindings(
                 agent,
                 node,
                 context,
@@ -1098,7 +922,6 @@ class WorkflowRunner:
             )
             state["bound_tools"] = bound_tools
             state["langchain_tools"] = langchain_tools
-            state["tool_schemas"] = tool_schemas
 
         state["messages"] = messages
         state["events"] = events
@@ -1145,7 +968,7 @@ class WorkflowRunner:
         context: dict,
         writer: Callable[[dict], None] | None,
         *,
-        tools: list[dict] | None = None,
+        tools: list[Any] | None = None,
         stream_content: bool = True,
         provisional_stream: bool = False,
     ) -> AIMessage:
@@ -1273,12 +1096,10 @@ class WorkflowRunner:
         context = state["context"]
         jobs = []
         for tc in state.get("pending_calls") or []:
-            func = tc["function"]
-            tool_name = func["name"]
-            try:
-                tool_args = json.loads(func.get("arguments") or "{}")
-            except json.JSONDecodeError:
-                tool_args = {"input": func.get("arguments") or ""}
+            tool_name = str(tc.get("name") or "")
+            tool_args = tc.get("args") or {}
+            if not isinstance(tool_args, dict):
+                tool_args = {"input": tool_args}
             is_skill_loader = tool_name == "load_skill"
             matching = next((tool for tool in state.get("bound_tools", []) if tool.name == tool_name), None)
             langchain_tool = next((tool for tool in state.get("langchain_tools", []) if tool.name == tool_name), None)
@@ -1411,7 +1232,7 @@ class WorkflowRunner:
         messages: list[BaseMessage],
         context: dict,
         *,
-        tools: list[dict] | None = None,
+        tools: list[Any] | None = None,
         stream_content: bool = False,
         provisional_stream: bool = False,
     ):
@@ -1449,7 +1270,7 @@ class WorkflowRunner:
             if content_chunk:
                 content_chunks.append(content_chunk)
                 if should_stream_content_live and not saw_tool_call:
-                    pending_live_content, suppress_content_stream, safe_chunks = _buffer_stream_content(
+                    pending_live_content, suppress_content_stream, safe_chunks = buffer_stream_content(
                         pending_live_content,
                         content_chunk,
                         suppress_content_stream,
@@ -1468,7 +1289,7 @@ class WorkflowRunner:
             elif getattr(chunk, "tool_calls", None):
                 saw_tool_call = True
                 provisional_chunks = []
-                final_tool_calls = _langchain_tool_calls_to_openai(chunk.tool_calls or [])
+                final_tool_calls = list(chunk.tool_calls or [])
         self._raise_if_cancelled()
         if not final_tool_calls:
             final_tool_calls = self._finalize_stream_tool_calls(tool_call_builders)
@@ -1477,23 +1298,23 @@ class WorkflowRunner:
         content_for_response = joined_content
         if final_tool_calls:
             if joined_content.strip():
-                logger.warning("Dropping assistant content emitted before tool calls during stream response; preview=%r", _dsml_preview(joined_content))
+                logger.warning("Dropping assistant content emitted before tool calls during stream response; preview=%r", dsml_preview(joined_content))
             content_for_response = ""
         elif not final_tool_calls and contains_dsml_tool_calls(joined_content):
             logger.warning("Detected DSML tool call markup in streamed assistant content")
             if tools:
                 dsml_calls = parse_dsml_tool_calls(joined_content)
                 if dsml_calls:
-                    logger.warning("Parsed DSML tool calls from streamed content: tools=%s", _dsml_tool_names(dsml_calls))
+                    logger.warning("Parsed DSML tool calls from streamed content: tools=%s", dsml_tool_names(dsml_calls))
                     final_tool_calls = dsml_calls
                     content_for_response = ""
                 else:
                     logger.warning("Failed to parse DSML tool calls from streamed content; full content:\n%s", joined_content)
                     content_for_response = DSML_TOOL_MARKUP_ERROR
             else:
-                logger.warning("Blocked DSML tool call markup in streamed final content; preview=%r", _dsml_preview(joined_content))
+                logger.warning("Blocked DSML tool call markup in streamed final content; preview=%r", dsml_preview(joined_content))
                 content_for_response = strip_or_block_leaked_tool_markup(joined_content)
-        elif not final_tool_calls and _contains_leaked_tool_markup(joined_content):
+        elif not final_tool_calls and contains_leaked_tool_markup(joined_content):
             logger.warning("Blocked incomplete tool call markup in streamed content; full content:\n%s", joined_content)
             content_for_response = DSML_TOOL_MARKUP_ERROR
 
@@ -1502,7 +1323,7 @@ class WorkflowRunner:
                 if suppress_content_stream:
                     if content_for_response == DSML_TOOL_MARKUP_ERROR or not emitted_live_content:
                         yield {"event": "token", "content": content_for_response}
-                elif not _contains_leaked_tool_markup(joined_content):
+                elif not contains_leaked_tool_markup(joined_content):
                     if provisional_active:
                         for safe_content in provisional_chunks:
                             yield {"event": "token", "content": safe_content}
@@ -1516,7 +1337,7 @@ class WorkflowRunner:
         return AIMessage(
             content=content_for_response or "",
             additional_kwargs=additional_kwargs,
-            tool_calls=_openai_tool_calls_to_langchain(final_tool_calls),
+            tool_calls=final_tool_calls,
         )
 
     def _merge_stream_tool_call_chunks(self, builders: dict[int, dict], chunks: list[dict]) -> None:
@@ -1527,36 +1348,39 @@ class WorkflowRunner:
                 index = int(chunk.get("index")) if chunk.get("index") is not None else len(builders)
             except (TypeError, ValueError):
                 index = len(builders)
-            call = builders.setdefault(index, {"id": "", "type": "function", "function": {"name": "", "arguments": ""}})
+            call = builders.setdefault(index, {"id": "", "name": "", "args": ""})
             if chunk.get("id"):
                 call["id"] = str(chunk.get("id"))
             name_part = chunk.get("name")
             if name_part:
                 name_part = str(name_part)
-                current_name = call["function"].get("name") or ""
+                current_name = call.get("name") or ""
                 if not current_name or name_part.startswith(current_name):
-                    call["function"]["name"] = name_part
+                    call["name"] = name_part
                 elif not current_name.endswith(name_part):
-                    call["function"]["name"] = current_name + name_part
+                    call["name"] = current_name + name_part
             if chunk.get("args") is not None:
-                call["function"]["arguments"] = (call["function"].get("arguments") or "") + str(chunk.get("args"))
+                call["args"] = (call.get("args") or "") + str(chunk.get("args"))
 
     def _finalize_stream_tool_calls(self, builders: dict[int, dict]) -> list[dict]:
         calls = []
         for index in sorted(builders):
             call = builders[index]
-            function = call.get("function") or {}
-            name = function.get("name") or ""
+            name = call.get("name") or ""
             if not name:
                 continue
+            raw_args = call.get("args") or "{}"
+            try:
+                args = json.loads(raw_args) if isinstance(raw_args, str) else dict(raw_args)
+                if not isinstance(args, dict):
+                    args = {"input": args}
+            except (TypeError, ValueError, json.JSONDecodeError):
+                args = {"input": str(raw_args)}
             calls.append(
                 {
                     "id": call.get("id") or f"call_{index}",
-                    "type": call.get("type") or "function",
-                    "function": {
-                        "name": name,
-                        "arguments": function.get("arguments") or "{}",
-                    },
+                    "name": name,
+                    "args": args,
                 }
             )
         return calls
@@ -1609,7 +1433,7 @@ class WorkflowRunner:
                 yield {"event": "reasoning_token", "content": reasoning_chunk}
             if content_chunk:
                 chunks.append(content_chunk)
-                pending_live_content, suppress_content_stream, safe_chunks = _buffer_stream_content(
+                pending_live_content, suppress_content_stream, safe_chunks = buffer_stream_content(
                     pending_live_content,
                     content_chunk,
                     suppress_content_stream,
@@ -1621,12 +1445,12 @@ class WorkflowRunner:
         raw_draft = "".join(chunks)
         draft = strip_or_block_leaked_tool_markup(raw_draft)
         if draft and draft != raw_draft:
-            logger.warning("Blocked leaked tool call markup in streamed LLM node; preview=%r", _dsml_preview(raw_draft))
+            logger.warning("Blocked leaked tool call markup in streamed LLM node; preview=%r", dsml_preview(raw_draft))
         if draft:
             if suppress_content_stream:
                 if draft == DSML_TOOL_MARKUP_ERROR or not emitted_live_content:
                     yield {"event": "token", "content": draft}
-            elif not _contains_leaked_tool_markup(raw_draft) and pending_live_content:
+            elif not contains_leaked_tool_markup(raw_draft) and pending_live_content:
                 yield {"event": "token", "content": pending_live_content}
         return self._llm_output(agent, context, draft, reasoning="".join(reasoning_chunks))
 
@@ -1710,9 +1534,9 @@ class WorkflowRunner:
             content = item.get("content") or ""
             if current_message_id and item.get("id") == current_message_id and role == "user":
                 content = self._user_content(context["input"], context.get("uploads", []))
-            if role == "assistant" and _contains_leaked_tool_markup(content):
-                cleaned_content = _strip_complete_dsml_tool_call_blocks(content).strip()
-                if cleaned_content and not _contains_leaked_tool_markup(cleaned_content):
+            if role == "assistant" and contains_leaked_tool_markup(content):
+                cleaned_content = strip_complete_dsml_tool_call_blocks(content).strip()
+                if cleaned_content and not contains_leaked_tool_markup(cleaned_content):
                     logger.warning(
                         "Cleaned DSML tool call markup from historical assistant message id=%s",
                         item.get("id"),
@@ -1722,7 +1546,7 @@ class WorkflowRunner:
                     logger.warning(
                         "Skipping historical assistant message with leaked DSML tool call markup id=%s; preview=%r",
                         item.get("id"),
-                        _dsml_preview(content),
+                        dsml_preview(content),
                     )
                     index += 1
                     continue
@@ -1744,7 +1568,7 @@ class WorkflowRunner:
                         AIMessage(
                             content=content or "",
                             additional_kwargs=additional_kwargs,
-                            tool_calls=_openai_tool_calls_to_langchain(tool_calls),
+                            tool_calls=_normalize_langchain_tool_calls(tool_calls),
                         )
                     )
                     for tool_item in tool_messages:
@@ -2489,10 +2313,10 @@ class WorkflowRunner:
         session_id = context.get("session_id")
         if not session_id:
             return
-        if role == "assistant" and _contains_leaked_tool_markup(content):
+        if role == "assistant" and contains_leaked_tool_markup(content):
             logger.warning(
                 "Blocked leaked tool call markup before persisting intermediate assistant message; preview=%r",
-                _dsml_preview(content),
+                dsml_preview(content),
             )
             content = ""
         visible_reasoning = reasoning if context.get("thinking_enabled") else ""

@@ -4,7 +4,6 @@ import json
 from datetime import datetime
 from dataclasses import dataclass
 
-from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.store.memory import InMemoryStore
 from sqlalchemy.orm import Session
 
@@ -14,14 +13,11 @@ from core.db.models import AgentMemoryProfile, SessionMemory
 MAX_MEMORY_SUMMARY_CHARS = 4000
 MAX_MEMORY_FACTS = 50
 
-graph_memory_checkpointer = InMemorySaver()
 graph_memory_store = InMemoryStore()
 
 
 @dataclass
 class GraphMemoryContext:
-    session_memory: SessionMemory | None
-    profile_memory: AgentMemoryProfile | None
     session_summary: str
     profile_text: str
     profile_event: dict
@@ -115,8 +111,6 @@ def load_graph_memory_context(
         session_payload,
     )
     return GraphMemoryContext(
-        session_memory=session_memory,
-        profile_memory=profile_memory,
         session_summary=session_payload["summary"],
         profile_text=format_profile_memory(profile_memory),
         profile_event=memory_used_event(profile_memory, session_summary_used=bool(session_payload["summary"])),

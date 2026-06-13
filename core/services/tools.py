@@ -22,7 +22,6 @@ import requests
 import re
 
 from langchain_core.tools import StructuredTool
-from langchain_core.utils.function_calling import convert_to_openai_tool
 from pydantic import Field, create_model
 from sqlalchemy import or_
 from sqlalchemy.exc import IntegrityError
@@ -714,10 +713,6 @@ def build_langchain_tool(
         description=_tool_description(tool),
         args_schema=_tool_args_model(tool),
     )
-
-
-def openai_schema_for_langchain_tool(tool: StructuredTool) -> dict:
-    return convert_to_openai_tool(tool)
 
 
 def _invoke_tool_backend(tool: Tool, context: dict) -> dict:

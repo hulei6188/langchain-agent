@@ -115,17 +115,6 @@ def test_tool_subgraph_loops_back_to_model_after_tool_call(monkeypatch):
         "core.runtime.workflow.build_langchain_tool",
         lambda *args, **kwargs: StructuredTool.from_function(fake_tool, name="test_tool", description="Test tool"),
     )
-    monkeypatch.setattr(
-        "core.runtime.workflow.openai_schema_for_langchain_tool",
-        lambda tool: {
-            "type": "function",
-            "function": {
-                "name": tool.name,
-                "description": "Test tool",
-                "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
-            },
-        },
-    )
 
     output = runner._run_tool_node(
         _agent(),

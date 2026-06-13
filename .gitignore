@@ -61,3 +61,4 @@ CONTRIBUTING.md
 # 备份文件
 *.bak
 test_*.py
+!tests/test_llm_provider.py

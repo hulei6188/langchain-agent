@@ -4,8 +4,9 @@ import hashlib
 import json
 import math
 import re
+import threading
 from dataclasses import dataclass
-from typing import Iterable, Sequence
+from typing import Sequence
 
 from langchain_core.documents import BaseDocumentCompressor
 from langchain_core.documents import Document
@@ -23,8 +24,6 @@ from core.services.rag_cache import redis_store
 
 
 BM25_BATCH_SIZE = 1000
-
-import threading
 
 # Thread-safe global cache for compiled BM25 indices
 # Key: (frozenset(knowledge_base_ids), version_hash) -> Value: (compiled_bm25_index, rows_data)

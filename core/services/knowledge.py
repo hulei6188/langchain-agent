@@ -5,6 +5,8 @@ import binascii
 import hashlib
 import re
 from pathlib import Path
+
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from sqlalchemy.orm import Session
 
 from core.config import get_settings
@@ -396,10 +398,15 @@ def split_parent_child(
     for parent_start in range(0, len(cleaned), parent_size):
         parent_text = cleaned[parent_start : parent_start + parent_size]
         parent_id = f"kb{kb_id}-doc{document_id}-parent{parent_index}"
-        child_index = 0
-        step = max(child_size - overlap, 1)
-        for child_start in range(0, len(parent_text), step):
-            child_text = parent_text[child_start : child_start + child_size].strip()
+        splitter = RecursiveCharacterTextSplitter(
+            chunk_size=max(int(child_size), 1),
+            chunk_overlap=min(max(int(overlap), 0), max(int(child_size) - 1, 0)),
+            separators=[""],
+            keep_separator=False,
+            length_function=len,
+        )
+        for child_index, child_text in enumerate(splitter.split_text(parent_text)):
+            child_text = child_text.strip()
             if not child_text:
                 continue
             chunk_id = f"{parent_id}-child{child_index}"
@@ -413,7 +420,6 @@ def split_parent_child(
                     "content_hash": hashlib.sha256(child_text.encode("utf-8")).hexdigest(),
                 }
             )
-            child_index += 1
         parent_index += 1
     return output
 

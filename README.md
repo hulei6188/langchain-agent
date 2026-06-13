@@ -377,7 +377,7 @@ JWT_SECRET=change-me-in-production          # JWT 签名密钥（生产环境必
 API_KEY_ENCRYPTION_KEY=                     # Fernet 加密密钥（用于存储用户 API Key）
 
 # ── 数据库 ──
-DATABASE_URL=postgresql+psycopg2://agentbase:agentbase@localhost:5433/agentbase
+DATABASE_URL=postgresql+psycopg://agentbase:agentbase@localhost:5433/agentbase
 
 # ── LLM ──
 OPENAI_API_BASE=https://dashscope.aliyuncs.com/compatible-mode/v1

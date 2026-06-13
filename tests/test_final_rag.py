@@ -54,6 +54,27 @@ def test_parent_child_chunk_ids_are_stable():
     assert any(item["parent_id"] != chunks[0]["parent_id"] for item in chunks)
 
 
+def test_parent_child_chunk_text_keeps_existing_window_semantics():
+    chunks = split_parent_child(
+        "abcdefghijklmnopqrstuvwxyz" * 4,
+        kb_id=1,
+        document_id=2,
+        parent_size=200,
+        child_size=20,
+        overlap=5,
+    )
+
+    assert [chunk["text"] for chunk in chunks] == [
+        "abcdefghijklmnopqrst",
+        "pqrstuvwxyzabcdefghi",
+        "efghijklmnopqrstuvwx",
+        "tuvwxyzabcdefghijklm",
+        "ijklmnopqrstuvwxyzab",
+        "xyzabcdefghijklmnopq",
+        "mnopqrstuvwxyz",
+    ]
+
+
 def test_rrf_merges_dense_and_bm25_channels():
     dense = [{"id": "a", "text": "A", "score": 0.9, "metadata": {}, "retrieval_channel": "dense"}]
     bm25 = [{"id": "a", "text": "A", "score": 3.0, "metadata": {}, "retrieval_channel": "bm25"}]
