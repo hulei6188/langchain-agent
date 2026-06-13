@@ -62,6 +62,7 @@ from core.db.models import (
 )
 from core.db.session import SessionLocal, get_db, init_db
 from core.runtime.spec import default_workflow, workflow_graph_spec
+from core.runtime.langgraph_persistence import close_langgraph_persistence
 from core.security.auth import create_access_token, hash_password, verify_password
 from core.security.permissions import can_manage, normalize_role
 from core.services.agents import (
@@ -84,7 +85,7 @@ from core.services.bootstrap import (
     ensure_default_models,
     has_any_user,
 )
-from core.services.run_streams import start_workflow_stream, workflow_sse_items
+from core.services.run_streams import stream_workflow_sse
 from core.services.models import create_model_config, delete_model_config, model_payload, update_model_config
 from core.services.prompt_templates import (
     copy_builtin_prompt_template,
@@ -180,6 +181,11 @@ def startup() -> None:
     except Exception as exc:
         startup_error = str(exc)[:500]
         logger.exception("Database initialization failed; API started in degraded mode")
+
+
+@app.on_event("shutdown")
+def shutdown() -> None:
+    close_langgraph_persistence()
 
 
 def _cleanup_zombie_runs() -> None:
@@ -918,7 +924,7 @@ def chat_stream(agent_id: int, request: ChatRequest, membership: WorkspaceMember
         "search_enabled": request.search_enabled,
         "attachments": request.attachments,
     }
-    return StreamingResponse(workflow_sse_items(start_workflow_stream(bg_params)), media_type="text/event-stream")
+    return StreamingResponse(stream_workflow_sse(bg_params), media_type="text/event-stream")
 
 
 def user_payload(user: User) -> dict:

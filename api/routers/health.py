@@ -9,7 +9,13 @@ from sqlalchemy import text
 
 from core.config import get_settings
 from core.db.session import engine
-from core.integrations.llm import DASHSCOPE_COMPATIBLE_BASE, OPENAI_COMPATIBLE_DEFAULT_BASE, OpenAICompatibleProvider
+from core.integrations.model_clients import (
+    DASHSCOPE_COMPATIBLE_BASE,
+    OPENAI_COMPATIBLE_DEFAULT_BASE,
+    api_base,
+    api_key,
+    post_json,
+)
 from core.integrations.vector_store import vector_store
 from core.security.api_keys import secret_storage_ready
 from core.services.rag_cache import redis_store
@@ -25,9 +31,8 @@ def create_health_router(startup_error_getter: Callable[[], str | None]) -> APIR
     @router.get("/api/health")
     def health():
         settings = get_settings()
-        provider = OpenAICompatibleProvider()
-        chat_api_key = provider._api_key(settings, purpose="chat")
-        embedding_api_key = provider._api_key(settings, purpose="embedding")
+        chat_api_key = api_key(settings, purpose="chat")
+        embedding_api_key = api_key(settings, purpose="embedding")
         model_mock = settings.mock_llm
         model_base = settings.openai_api_base
         if settings.deepseek_api_key and (
@@ -37,7 +42,7 @@ def create_health_router(startup_error_getter: Callable[[], str | None]) -> APIR
             model_base = settings.deepseek_api_base
         elif settings.dashscope_api_key and not settings.openai_api_key and model_base == OPENAI_COMPATIBLE_DEFAULT_BASE:
             model_base = DASHSCOPE_COMPATIBLE_BASE
-        embedding_base = provider._api_base(settings, purpose="embedding")
+        embedding_base = api_base(settings, purpose="embedding")
         embedding_mock = settings.mock_llm
         embedding_model = (settings.openai_embedding_model or "").strip()
         issues = []
@@ -120,7 +125,6 @@ def _model_probe(purpose: str, *, enabled: bool) -> dict:
     cached = _health_probe_cache.get(purpose)
     if cached and now - cached[0] < 300:
         return {**cached[1], "cached": True}
-    provider = OpenAICompatibleProvider()
     try:
         if purpose == "chat":
             settings_obj = get_settings()
@@ -138,18 +142,18 @@ def _model_probe(purpose: str, *, enabled: bool) -> dict:
                 "temperature": 0,
                 "stream": False,
             }
-            provider._post_json(
-                provider._api_base(settings_obj, purpose="chat").rstrip("/") + "/chat/completions",
+            post_json(
+                api_base(settings_obj, purpose="chat").rstrip("/") + "/chat/completions",
                 payload,
-                provider._api_key(settings_obj, purpose="chat") or "",
+                api_key(settings_obj, purpose="chat") or "",
                 timeout_seconds=8,
             )
         elif purpose == "embedding":
             settings_obj = get_settings()
-            provider._post_json(
-                provider._api_base(settings_obj, purpose="embedding").rstrip("/") + "/embeddings",
+            post_json(
+                api_base(settings_obj, purpose="embedding").rstrip("/") + "/embeddings",
                 {"model": settings_obj.openai_embedding_model, "input": "health"},
-                provider._api_key(settings_obj, purpose="embedding") or "",
+                api_key(settings_obj, purpose="embedding") or "",
                 timeout_seconds=8,
             )
         else:

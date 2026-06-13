@@ -19,7 +19,6 @@ from core.db.models import (
     Run,
     RunEvent,
     Session as ChatSession,
-    SessionMemory,
     Skill,
     SkillKnowledgeBase,
     SkillTool,
@@ -29,6 +28,7 @@ from core.db.models import (
 )
 from core.config import get_settings
 from core.services.bootstrap import DEFAULT_WORKFLOW
+from core.services.memory import delete_session_memory_payload
 from core.services.models import model_payload
 from core.services.skills import skill_summary
 from core.services.tools import tool_payload
@@ -283,7 +283,8 @@ def delete_agent(db: Session, agent: Agent) -> None:
     if run_ids:
         db.query(RunEvent).filter(RunEvent.run_id.in_(run_ids)).delete(synchronize_session=False)
     if session_ids:
-        db.query(SessionMemory).filter(SessionMemory.session_id.in_(session_ids)).delete(synchronize_session=False)
+        for session_id in session_ids:
+            delete_session_memory_payload(session_id=session_id)
         db.query(Message).filter(Message.session_id.in_(session_ids)).delete(synchronize_session=False)
     db.query(Run).filter(Run.agent_id == agent.id).delete(synchronize_session=False)
     db.query(ChatSession).filter(ChatSession.agent_id == agent.id).delete(synchronize_session=False)

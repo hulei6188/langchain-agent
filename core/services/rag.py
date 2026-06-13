@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 
 from core.config import get_settings
 from core.db.models import KnowledgeChunk, KnowledgeDocument
-from core.integrations.llm import OpenAICompatibleProvider
+from core.integrations.model_clients import OpenAICompatibleEmbeddings, OpenAICompatibleReranker
 from core.integrations import vector_store as vector_store_module
 from core.services.rag_cache import redis_store
 
@@ -43,14 +43,14 @@ class DenseRetriever(BaseRetriever):
     db: Session
     workspace_id: int
     knowledge_base_ids: list[int]
-    provider: OpenAICompatibleProvider
+    embeddings: OpenAICompatibleEmbeddings
     runtime_config: dict | None = None
     limit: int
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     def _get_relevant_documents(self, query: str, *, run_manager) -> list[Document]:
-        query_vector = self.provider.embed(query, runtime_config=self.runtime_config)
+        query_vector = self.embeddings.embed_query(query, runtime_config=self.runtime_config)
         hits = _dense_search(
             workspace_id=self.workspace_id,
             knowledge_base_ids=self.knowledge_base_ids,
@@ -97,7 +97,7 @@ class HybridRRFRetriever(BaseRetriever):
 
 
 class RerankCompressor(BaseDocumentCompressor):
-    provider: OpenAICompatibleProvider
+    reranker: OpenAICompatibleReranker
     top_n: int
     model: str
 
@@ -112,7 +112,7 @@ class RerankCompressor(BaseDocumentCompressor):
         hits = _documents_to_hits(documents)
         if not hits:
             return []
-        reranked = _rerank(self.provider, query=query, hits=hits, top_n=self.top_n, model=self.model)
+        reranked = _rerank(self.reranker, query=query, hits=hits, top_n=self.top_n, model=self.model)
         return [_hit_to_document(hit) for hit in reranked]
 
 
@@ -135,7 +135,8 @@ def build_rag_pipeline(
                 "config": config,
                 "runtime_config": runtime_config,
                 "settings": settings,
-                "provider": OpenAICompatibleProvider(),
+                "embeddings": OpenAICompatibleEmbeddings(),
+                "reranker": OpenAICompatibleReranker(),
                 "status": _base_status(query, knowledge_base_ids, config),
             }
         )
@@ -208,7 +209,7 @@ def _hybrid_retriever_runnable(state: dict) -> dict:
         db=state["db"],
         workspace_id=state["workspace_id"],
         knowledge_base_ids=state["knowledge_base_ids"],
-        provider=state["provider"],
+        embeddings=state["embeddings"],
         runtime_config=state.get("runtime_config"),
         limit=int(config.get("dense_top_k") or settings.rag_dense_top_k),
     )
@@ -244,7 +245,7 @@ def _rerank_runnable(state: dict) -> dict:
     if config.get("rerank_enabled", settings.rag_rerank_enabled) and final_hits:
         try:
             compressor = RerankCompressor(
-                provider=state["provider"],
+                reranker=state["reranker"],
                 top_n=int(config.get("rerank_top_n") or settings.rag_rerank_top_n),
                 model=settings.rag_rerank_model,
             )
@@ -474,9 +475,9 @@ def _rrf(dense_hits: list[dict], bm25_hits: list[dict], *, k: int) -> list[dict]
     return sorted(results, key=lambda item: item["score"], reverse=True)
 
 
-def _rerank(provider: OpenAICompatibleProvider, *, query: str, hits: list[dict], top_n: int, model: str) -> list[dict]:
+def _rerank(reranker: OpenAICompatibleReranker, *, query: str, hits: list[dict], top_n: int, model: str) -> list[dict]:
     documents = [hit["text"] for hit in hits]
-    ranked = provider.rerank(query, documents, top_n=min(top_n, len(documents)), model=model)
+    ranked = reranker.rerank(query, documents, top_n=min(top_n, len(documents)), model=model)
     output = []
     used = set()
     for item in ranked:

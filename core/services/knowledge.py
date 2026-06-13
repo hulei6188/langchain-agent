@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from core.config import get_settings
 from core.db.models import KnowledgeBase, KnowledgeChunk, KnowledgeDocument
-from core.integrations.llm import OpenAICompatibleProvider
+from core.integrations.model_clients import OpenAICompatibleEmbeddings
 from core.integrations import vector_store as vector_store_module
 from core.services.rag import run_rag_pipeline, _tokenize
 from core.services.uploads import DOC_TYPES, extract_document_text, sanitize_extracted_text
@@ -234,12 +234,12 @@ def index_document(
         # 自动分段默认采用原系统的 split_parent_child 机制
         chunks = split_parent_child(document.text, kb_id=kb.id, document_id=document.id)
         
-    provider = OpenAICompatibleProvider()
+    embeddings = OpenAICompatibleEmbeddings()
     settings = get_settings()
     for index, chunk_data in enumerate(chunks):
         chunk_text = chunk_data["text"]
         vector_id = chunk_data["chunk_id"]
-        vector = provider.embed(chunk_text, runtime_config=runtime_config)
+        vector = embeddings.embed_query(chunk_text, runtime_config=runtime_config)
         metadata = {
             "workspace_id": workspace_id,
             "knowledge_base_id": kb.id,

@@ -14,9 +14,11 @@ SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, futu
 
 def init_db() -> None:
     from core.db import models  # noqa: F401
+    from core.runtime.langgraph_persistence import configure_langgraph_persistence
     from core.services.bootstrap import ensure_default_models
 
     Base.metadata.create_all(bind=engine)
+    configure_langgraph_persistence(settings.database_url)
     db = SessionLocal()
     try:
         ensure_default_models(db)

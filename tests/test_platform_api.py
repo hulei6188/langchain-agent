@@ -173,7 +173,7 @@ def test_health_exposes_model_status(client, owner_token):
 
 def test_dashscope_key_alias_uses_dashscope_compatible_base(monkeypatch):
     from core.config import get_settings
-    from core.integrations.llm import DASHSCOPE_COMPATIBLE_BASE, OpenAICompatibleProvider
+    from core.integrations.model_clients import DASHSCOPE_COMPATIBLE_BASE, api_base, api_key
 
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.setenv("DASHSCOPE_API_KEY", "sk-dashscope-test")
@@ -181,10 +181,9 @@ def test_dashscope_key_alias_uses_dashscope_compatible_base(monkeypatch):
     get_settings.cache_clear()
     try:
         settings = get_settings()
-        provider = OpenAICompatibleProvider()
 
-        assert provider._api_key(settings) == "sk-dashscope-test"
-        assert provider._api_base(settings) == DASHSCOPE_COMPATIBLE_BASE
+        assert api_key(settings) == "sk-dashscope-test"
+        assert api_base(settings) == DASHSCOPE_COMPATIBLE_BASE
     finally:
         get_settings.cache_clear()
 

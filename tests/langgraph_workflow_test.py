@@ -7,6 +7,7 @@ from langchain_core.tools import StructuredTool
 pytest.importorskip("langgraph")
 
 from core.runtime.workflow import WorkflowRunner
+from core.runtime.graph_runtime import workflow_thread_config
 
 
 def _runner_with_fake_persistence(monkeypatch):
@@ -39,7 +40,8 @@ def test_langgraph_workflow_invokes_nodes_in_order(monkeypatch):
         user_message="hello",
         stream=False,
     )
-    final_state = graph.invoke({"context": _initial_context(), "steps": []})
+    initial_context = _initial_context()
+    final_state = graph.invoke({"context": initial_context, "steps": []}, config=workflow_thread_config(initial_context))
 
     assert final_state["context"]["trace"] == ["start", "knowledge", "answer"]
     assert [step["node_id"] for step in final_state["steps"]] == ["start", "knowledge", "answer"]
@@ -67,8 +69,10 @@ def test_langgraph_workflow_streams_custom_events(monkeypatch):
 
     custom_events = []
     final_state = None
+    initial_context = _initial_context()
     for part in graph.stream(
-        {"context": _initial_context(), "steps": []},
+        {"context": initial_context, "steps": []},
+        config=workflow_thread_config(initial_context),
         stream_mode=["custom", "values"],
         version="v2",
     ):
@@ -93,14 +97,14 @@ def test_tool_subgraph_loops_back_to_model_after_tool_call(monkeypatch):
     )
     runner = WorkflowRunner(db=SimpleNamespace())
     runner.provider = provider
-    runner._runtime_tools = lambda agent, node, context: [_tool()]
+    monkeypatch.setattr("core.runtime.tool_runtime.runtime_tools", lambda db, agent, context: [_tool()])
 
     def fake_tool(query: str = ""):
         executed.append({"query": query})
         return {"content": "tool result", "result_preview": "tool result", "latency_ms": 1}
 
     monkeypatch.setattr(
-        "core.runtime.workflow.build_langchain_tool",
+        "core.runtime.tool_runtime.build_langchain_tool",
         lambda *args, **kwargs: StructuredTool.from_function(fake_tool, name="test_tool", description="Test tool"),
     )
 
@@ -123,6 +127,7 @@ def test_tool_subgraph_loops_back_to_model_after_tool_call(monkeypatch):
 
 def _initial_context():
     return {
+        "session_id": 1,
         "profile_memory_used": {},
         "thinking_status": {},
         "search_status": {},

@@ -4,6 +4,7 @@ from langchain_core.tools import StructuredTool
 from core.config import get_settings
 from core.integrations import llm as llm_module
 from core.integrations.llm import OpenAICompatibleProvider
+from core.integrations.model_clients import OpenAICompatibleEmbeddings, OpenAICompatibleReranker
 
 
 class FakeChatOpenAI:
@@ -96,3 +97,32 @@ def test_provider_delegates_stream_to_chat_openai(monkeypatch):
     assert instance.kwargs["streaming"] is True
     assert instance.kwargs["extra_body"] == {"enable_thinking": False}
 
+
+def test_embedding_client_mock_mode_is_deterministic(monkeypatch):
+    monkeypatch.setenv("AGENTBASE_MOCK_LLM", "true")
+    get_settings.cache_clear()
+    try:
+        embeddings = OpenAICompatibleEmbeddings()
+        first = embeddings.embed_query("hello")
+        second = embeddings.embed_query("hello")
+    finally:
+        get_settings.cache_clear()
+
+    assert first == second
+    assert len(first) == 32
+    assert embeddings.last_mock is True
+
+
+def test_reranker_mock_mode_scores_query_terms(monkeypatch):
+    monkeypatch.setenv("AGENTBASE_MOCK_LLM", "true")
+    get_settings.cache_clear()
+    try:
+        ranked = OpenAICompatibleReranker().rerank(
+            "alpha",
+            ["beta text", "alpha text"],
+            top_n=1,
+        )
+    finally:
+        get_settings.cache_clear()
+
+    assert ranked == [{"index": 1, "relevance_score": 1.0}]

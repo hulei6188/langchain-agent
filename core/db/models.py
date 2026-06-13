@@ -424,16 +424,6 @@ class RunEvent(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
 
 
-class SessionMemory(Base):
-    __tablename__ = "session_memory"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    session_id: Mapped[int] = mapped_column(ForeignKey("sessions.id", ondelete="CASCADE"), unique=True, index=True)
-    summary: Mapped[str] = mapped_column(Text, default="")
-    message_count: Mapped[int] = mapped_column(Integer, default=0)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
-
-
 class Feedback(Base):
     __tablename__ = "feedback"
 

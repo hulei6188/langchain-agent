@@ -6,7 +6,8 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy.orm import Session
 
-from core.db.models import Feedback, Message, Run, RunEvent, Session as ChatSession, SessionMemory
+from core.db.models import Feedback, Message, Run, RunEvent, Session as ChatSession
+from core.services.memory import delete_session_memory_payload
 
 
 def cleanup_stale_session_runs(db: Session, session_id: int) -> None:
@@ -57,7 +58,7 @@ def delete_chat_session(db: Session, session: ChatSession) -> None:
         db.query(Feedback).filter(Feedback.message_id.in_(message_ids)).delete(synchronize_session=False)
     if run_ids:
         db.query(RunEvent).filter(RunEvent.run_id.in_(run_ids)).delete(synchronize_session=False)
-    db.query(SessionMemory).filter(SessionMemory.session_id == session.id).delete(synchronize_session=False)
+    delete_session_memory_payload(session_id=session.id)
     db.query(Message).filter(Message.session_id == session.id).delete(synchronize_session=False)
     db.query(Run).filter(Run.session_id == session.id).delete(synchronize_session=False)
     db.delete(session)

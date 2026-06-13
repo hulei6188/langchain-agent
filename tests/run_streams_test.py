@@ -1,15 +1,32 @@
-import queue
+from core.services.run_events import sse_event
+from core.services.run_streams import execute_workflow_stream, safe_stream_error, sanitize_public_error, stream_workflow_sse
 
-from core.services.run_streams import safe_stream_error, sanitize_public_error, workflow_sse_items
+
+class FakeDb:
+    def __init__(self):
+        self.closed = False
+
+    def get(self, model, row_id):
+        return None
+
+    def close(self):
+        self.closed = True
 
 
-def test_workflow_sse_items_stops_on_sentinel():
-    event_queue = queue.Queue()
-    event_queue.put("event: token\ndata: {}\n\n")
-    event_queue.put(None)
-    event_queue.put("event: token\ndata: {\"content\":\"late\"}\n\n")
+def test_execute_workflow_stream_yields_error_for_missing_agent():
+    events = list(execute_workflow_stream(FakeDb(), {"agent_id": 1, "session_id": 2}))
 
-    assert list(workflow_sse_items(event_queue)) == ["event: token\ndata: {}\n\n"]
+    assert events == [sse_event("error", {"message": "Agent not found"})]
+
+
+def test_stream_workflow_sse_closes_session(monkeypatch):
+    db = FakeDb()
+    monkeypatch.setattr("core.services.run_streams.SessionLocal", lambda: db)
+
+    events = list(stream_workflow_sse({"agent_id": 1, "session_id": 2}))
+
+    assert events == [sse_event("error", {"message": "Agent not found"})]
+    assert db.closed is True
 
 
 def test_safe_stream_error_redacts_public_secret_errors():

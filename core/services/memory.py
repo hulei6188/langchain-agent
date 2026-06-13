@@ -4,17 +4,14 @@ import json
 from datetime import datetime
 from dataclasses import dataclass
 
-from langgraph.store.memory import InMemoryStore
 from sqlalchemy.orm import Session
 
-from core.db.models import AgentMemoryProfile, SessionMemory
+from core.db.models import AgentMemoryProfile
+from core.runtime.langgraph_persistence import get_graph_memory_store
 
 
 MAX_MEMORY_SUMMARY_CHARS = 4000
 MAX_MEMORY_FACTS = 50
-
-graph_memory_store = InMemoryStore()
-
 
 @dataclass
 class GraphMemoryContext:
@@ -75,8 +72,20 @@ def get_memory_profile(
     )
 
 
-def get_session_memory(db: Session, *, session_id: int) -> SessionMemory | None:
-    return db.query(SessionMemory).filter(SessionMemory.session_id == session_id).first()
+def get_session_memory_payload(*, session_id: int) -> dict:
+    item = get_graph_memory_store().get(session_memory_namespace(session_id=session_id), "summary")
+    value = item.value if item is not None else {}
+    if not isinstance(value, dict):
+        value = {}
+    return {
+        "session_id": session_id,
+        "summary": str(value.get("summary") or ""),
+        "message_count": int(value.get("message_count") or 0),
+    }
+
+
+def delete_session_memory_payload(*, session_id: int) -> None:
+    get_graph_memory_store().delete(session_memory_namespace(session_id=session_id), "summary")
 
 
 def load_graph_memory_context(
@@ -87,7 +96,6 @@ def load_graph_memory_context(
     agent_id: int,
     session_id: int,
 ) -> GraphMemoryContext:
-    session_memory = get_session_memory(db, session_id=session_id)
     profile_memory = get_memory_profile(
         db,
         workspace_id=workspace_id,
@@ -95,17 +103,13 @@ def load_graph_memory_context(
         agent_id=agent_id,
     )
     profile_payload = memory_profile_payload(profile_memory, agent_id=agent_id)
-    session_payload = {
-        "session_id": session_id,
-        "summary": session_memory.summary if session_memory else "",
-        "message_count": session_memory.message_count if session_memory else 0,
-    }
-    graph_memory_store.put(
+    session_payload = get_session_memory_payload(session_id=session_id)
+    get_graph_memory_store().put(
         graph_memory_namespace(workspace_id=workspace_id, user_id=user_id, agent_id=agent_id),
         "profile",
         profile_payload,
     )
-    graph_memory_store.put(
+    get_graph_memory_store().put(
         session_memory_namespace(session_id=session_id),
         "summary",
         session_payload,
@@ -192,34 +196,30 @@ def format_profile_memory(profile: AgentMemoryProfile | None) -> str:
 
 
 def update_session_memory(
-    db: Session,
     *,
     session_id: int,
     user_message: str,
     answer: str,
     max_messages: int,
-) -> SessionMemory:
-    memory = get_session_memory(db, session_id=session_id)
-    if not memory:
-        memory = SessionMemory(session_id=session_id, summary="", message_count=0)
-        db.add(memory)
-    memory.message_count += 2
-    memory.summary = serialize_session_memory_turns(
-        memory.summary,
+) -> dict:
+    payload = get_session_memory_payload(session_id=session_id)
+    message_count = int(payload.get("message_count") or 0) + 2
+    summary = serialize_session_memory_turns(
+        str(payload.get("summary") or ""),
         user_message=user_message,
         answer=answer,
         max_messages=max_messages,
     )
-    graph_memory_store.put(
+    get_graph_memory_store().put(
         session_memory_namespace(session_id=session_id),
         "summary",
         {
             "session_id": session_id,
-            "summary": memory.summary,
-            "message_count": memory.message_count,
+            "summary": summary,
+            "message_count": message_count,
         },
     )
-    return memory
+    return {"session_id": session_id, "summary": summary, "message_count": message_count}
 
 
 def serialize_session_memory_turns(

@@ -3,11 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import socket
-import ssl
 import threading
-import urllib.error
-import urllib.request
 from collections.abc import Iterator, Sequence
 from typing import Any
 
@@ -27,12 +23,14 @@ from langchain_openai import ChatOpenAI
 from pydantic import PrivateAttr
 
 from core.config import get_settings
+from core.integrations.model_clients import (
+    DASHSCOPE_COMPATIBLE_BASE,
+    OPENAI_COMPATIBLE_DEFAULT_BASE,
+    api_base,
+    api_key,
+)
 
 logger = logging.getLogger(__name__)
-
-DASHSCOPE_COMPATIBLE_BASE = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-OPENAI_COMPATIBLE_DEFAULT_BASE = DASHSCOPE_COMPATIBLE_BASE
-
 
 class _CancelledError(Exception):
     """Raised when a chat request is cancelled mid-flight."""
@@ -40,16 +38,10 @@ class _CancelledError(Exception):
 
 
 class OpenAICompatibleProvider(BaseChatModel):
-    """LangChain chat model for OpenAI-compatible gateways.
-
-    Embedding and rerank helpers live on the same integration object because the
-    product lets a single provider configuration cover chat, embedding and RAG
-    reranking endpoints.
-    """
+    """LangChain chat model for OpenAI-compatible gateways."""
 
     _active_http_client: httpx.Client | None = PrivateAttr(default=None)
     _last_chat_mock: bool = PrivateAttr(default=False)
-    _last_embed_mock: bool = PrivateAttr(default=False)
 
     def __init__(self) -> None:
         super().__init__()
@@ -61,14 +53,6 @@ class OpenAICompatibleProvider(BaseChatModel):
     @last_chat_mock.setter
     def last_chat_mock(self, value: bool) -> None:
         self._last_chat_mock = bool(value)
-
-    @property
-    def last_embed_mock(self) -> bool:
-        return self._last_embed_mock
-
-    @last_embed_mock.setter
-    def last_embed_mock(self, value: bool) -> None:
-        self._last_embed_mock = bool(value)
 
     @property
     def _llm_type(self) -> str:
@@ -131,7 +115,7 @@ class OpenAICompatibleProvider(BaseChatModel):
         **kwargs: Any,
     ) -> AIMessage:
         settings = get_settings()
-        api_key = self._api_key(settings, runtime_config, purpose="chat")
+        chat_api_key = api_key(settings, runtime_config, purpose="chat")
         formatted_tools = self._openai_tools(tools)
         if settings.mock_llm:
             self.last_chat_mock = True
@@ -147,15 +131,15 @@ class OpenAICompatibleProvider(BaseChatModel):
                     tool_calls=[{"name": tool_names[0], "args": {"query": user_text[:120]}, "id": call_id}],
                 )
             return AIMessage(content=f"Mock answer for: {user_text}\n\nContext summary: {context_hint[:220]}")
-        if not api_key:
+        if not chat_api_key:
             raise RuntimeError("Chat model API key is not configured")
         self.last_chat_mock = False
 
-        api_base = self._api_base(settings, runtime_config, purpose="chat")
+        chat_api_base = api_base(settings, runtime_config, purpose="chat")
         chat_model = model or (runtime_config or {}).get("chat_model") or settings.openai_model
         llm, http_client = self._chat_openai(
-            api_base=api_base,
-            api_key=api_key,
+            api_base=chat_api_base,
+            api_key=chat_api_key,
             model=chat_model,
             temperature=temperature,
             thinking_enabled=thinking_enabled,
@@ -193,7 +177,7 @@ class OpenAICompatibleProvider(BaseChatModel):
         **kwargs: Any,
     ) -> Iterable[AIMessageChunk]:
         settings = get_settings()
-        api_key = self._api_key(settings, runtime_config, purpose="chat")
+        chat_api_key = api_key(settings, runtime_config, purpose="chat")
         formatted_tools = self._openai_tools(tools)
         if settings.mock_llm:
             self.last_chat_mock = True
@@ -216,15 +200,15 @@ class OpenAICompatibleProvider(BaseChatModel):
                     return
                 yield AIMessageChunk(content=content[index : index + 24])
             return
-        if not api_key:
+        if not chat_api_key:
             raise RuntimeError("Chat model API key is not configured")
         self.last_chat_mock = False
 
-        api_base = self._api_base(settings, runtime_config, purpose="chat")
+        chat_api_base = api_base(settings, runtime_config, purpose="chat")
         chat_model = model or (runtime_config or {}).get("chat_model") or settings.openai_model
         llm, http_client = self._chat_openai(
-            api_base=api_base,
-            api_key=api_key,
+            api_base=chat_api_base,
+            api_key=chat_api_key,
             model=chat_model,
             temperature=temperature,
             thinking_enabled=thinking_enabled,
@@ -248,65 +232,9 @@ class OpenAICompatibleProvider(BaseChatModel):
 
     def requires_reasoning_replay(self, *, model: str | None = None, runtime_config: dict | None = None) -> bool:
         settings = get_settings()
-        api_base = self._api_base(settings, runtime_config, purpose="chat")
+        chat_api_base = api_base(settings, runtime_config, purpose="chat")
         chat_model = model or (runtime_config or {}).get("chat_model") or settings.openai_model
-        return self._is_deepseek(api_base, chat_model)
-
-    def embed(self, text: str, *, runtime_config: dict | None = None) -> list[float]:
-        settings = get_settings()
-        api_key = self._api_key(settings, runtime_config, purpose="embedding")
-        if settings.mock_llm:
-            self.last_embed_mock = True
-            digest = hashlib.sha256(text.encode("utf-8")).digest()
-            return [((digest[i % len(digest)] / 255.0) * 2) - 1 for i in range(32)]
-        if not api_key:
-            raise RuntimeError("Embedding API key is not configured")
-        self.last_embed_mock = False
-
-        url = self._api_base(settings, runtime_config, purpose="embedding").rstrip("/") + "/embeddings"
-        payload = {"model": settings.openai_embedding_model, "input": text}
-        data = self._post_json(url, payload, api_key)
-        return data["data"][0]["embedding"]
-
-    def rerank(self, query: str, documents: list[str], *, top_n: int | None = None, model: str | None = None) -> list[dict]:
-        settings = get_settings()
-        api_key = self._api_key(settings, purpose="rerank")
-        if not documents:
-            return []
-        if settings.mock_llm:
-            query_terms = {term.lower() for term in query.split() if term.strip()}
-            ranked = []
-            for index, document in enumerate(documents):
-                text = document.lower()
-                score = sum(1 for term in query_terms if term in text) / max(len(query_terms), 1)
-                ranked.append({"index": index, "relevance_score": float(score)})
-            return sorted(ranked, key=lambda item: item["relevance_score"], reverse=True)[: top_n or len(documents)]
-        if not api_key:
-            raise RuntimeError("Rerank API key is not configured")
-
-        url = self._api_base(settings, purpose="rerank").rstrip("/") + "/rerank"
-        payload = {
-            "model": model or settings.rag_rerank_model,
-            "query": query,
-            "documents": documents,
-            **({"top_n": top_n} if top_n else {}),
-        }
-        data = self._post_json(url, payload, api_key)
-        results = data.get("results") or data.get("data") or []
-        normalized = []
-        for item in results:
-            if not isinstance(item, dict):
-                continue
-            index = item.get("index", item.get("document_index"))
-            if index is None:
-                document = item.get("document")
-                if document in documents:
-                    index = documents.index(document)
-            if index is None:
-                continue
-            score = item.get("relevance_score", item.get("score", item.get("rank_score", 0)))
-            normalized.append({"index": int(index), "relevance_score": float(score or 0)})
-        return normalized[: top_n or len(normalized)]
+        return self._is_deepseek(chat_api_base, chat_model)
 
     # ── private helpers ──────────────────────────────────────────
 
@@ -408,64 +336,6 @@ class OpenAICompatibleProvider(BaseChatModel):
                 }
             )
         return chunks
-
-    def _api_key(self, settings, runtime_config: dict | None = None, *, purpose: str = "chat") -> str | None:
-        if runtime_config and purpose == "chat" and runtime_config.get("api_key"):
-            return str(runtime_config["api_key"]).strip() or None
-        if purpose == "embedding" and settings.embedding_api_key:
-            return settings.embedding_api_key.strip() or None
-        if purpose == "rerank" and settings.rerank_api_key:
-            return settings.rerank_api_key.strip() or None
-        if purpose == "chat":
-            base = (settings.openai_api_base or "").rstrip("/")
-            if settings.dashscope_api_key and base == DASHSCOPE_COMPATIBLE_BASE.rstrip("/"):
-                return settings.dashscope_api_key.strip() or None
-            if settings.deepseek_api_key and (base == settings.deepseek_api_base.rstrip("/") or settings.openai_model == settings.deepseek_model):
-                return settings.deepseek_api_key.strip() or None
-            if settings.openai_api_key:
-                return settings.openai_api_key.strip() or None
-            return (settings.dashscope_api_key or settings.deepseek_api_key or "").strip() or None
-        return (settings.openai_api_key or settings.dashscope_api_key or "").strip() or None
-
-    def _api_base(self, settings, runtime_config: dict | None = None, *, purpose: str = "chat") -> str:
-        if runtime_config and purpose == "chat" and runtime_config.get("base_url"):
-            return str(runtime_config["base_url"]).strip()
-        if purpose == "embedding" and settings.embedding_api_base:
-            return settings.embedding_api_base
-        if purpose == "rerank" and settings.rerank_api_base:
-            return settings.rerank_api_base
-        if purpose == "chat" and settings.deepseek_api_key and (
-            (settings.openai_api_base or "").rstrip("/") == settings.deepseek_api_base.rstrip("/")
-            or settings.openai_model == settings.deepseek_model
-        ):
-            return settings.deepseek_api_base
-        base = (settings.openai_api_base or "").strip()
-        if settings.dashscope_api_key and (not base or base.rstrip("/") == OPENAI_COMPATIBLE_DEFAULT_BASE.rstrip("/")):
-            return DASHSCOPE_COMPATIBLE_BASE
-        return base or OPENAI_COMPATIBLE_DEFAULT_BASE
-
-    def _post_json(self, url: str, payload: dict, api_key: str, *, timeout_seconds: int = 60) -> dict:
-        request = urllib.request.Request(
-            url,
-            data=json.dumps(payload).encode("utf-8"),
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {api_key}",
-            },
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
-                return json.loads(response.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")[:800]
-            raise RuntimeError(
-                f"Model call failed: HTTP {exc.code}. Check OPENAI_API_BASE, API key and model name. {detail}"
-            ) from exc
-        except (urllib.error.URLError, TimeoutError, socket.timeout, ssl.SSLError, OSError) as exc:
-            raise RuntimeError(
-                f"Model call failed: cannot connect to model gateway {url}. Check OPENAI_API_BASE, proxy, certs and API key. Raw error: {exc}"
-            ) from exc
 
     @staticmethod
     def _is_openai_reasoning_model(api_base: str, model: str) -> bool:
