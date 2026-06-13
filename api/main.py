@@ -13,11 +13,12 @@ from collections.abc import Iterable
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from sqlalchemy import text
+from langchain_core.messages import HumanMessage
 from sqlalchemy.orm import Session
 
 from pydantic import BaseModel, Field
 from api.deps import get_current_membership, get_current_user, require_manager
+from api.routers.health import create_health_router
 from api.schemas import (
     AgentCreateRequest,
     AgentSkillsRequest,
@@ -77,13 +78,12 @@ from core.db.models import (
     WorkspaceInvite,
     WorkspaceMember,
 )
-from core.db.session import SessionLocal, engine, get_db, init_db
-from core.integrations.llm import DASHSCOPE_COMPATIBLE_BASE, OPENAI_COMPATIBLE_DEFAULT_BASE, OpenAICompatibleProvider, _CancelledError
-from core.integrations.vector_store import vector_store
+from core.db.session import SessionLocal, get_db, init_db
+from core.integrations.llm import OpenAICompatibleProvider, _CancelledError
 from core.runtime.cancel import cancel_run
-from core.runtime.workflow import WorkflowRunner, default_workflow
+from core.runtime.events import run_event_buffer
+from core.runtime.workflow import WorkflowRunner, default_workflow, workflow_graph_spec
 from core.security.auth import create_access_token, hash_password, verify_password
-from core.security.api_keys import secret_storage_ready
 from core.security.permissions import can_manage, normalize_role
 from core.services.agents import (
     agent_summary,
@@ -221,36 +221,6 @@ _validate_runtime_dependencies()
 app = FastAPI(title=settings.app_name, version=settings.app_version)
 logger = logging.getLogger(__name__)
 startup_error: str | None = None
-_health_probe_cache: dict[str, tuple[float, dict]] = {}
-
-# Per-run event log for SSE reconnection after page refresh.
-# Each entry is the raw SSE string (e.g. "event: token\ndata: {...}\n\n").
-_MAX_RUN_EVENTS = 2000
-_run_event_logs: dict[int, list[str]] = {}
-_run_event_lock = threading.Lock()
-
-
-def _append_run_event(run_id: int, sse_str: str) -> None:
-    with _run_event_lock:
-        if run_id not in _run_event_logs:
-            _run_event_logs[run_id] = []
-        log = _run_event_logs[run_id]
-        log.append(sse_str)
-        # Cap per-run event buffer to prevent unbounded memory growth
-        if len(log) > _MAX_RUN_EVENTS:
-            _run_event_logs[run_id] = log[-_MAX_RUN_EVENTS:]
-
-
-def _get_run_events_since(run_id: int, index: int) -> tuple[list[str], int]:
-    with _run_event_lock:
-        log = _run_event_logs.get(run_id, [])
-        events = log[index:]
-        return events, len(log)
-
-
-def _cleanup_run_events(run_id: int) -> None:
-    with _run_event_lock:
-        _run_event_logs.pop(run_id, None)
 
 app.add_middleware(
     CORSMiddleware,
@@ -259,6 +229,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.include_router(create_health_router(lambda: startup_error))
 
 
 @app.on_event("startup")
@@ -326,8 +297,7 @@ def sse_event_data(sse_str: str) -> dict:
 
 
 def _run_stream_snapshot(run_id: int) -> dict:
-    with _run_event_lock:
-        log = list(_run_event_logs.get(run_id, []))
+    log = run_event_buffer.snapshot(run_id)
 
     content = ""
     provisional_content = ""
@@ -392,146 +362,6 @@ def _error_code(message: str) -> str:
     if "api_key" in normalized or "secret" in normalized:
         return "secret_config_error"
     return "agent_runtime_error"
-
-
-@app.get("/api/health")
-def health():
-    provider = OpenAICompatibleProvider()
-    chat_api_key = provider._api_key(settings, purpose="chat")
-    embedding_api_key = provider._api_key(settings, purpose="embedding")
-    model_mock = settings.mock_llm
-    model_base = settings.openai_api_base
-    if settings.deepseek_api_key and ((settings.openai_api_base or "").rstrip("/") == settings.deepseek_api_base.rstrip("/") or settings.openai_model == settings.deepseek_model):
-        model_base = settings.deepseek_api_base
-    elif settings.dashscope_api_key and not settings.openai_api_key and model_base == OPENAI_COMPATIBLE_DEFAULT_BASE:
-        model_base = DASHSCOPE_COMPATIBLE_BASE
-    embedding_base = provider._api_base(settings, purpose="embedding")
-    embedding_mock = settings.mock_llm
-    embedding_model = (settings.openai_embedding_model or "").strip()
-    issues = []
-    database_status = {"configured": bool(settings.database_url), "available": False, "error": None}
-    try:
-        with engine.connect() as connection:
-            connection.execute(text("SELECT 1"))
-        database_status["available"] = True
-    except Exception as exc:
-        database_status["error"] = str(exc)[:240]
-        issues.append("Database is configured but not reachable.")
-    if not secret_storage_ready():
-        issues.append("API_KEY_ENCRYPTION_KEY is required before storing user model keys or tool secrets.")
-    if startup_error:
-        issues.append("Database initialization failed during startup.")
-    redis_status = redis_store.status()
-    vector_status = vector_store.status()
-    model_probe = _model_probe("chat", enabled=bool(settings.health_model_probe_enabled and not model_mock))
-    embedding_probe = _model_probe("embedding", enabled=bool(settings.health_model_probe_enabled and not embedding_mock and embedding_model))
-    if model_mock:
-        issues.append("Chat model is running in mock mode because AGENTBASE_MOCK_LLM is true.")
-    elif not chat_api_key:
-        issues.append("Chat model API key is not configured.")
-    elif not model_probe["ok"]:
-        issues.append("Chat model gateway probe failed.")
-    if embedding_mock:
-        issues.append("Embedding is running in mock mode because AGENTBASE_MOCK_LLM is true.")
-    elif not embedding_model or not embedding_api_key:
-        issues.append("Embedding is unavailable for real RAG because OPENAI_EMBEDDING_MODEL and a provider API key are required.")
-    elif not embedding_probe["ok"]:
-        issues.append("Embedding gateway probe failed.")
-    if redis_status["required"] and not redis_status["available"]:
-        issues.append("Redis is configured for RAG cache/job state but is not reachable.")
-    if vector_status["fallback"]:
-        issues.append("Milvus is configured but unavailable; vector operations are using the in-memory fallback.")
-    return {
-        "status": "degraded" if issues else "ok",
-        "version": app.version,
-        "issues": issues,
-        "dependencies": {
-            "database": database_status,
-            "startup": {"ok": startup_error is None, "error": startup_error},
-            "cors": {"origins": settings.cors_origin_list},
-            "redis": redis_status,
-            "vector_store": vector_status,
-            "model": {
-                "provider": "openai-compatible",
-                "model": settings.deepseek_model if model_base.rstrip("/") == settings.deepseek_api_base.rstrip("/") else settings.openai_model,
-                "base_url": model_base,
-                "mock": model_mock,
-                "configured": bool(chat_api_key),
-                "available": bool((not model_mock) and bool(chat_api_key)),
-                "probe": model_probe,
-            },
-            "embedding": {
-                "provider": "openai-compatible",
-                "model": embedding_model,
-                "base_url": embedding_base,
-                "mock": embedding_mock,
-                "configured": bool(embedding_model and embedding_api_key),
-                "available": bool(embedding_model and embedding_api_key and not embedding_mock),
-                "reason": None if bool(embedding_model and embedding_api_key and not embedding_mock) else _runtime_unavailable_reason(embedding_probe, vector_status),
-                "probe": embedding_probe,
-            },
-            "web_search": web_search_status(),
-            "secret_storage": {
-                "configured": secret_storage_ready(),
-            },
-        },
-    }
-
-
-def _model_probe(purpose: str, *, enabled: bool) -> dict:
-    if not enabled:
-        return {"enabled": False, "ok": False, "error": None, "cached": False}
-    now = time.monotonic()
-    cached = _health_probe_cache.get(purpose)
-    if cached and now - cached[0] < 300:
-        return {**cached[1], "cached": True}
-    provider = OpenAICompatibleProvider()
-    try:
-        if purpose == "chat":
-            settings_obj = get_settings()
-            use_deepseek = bool(
-                settings_obj.deepseek_api_key
-                and (
-                    (settings_obj.openai_api_base or "").rstrip("/") == settings_obj.deepseek_api_base.rstrip("/")
-                    or settings_obj.openai_model == settings_obj.deepseek_model
-                )
-            )
-            model = settings_obj.deepseek_model if use_deepseek else settings_obj.openai_model
-            payload = {
-                "model": model,
-                "messages": [{"role": "user", "content": "health"}],
-                "temperature": 0,
-                "stream": False,
-            }
-            provider._post_json(
-                provider._api_base(settings_obj, purpose="chat").rstrip("/") + "/chat/completions",
-                payload,
-                provider._api_key(settings_obj, purpose="chat") or "",
-                timeout_seconds=8,
-            )
-        elif purpose == "embedding":
-            settings_obj = get_settings()
-            provider._post_json(
-                provider._api_base(settings_obj, purpose="embedding").rstrip("/") + "/embeddings",
-                {"model": settings_obj.openai_embedding_model, "input": "health"},
-                provider._api_key(settings_obj, purpose="embedding") or "",
-                timeout_seconds=8,
-            )
-        else:
-            raise ValueError("Unsupported health probe")
-        result = {"enabled": True, "ok": True, "error": None, "cached": False}
-    except Exception as exc:
-        result = {"enabled": True, "ok": False, "error": _sanitize_public_error(str(exc)), "cached": False}
-    _health_probe_cache[purpose] = (now, result)
-    return result
-
-
-def _runtime_unavailable_reason(probe: dict, vector_status: dict) -> str:
-    if not vector_status.get("available"):
-        return "vector_store_unavailable"
-    if probe.get("enabled") and not probe.get("ok"):
-        return "provider_probe_failed"
-    return "mock_or_vector_unavailable"
 
 
 def _sanitize_public_error(message: str) -> str:
@@ -1686,7 +1516,8 @@ def get_workflow(agent_id: int, membership: WorkspaceMember = Depends(get_curren
     agent = require_workspace_agent(db, membership.workspace_id, agent_id)
     require_agent_read_access(agent, membership)
     workflow = db.query(WorkflowDefinition).filter(WorkflowDefinition.agent_id == agent.id).first()
-    return {"nodes": workflow.nodes if workflow else default_workflow()}
+    graph = workflow_graph_spec(workflow.nodes if workflow else default_workflow())
+    return {"graph": graph, "nodes": graph["nodes"]}
 
 
 @app.patch("/api/agents/{agent_id}/workflow")
@@ -1701,7 +1532,8 @@ def update_workflow(agent_id: int, request: WorkflowUpdateRequest, membership: W
     else:
         workflow.nodes = request.nodes
     db.commit()
-    return {"nodes": workflow.nodes}
+    graph = workflow_graph_spec(workflow.nodes)
+    return {"graph": graph, "nodes": graph["nodes"]}
 
 
 @app.post("/api/agents/{agent_id}/chat/stream")
@@ -1873,7 +1705,7 @@ def _execute_workflow_thread(db: Session, params: dict, q: queue.Queue) -> None:
         sse_str = sse_event(event_name, data or {})
         q.put(sse_str)
         if _tracked_run_id is not None:
-            _append_run_event(_tracked_run_id, sse_str)
+            run_event_buffer.append(_tracked_run_id, sse_str)
     answer = ""
     provisional_answer = ""
     sources: list[dict] = []
@@ -2149,7 +1981,7 @@ def stream_run_events(run_id: int, since: int = Query(0), membership: WorkspaceM
                 db_sess.close()
         # Phase 1: replay buffered events
         while True:
-            events, total = _get_run_events_since(run_id, emitted)
+            events, total = run_event_buffer.since(run_id, emitted)
             for sse_str in events:
                 if sse_event_name(sse_str) in {"done", "cancelled", "error"}:
                     terminal_seen = True
@@ -2756,8 +2588,8 @@ def _auto_title_session(db: Session, chat_session: ChatSession, user_message: st
             f"用户：{user_message[:200]}\n"
             f"助手：{answer[:300]}"
         )
-        response = provider.chat(
-            messages=[{"role": "user", "content": title_prompt}],
+        response = provider.invoke(
+            [HumanMessage(content=title_prompt)],
             temperature=0.3,
             runtime_config=runtime_config,
         )

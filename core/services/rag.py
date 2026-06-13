@@ -5,8 +5,13 @@ import json
 import math
 import re
 from dataclasses import dataclass
-from typing import Iterable
+from typing import Iterable, Sequence
 
+from langchain_core.documents import BaseDocumentCompressor
+from langchain_core.documents import Document
+from langchain_core.retrievers import BaseRetriever
+from langchain_core.runnables import RunnableLambda
+from pydantic import ConfigDict
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
@@ -29,12 +34,122 @@ _BM25_CACHE_LOCK = threading.Lock()
 
 
 @dataclass
-class RagResult:
+class RagPipelineResult:
+    documents: list[Document]
     sources: list[dict]
     status: dict
 
 
-def retrieve(
+class DenseRetriever(BaseRetriever):
+    db: Session
+    workspace_id: int
+    knowledge_base_ids: list[int]
+    provider: OpenAICompatibleProvider
+    runtime_config: dict | None = None
+    limit: int
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    def _get_relevant_documents(self, query: str, *, run_manager) -> list[Document]:
+        query_vector = self.provider.embed(query, runtime_config=self.runtime_config)
+        hits = _dense_search(
+            workspace_id=self.workspace_id,
+            knowledge_base_ids=self.knowledge_base_ids,
+            query_vector=query_vector,
+            limit=self.limit,
+        )
+        return [_hit_to_document(hit) for hit in hits]
+
+
+class BM25Retriever(BaseRetriever):
+    db: Session
+    workspace_id: int
+    knowledge_base_ids: list[int]
+    limit: int
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    def _get_relevant_documents(self, query: str, *, run_manager) -> list[Document]:
+        hits = _bm25_search(
+            self.db,
+            workspace_id=self.workspace_id,
+            knowledge_base_ids=self.knowledge_base_ids,
+            query=query,
+            limit=self.limit,
+        )
+        return [_hit_to_document(hit) for hit in hits]
+
+
+class HybridRRFRetriever(BaseRetriever):
+    dense_retriever: DenseRetriever
+    bm25_retriever: BM25Retriever
+    rrf_k: int
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    def retrieve_with_components(self, query: str) -> dict[str, list[dict]]:
+        dense_hits = _documents_to_hits(self.dense_retriever.invoke(query))
+        bm25_hits = _documents_to_hits(self.bm25_retriever.invoke(query))
+        fused_hits = _rrf(dense_hits, bm25_hits, k=self.rrf_k)
+        return {"dense_hits": dense_hits, "bm25_hits": bm25_hits, "fused_hits": fused_hits}
+
+    def _get_relevant_documents(self, query: str, *, run_manager) -> list[Document]:
+        return [_hit_to_document(hit) for hit in self.retrieve_with_components(query)["fused_hits"]]
+
+
+class RerankCompressor(BaseDocumentCompressor):
+    provider: OpenAICompatibleProvider
+    top_n: int
+    model: str
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    def compress_documents(
+        self,
+        documents: Sequence[Document],
+        query: str,
+        callbacks=None,
+    ) -> Sequence[Document]:
+        hits = _documents_to_hits(documents)
+        if not hits:
+            return []
+        reranked = _rerank(self.provider, query=query, hits=hits, top_n=self.top_n, model=self.model)
+        return [_hit_to_document(hit) for hit in reranked]
+
+
+def build_rag_pipeline(
+    db: Session,
+    *,
+    workspace_id: int,
+    knowledge_base_ids: list[int],
+    config: dict,
+    runtime_config: dict | None = None,
+) :
+    settings = get_settings()
+    return (
+        RunnableLambda(
+            lambda query: {
+                "db": db,
+                "workspace_id": workspace_id,
+                "knowledge_base_ids": knowledge_base_ids,
+                "query": query,
+                "config": config,
+                "runtime_config": runtime_config,
+                "settings": settings,
+                "provider": OpenAICompatibleProvider(),
+                "status": _base_status(query, knowledge_base_ids, config),
+            }
+        )
+        | RunnableLambda(_cache_lookup_runnable)
+        | RunnableLambda(_hybrid_retriever_runnable)
+        | RunnableLambda(_rerank_runnable)
+        | RunnableLambda(_source_documents_runnable)
+        | RunnableLambda(_cache_store_runnable)
+        | RunnableLambda(_pipeline_result_runnable)
+    )
+
+
+def run_rag_pipeline(
     db: Session,
     *,
     workspace_id: int,
@@ -42,78 +157,161 @@ def retrieve(
     query: str,
     config: dict,
     runtime_config: dict | None = None,
-) -> RagResult:
+) -> RagPipelineResult:
+    return build_rag_pipeline(
+        db,
+        workspace_id=workspace_id,
+        knowledge_base_ids=knowledge_base_ids,
+        config=config,
+        runtime_config=runtime_config,
+    ).invoke(query)
+
+
+def _cache_lookup_runnable(state: dict) -> dict:
     settings = get_settings()
-    started_status = _base_status(query, knowledge_base_ids, config)
+    knowledge_base_ids = state["knowledge_base_ids"]
+    config = state["config"]
+    started_status = state["status"]
     if not knowledge_base_ids:
         started_status.update({"reason": "no_knowledge_base", "no_evidence": True})
-        return RagResult([], started_status)
+        return {**state, "skip_retrieval": True, "sources": [], "documents": [], "status": started_status}
 
-    cache_key = _cache_key(db, workspace_id=workspace_id, knowledge_base_ids=knowledge_base_ids, query=query, config=config)
+    cache_key = _cache_key(
+        state["db"],
+        workspace_id=state["workspace_id"],
+        knowledge_base_ids=knowledge_base_ids,
+        query=state["query"],
+        config=config,
+    )
+    state["cache_key"] = cache_key
     if config.get("cache_enabled", True):
         cached = redis_store.get_json(cache_key)
         if cached.hit and cached.value:
             status = cached.value.get("status", {})
             status.update({"cache": {"enabled": True, "hit": True, "backend": cached.backend}})
-            return RagResult(cached.value.get("sources", []), status)
+            documents = [
+                Document(
+                    page_content=source.get("snippet") or "",
+                    metadata={key: value for key, value in source.items() if key != "snippet"},
+                )
+                for source in cached.value.get("sources", [])
+            ]
+            return {**state, "skip_retrieval": True, "sources": cached.value.get("sources", []), "documents": documents, "status": status}
+    return state
 
-    provider = OpenAICompatibleProvider()
-    query_vector = provider.embed(query, runtime_config=runtime_config)
-    dense_hits = _dense_search(
-        workspace_id=workspace_id,
-        knowledge_base_ids=knowledge_base_ids,
-        query_vector=query_vector,
+
+def _hybrid_retriever_runnable(state: dict) -> dict:
+    if state.get("skip_retrieval"):
+        return state
+    settings = state["settings"]
+    config = state["config"]
+    dense_retriever = DenseRetriever(
+        db=state["db"],
+        workspace_id=state["workspace_id"],
+        knowledge_base_ids=state["knowledge_base_ids"],
+        provider=state["provider"],
+        runtime_config=state.get("runtime_config"),
         limit=int(config.get("dense_top_k") or settings.rag_dense_top_k),
     )
-    bm25_hits = _bm25_search(
-        db,
-        workspace_id=workspace_id,
-        knowledge_base_ids=knowledge_base_ids,
-        query=query,
+    bm25_retriever = BM25Retriever(
+        db=state["db"],
+        workspace_id=state["workspace_id"],
+        knowledge_base_ids=state["knowledge_base_ids"],
         limit=int(config.get("bm25_top_k") or settings.rag_bm25_top_k),
     )
-    fused_hits = _rrf(dense_hits, bm25_hits, k=int(config.get("rrf_k") or settings.rag_rrf_k))
+    hybrid_retriever = HybridRRFRetriever(
+        dense_retriever=dense_retriever,
+        bm25_retriever=bm25_retriever,
+        rrf_k=int(config.get("rrf_k") or settings.rag_rrf_k),
+    )
+    retrieved = hybrid_retriever.retrieve_with_components(state["query"])
+    return {
+        **state,
+        "dense_hits": retrieved["dense_hits"],
+        "bm25_hits": retrieved["bm25_hits"],
+        "fused_hits": retrieved["fused_hits"],
+        "final_hits": retrieved["fused_hits"],
+    }
+
+
+def _rerank_runnable(state: dict) -> dict:
+    if state.get("skip_retrieval"):
+        return state
+    settings = state["settings"]
+    config = state["config"]
     rerank_applied = False
     rerank_error = ""
-    final_hits = fused_hits
-    if config.get("rerank_enabled", settings.rag_rerank_enabled) and fused_hits:
+    final_hits = state.get("final_hits", [])
+    if config.get("rerank_enabled", settings.rag_rerank_enabled) and final_hits:
         try:
-            final_hits = _rerank(
-                provider,
-                query=query,
-                hits=fused_hits,
+            compressor = RerankCompressor(
+                provider=state["provider"],
                 top_n=int(config.get("rerank_top_n") or settings.rag_rerank_top_n),
                 model=settings.rag_rerank_model,
+            )
+            final_hits = _documents_to_hits(
+                compressor.compress_documents(
+                    [_hit_to_document(hit) for hit in final_hits],
+                    query=state["query"],
+                )
             )
             rerank_applied = True
         except Exception as exc:
             rerank_error = str(exc)[:240]
-            final_hits = fused_hits
+    return {**state, "final_hits": final_hits, "rerank_applied": rerank_applied, "rerank_error": rerank_error}
 
+
+def _source_documents_runnable(state: dict) -> dict:
+    if state.get("skip_retrieval"):
+        return state
+    settings = state["settings"]
+    config = state["config"]
+    final_hits = state.get("final_hits", [])
     top_k = int(config.get("top_k") or settings.rag_top_k)
     sources = [_source_payload(hit) for hit in final_hits[:top_k]]
-    no_evidence = not _has_evidence(sources, query)
-    status = started_status | {
+    documents = [
+        Document(
+            page_content=hit.get("text") or "",
+            metadata={**(hit.get("metadata") or {}), "source": _source_payload(hit)},
+        )
+        for hit in final_hits[:top_k]
+    ]
+    no_evidence = not _has_evidence(sources, state["query"])
+    status = state["status"] | {
         "reason": "available" if sources else "no_match",
         "matched_chunks": len(final_hits),
         "sources_emitted": bool(sources),
-        "dense": {"top_k": int(config.get("dense_top_k") or settings.rag_dense_top_k), "matched": len(dense_hits)},
-        "bm25": {"top_k": int(config.get("bm25_top_k") or settings.rag_bm25_top_k), "matched": len(bm25_hits)},
-        "rrf": {"k": int(config.get("rrf_k") or settings.rag_rrf_k), "matched": len(fused_hits)},
+        "dense": {"top_k": int(config.get("dense_top_k") or settings.rag_dense_top_k), "matched": len(state.get("dense_hits", []))},
+        "bm25": {"top_k": int(config.get("bm25_top_k") or settings.rag_bm25_top_k), "matched": len(state.get("bm25_hits", []))},
+        "rrf": {"k": int(config.get("rrf_k") or settings.rag_rrf_k), "matched": len(state.get("fused_hits", []))},
         "rerank": {
             "enabled": bool(config.get("rerank_enabled", settings.rag_rerank_enabled)),
-            "applied": rerank_applied,
+            "applied": bool(state.get("rerank_applied")),
             "model": settings.rag_rerank_model,
-            "error": rerank_error or None,
+            "error": state.get("rerank_error") or None,
         },
         "cache": {"enabled": bool(config.get("cache_enabled", settings.rag_cache_enabled)), "hit": False, "backend": "redis" if redis_store.available else "none"},
         "no_evidence": no_evidence,
         "refuse_when_no_evidence": bool(config.get("refuse_when_no_evidence", settings.rag_refuse_when_no_evidence)),
         "rag_model": "environment",
     }
-    if config.get("cache_enabled", True):
-        redis_store.set_json(cache_key, {"sources": sources, "status": status}, settings.rag_cache_ttl_seconds)
-    return RagResult(sources, status)
+    return {**state, "sources": sources, "documents": documents, "status": status}
+
+
+def _cache_store_runnable(state: dict) -> dict:
+    if state.get("skip_retrieval"):
+        return state
+    if state["config"].get("cache_enabled", True):
+        redis_store.set_json(state["cache_key"], {"sources": state.get("sources", []), "status": state["status"]}, state["settings"].rag_cache_ttl_seconds)
+    return state
+
+
+def _pipeline_result_runnable(state: dict) -> RagPipelineResult:
+    return RagPipelineResult(
+        documents=state.get("documents", []),
+        sources=state.get("sources", []),
+        status=state["status"],
+    )
 
 
 def _base_status(query: str, knowledge_base_ids: list[int], config: dict) -> dict:
@@ -293,6 +491,34 @@ def _rerank(provider: OpenAICompatibleProvider, *, query: str, hits: list[dict],
         output.append(hit)
     output.extend(hit for index, hit in enumerate(hits) if index not in used)
     return output
+
+
+def _hit_to_document(hit: dict) -> Document:
+    return Document(
+        page_content=hit.get("text") or "",
+        metadata={**(hit.get("metadata") or {}), "_rag_hit": hit},
+    )
+
+
+def _documents_to_hits(documents: Sequence[Document]) -> list[dict]:
+    hits = []
+    for document in documents:
+        hit = document.metadata.get("_rag_hit")
+        if isinstance(hit, dict):
+            hits.append({**hit})
+            continue
+        metadata = {key: value for key, value in document.metadata.items() if key != "_rag_hit"}
+        hits.append(
+            {
+                "id": metadata.get("chunk_id") or metadata.get("source_id") or hashlib.sha256(document.page_content.encode("utf-8")).hexdigest()[:16],
+                "vector_id": metadata.get("vector_id") or "",
+                "text": document.page_content,
+                "score": float(metadata.get("score") or 0),
+                "retrieval_channel": metadata.get("retrieval_channel") or "document",
+                "metadata": metadata,
+            }
+        )
+    return hits
 
 
 def _source_payload(hit: dict) -> dict:

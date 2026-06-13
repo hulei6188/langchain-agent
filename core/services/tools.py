@@ -21,6 +21,9 @@ import hashlib
 import requests
 import re
 
+from langchain_core.tools import StructuredTool
+from langchain_core.utils.function_calling import convert_to_openai_tool
+from pydantic import Field, create_model
 from sqlalchemy import or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -659,7 +662,7 @@ def discover_mcp_tools(payload: dict, *, existing_tool: Tool | None = None) -> l
 def test_tool(tool: Tool, *, input_data: dict | None = None, body=None) -> dict:
     started = time.monotonic()
     try:
-        output = execute_tool(tool, {"input": input_data or {}, "body": body})
+        output = build_langchain_tool(tool, body=body).invoke(input_data or {})
         return {
             "ok": True,
             "tool_id": tool.id,
@@ -684,7 +687,40 @@ def test_tool(tool: Tool, *, input_data: dict | None = None, body=None) -> dict:
         }
 
 
-def execute_tool(tool: Tool, context: dict) -> dict:
+def build_langchain_tool(
+    tool: Tool,
+    *,
+    session_key: str = "",
+    agent_workdir: str | None = None,
+    body=None,
+) -> StructuredTool:
+    if not tool.enabled:
+        raise ValueError("Tool is disabled")
+
+    def invoke_tool(**kwargs):
+        return _invoke_tool_backend(
+            tool,
+            {
+                "input": kwargs,
+                "body": body,
+                "_session_key": session_key,
+                "_agent_workdir": agent_workdir,
+            },
+        )
+
+    return StructuredTool.from_function(
+        func=invoke_tool,
+        name=tool.name,
+        description=_tool_description(tool),
+        args_schema=_tool_args_model(tool),
+    )
+
+
+def openai_schema_for_langchain_tool(tool: StructuredTool) -> dict:
+    return convert_to_openai_tool(tool)
+
+
+def _invoke_tool_backend(tool: Tool, context: dict) -> dict:
     if not tool.enabled:
         raise ValueError("Tool is disabled")
     if tool.type == "builtin":
@@ -696,6 +732,53 @@ def execute_tool(tool: Tool, context: dict) -> dict:
     if tool.type == "mcp":
         return _execute_mcp_tool(tool, context)
     raise ValueError("Unsupported tool type")
+
+
+def _tool_description(tool: Tool) -> str:
+    if tool.type == "builtin_search":
+        return (
+            "Search the public web for current, time-sensitive, or external factual information. "
+            "Use this only when the answer depends on recent events, live data, URLs, news, prices, weather, "
+            "or facts that may have changed. Do not use it for arithmetic, simple reasoning, translation, "
+            "summarizing the current conversation, or stable common knowledge."
+        )
+    return tool.description or tool.label or tool.name
+
+
+def _tool_args_model(tool: Tool):
+    schema = _tool_parameters_schema(tool)
+    properties = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+    required = set(schema.get("required") if isinstance(schema.get("required"), list) else [])
+    fields = {}
+    for name, spec in properties.items():
+        if not isinstance(name, str) or not name:
+            continue
+        spec = spec if isinstance(spec, dict) else {}
+        field_type = _json_schema_python_type(spec)
+        default = ... if name in required else None
+        fields[name] = (
+            field_type,
+            Field(default, description=str(spec.get("description") or name)),
+        )
+    if not fields:
+        fields["input"] = (str, Field(..., description="传递给工具的输入文本"))
+    model_name = f"{re.sub(r'[^0-9A-Za-z_]+', '_', tool.name).strip('_') or 'Tool'}Input"
+    return create_model(model_name, **fields)
+
+
+def _json_schema_python_type(spec: dict):
+    field_type = spec.get("type")
+    if field_type == "integer":
+        return int
+    if field_type == "number":
+        return float
+    if field_type == "boolean":
+        return bool
+    if field_type == "array":
+        return list
+    if field_type == "object":
+        return dict
+    return str
 
 
 def tool_call_event(tool: Tool, result: dict, *, status: str = "success", input_preview: str = "", error_code: str | None = None) -> dict:
@@ -1685,26 +1768,6 @@ def _tool_name_exists(db: Session, *, workspace_id: int | None, user_id: int | N
         .first()
         is not None
     )
-
-
-def tool_schema_for_llm(tool: Tool) -> dict:
-    """Convert a Tool into an OpenAI function-calling JSON Schema."""
-    description = tool.description or tool.label
-    if tool.type == "builtin_search":
-        description = (
-            "Search the public web for current, time-sensitive, or external factual information. "
-            "Use this only when the answer depends on recent events, live data, URLs, news, prices, weather, "
-            "or facts that may have changed. Do not use it for arithmetic, simple reasoning, translation, "
-            "summarizing the current conversation, or stable common knowledge."
-        )
-    return {
-        "type": "function",
-        "function": {
-            "name": tool.name,
-            "description": description,
-            "parameters": _tool_parameters_schema(tool),
-        },
-    }
 
 
 def _tool_parameters_schema(tool: Tool) -> dict:

@@ -9,8 +9,22 @@ import ssl
 import threading
 import urllib.error
 import urllib.request
-from collections.abc import Iterable
-from dataclasses import dataclass, field
+from collections.abc import Iterable, Iterator, Sequence
+from typing import Any
+
+from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.messages import (
+    AIMessage,
+    AIMessageChunk,
+    BaseMessage,
+    HumanMessage,
+    SystemMessage,
+    convert_to_openai_messages,
+)
+from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
+from langchain_core.runnables import Runnable
+from langchain_core.utils.function_calling import convert_to_openai_tool
+from pydantic import PrivateAttr
 
 from core.config import get_settings
 
@@ -25,27 +39,73 @@ class _CancelledError(Exception):
     pass
 
 
-@dataclass
-class ChatResponse:
-    content: str | None = None
-    reasoning_content: str = ""
-    tool_calls: list[dict] | None = None
+class OpenAICompatibleProvider(BaseChatModel):
+    """LangChain chat model for OpenAI-compatible gateways.
 
+    Embedding and rerank helpers live on the same integration object because the
+    product lets a single provider configuration cover chat, embedding and RAG
+    reranking endpoints.
+    """
 
-@dataclass
-class ChatStreamChunk:
-    type: str
-    content: str = ""
-    tool_calls: list[dict] | None = None
-
-
-class OpenAICompatibleProvider:
-    """Small OpenAI-compatible client with function calling support."""
+    _active_response: http.client.HTTPResponse | None = PrivateAttr(default=None)
+    _last_chat_mock: bool = PrivateAttr(default=False)
+    _last_embed_mock: bool = PrivateAttr(default=False)
 
     def __init__(self) -> None:
-        self.last_chat_mock = False
-        self.last_embed_mock = False
-        self._active_response: http.client.HTTPResponse | None = None
+        super().__init__()
+
+    @property
+    def last_chat_mock(self) -> bool:
+        return self._last_chat_mock
+
+    @last_chat_mock.setter
+    def last_chat_mock(self, value: bool) -> None:
+        self._last_chat_mock = bool(value)
+
+    @property
+    def last_embed_mock(self) -> bool:
+        return self._last_embed_mock
+
+    @last_embed_mock.setter
+    def last_embed_mock(self, value: bool) -> None:
+        self._last_embed_mock = bool(value)
+
+    @property
+    def _llm_type(self) -> str:
+        return "openai-compatible"
+
+    def bind_tools(
+        self,
+        tools: Sequence[dict[str, Any] | Any],
+        *,
+        tool_choice: str | None = None,
+        **kwargs: Any,
+    ) -> Runnable:
+        formatted_tools = [tool if isinstance(tool, dict) else convert_to_openai_tool(tool) for tool in tools]
+        bind_kwargs: dict[str, Any] = {"tools": formatted_tools, **kwargs}
+        if tool_choice:
+            bind_kwargs["tool_choice"] = tool_choice
+        return self.bind(**bind_kwargs)
+
+    def _generate(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager=None,
+        **kwargs: Any,
+    ) -> ChatResult:
+        message = self._chat_message(messages, stop=stop, **kwargs)
+        return ChatResult(generations=[ChatGeneration(message=message)])
+
+    def _stream(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager=None,
+        **kwargs: Any,
+    ) -> Iterator[ChatGenerationChunk]:
+        for chunk in self._chat_message_chunks(messages, stop=stop, **kwargs):
+            yield ChatGenerationChunk(message=chunk)
 
     def cancel_active_request(self) -> None:
         """Close the active streaming HTTP connection to unblock reads.
@@ -70,35 +130,35 @@ class OpenAICompatibleProvider:
             except Exception:
                 pass
 
-    def chat(
+    def _chat_message(
         self,
-        messages: list[dict],
+        messages: list[BaseMessage],
         *,
+        stop: list[str] | None = None,
         model: str | None = None,
         temperature: float = 0.4,
         runtime_config: dict | None = None,
         tools: list[dict] | None = None,
         thinking_enabled: bool | None = None,
         cancel_event: threading.Event | None = None,
-    ) -> ChatResponse:
-        if cancel_event is not None and cancel_event.is_set():
-            raise _CancelledError()
+        **kwargs: Any,
+    ) -> AIMessage:
         settings = get_settings()
         api_key = self._api_key(settings, runtime_config, purpose="chat")
         if settings.mock_llm:
             self.last_chat_mock = True
-            user_text = self._content_text(next((m["content"] for m in reversed(messages) if m.get("role") == "user"), ""))
-            context_hint = " ".join(self._content_text(m.get("content", ""))[:160] for m in messages if m.get("role") == "system")
+            if cancel_event is not None and cancel_event.is_set():
+                raise _CancelledError()
+            user_text = self._content_text(next((m.content for m in reversed(messages) if isinstance(m, HumanMessage)), ""))
+            context_hint = " ".join(self._content_text(m.content)[:160] for m in messages if isinstance(m, SystemMessage))
             if tools:
                 tool_names = [t.get("function", {}).get("name", "") for t in tools]
-                return ChatResponse(
-                    tool_calls=[{
-                        "id": f"mock_call_{hashlib.md5(user_text.encode()).hexdigest()[:8]}",
-                        "type": "function",
-                        "function": {"name": tool_names[0], "arguments": json.dumps({"query": user_text[:120]}, ensure_ascii=False)},
-                    }]
+                call_id = f"mock_call_{hashlib.md5(user_text.encode()).hexdigest()[:8]}"
+                return AIMessage(
+                    content="",
+                    tool_calls=[{"name": tool_names[0], "args": {"query": user_text[:120]}, "id": call_id}],
                 )
-            return ChatResponse(content=f"Mock answer for: {user_text}\n\nContext summary: {context_hint[:220]}")
+            return AIMessage(content=f"Mock answer for: {user_text}\n\nContext summary: {context_hint[:220]}")
         if not api_key:
             raise RuntimeError("Chat model API key is not configured")
         self.last_chat_mock = False
@@ -108,70 +168,56 @@ class OpenAICompatibleProvider:
         url = api_base.rstrip("/") + "/chat/completions"
         payload: dict = {
             "model": chat_model,
-            "messages": messages,
+            "messages": self._openai_messages(messages),
             "temperature": temperature,
             "stream": False,
         }
+        if stop:
+            payload["stop"] = stop
         self._apply_thinking_payload(payload, api_base=api_base, model=chat_model, thinking_enabled=thinking_enabled)
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
+        if kwargs.get("tool_choice"):
+            payload["tool_choice"] = kwargs["tool_choice"]
         data = self._post_json(url, payload, api_key)
-        return self._parse_chat_response(data)
+        return self._parse_ai_message(data)
 
-    def chat_stream(
+    def _chat_message_chunks(
         self,
-        messages: list[dict],
+        messages: list[BaseMessage],
         *,
-        model: str | None = None,
-        temperature: float = 0.4,
-        runtime_config: dict | None = None,
-        tools: list[dict] | None = None,
-        thinking_enabled: bool | None = None,
-    ) -> Iterable[str]:
-        for chunk in self.chat_stream_events(
-            messages,
-            model=model,
-            temperature=temperature,
-            runtime_config=runtime_config,
-            tools=tools,
-            thinking_enabled=thinking_enabled,
-        ):
-            if chunk.type == "content":
-                yield chunk.content
-            elif chunk.type == "tool_calls":
-                yield json.dumps({"tool_calls": chunk.tool_calls or []}, ensure_ascii=False)
-
-    def chat_stream_events(
-        self,
-        messages: list[dict],
-        *,
+        stop: list[str] | None = None,
         model: str | None = None,
         temperature: float = 0.4,
         runtime_config: dict | None = None,
         tools: list[dict] | None = None,
         thinking_enabled: bool | None = None,
         cancel_event: threading.Event | None = None,
-    ) -> Iterable[ChatStreamChunk]:
+        **kwargs: Any,
+    ) -> Iterable[AIMessageChunk]:
         settings = get_settings()
         api_key = self._api_key(settings, runtime_config, purpose="chat")
         if settings.mock_llm:
             self.last_chat_mock = True
-            text = self.chat(
+            message = self._chat_message(
                 messages,
                 model=model,
                 temperature=temperature,
                 runtime_config=runtime_config,
                 tools=tools,
                 thinking_enabled=thinking_enabled,
+                cancel_event=cancel_event,
+                **kwargs,
             )
-            if text.tool_calls:
-                yield ChatStreamChunk(type="tool_calls", tool_calls=text.tool_calls)
+            if message.tool_calls:
+                yield AIMessageChunk(content="", tool_call_chunks=self._langchain_tool_call_chunks(message.tool_calls))
                 return
-            for index in range(0, len(text.content or ""), 24):
+            content = self._content_text(message.content)
+            for index in range(0, len(content), 24):
                 if cancel_event is not None and cancel_event.is_set():
                     return
-                yield ChatStreamChunk(type="content", content=(text.content or "")[index : index + 24])
+                yield AIMessageChunk(content=content[index : index + 24])
             return
         if not api_key:
             raise RuntimeError("Chat model API key is not configured")
@@ -182,17 +228,18 @@ class OpenAICompatibleProvider:
         url = api_base.rstrip("/") + "/chat/completions"
         payload: dict = {
             "model": chat_model,
-            "messages": messages,
+            "messages": self._openai_messages(messages),
             "temperature": temperature,
             "stream": True,
         }
+        if stop:
+            payload["stop"] = stop
         self._apply_thinking_payload(payload, api_base=api_base, model=chat_model, thinking_enabled=thinking_enabled)
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
-        # When tools are present, stream normally — the caller (agent loop)
-        # uses non-streaming chat() for tool-call decisions, so stream is
-        # only for the final answer phase.
+        if kwargs.get("tool_choice"):
+            payload["tool_choice"] = kwargs["tool_choice"]
         yield from self._post_json_stream(url, payload, api_key, cancel_event=cancel_event)
 
     def requires_reasoning_replay(self, *, model: str | None = None, runtime_config: dict | None = None) -> bool:
@@ -259,16 +306,86 @@ class OpenAICompatibleProvider:
 
     # ── private helpers ──────────────────────────────────────────
 
-    def _parse_chat_response(self, data: dict) -> ChatResponse:
+    def _openai_messages(self, messages: list[BaseMessage]) -> list[dict[str, Any]]:
+        payload_messages = convert_to_openai_messages(messages)
+        if not isinstance(payload_messages, list):
+            payload_messages = [payload_messages]
+        for source, payload in zip(messages, payload_messages):
+            if isinstance(source, AIMessage):
+                reasoning = (
+                    source.additional_kwargs.get("reasoning_content")
+                    or source.additional_kwargs.get("reasoning")
+                    or source.additional_kwargs.get("thinking")
+                )
+                if reasoning:
+                    payload["reasoning_content"] = str(reasoning)
+        return payload_messages
+
+    def _parse_ai_message(self, data: dict) -> AIMessage:
         choice = (data.get("choices") or [{}])[0]
         message = choice.get("message") or {}
-        content = message.get("content")
+        content = message.get("content") or ""
         reasoning_content = str(message.get("reasoning_content") or message.get("reasoning") or message.get("thinking") or "")
-        raw_tool_calls = message.get("tool_calls") or []
-        if raw_tool_calls:
-            tool_calls = self._normalize_tool_calls(raw_tool_calls)
-            return ChatResponse(content=content or None, reasoning_content=reasoning_content, tool_calls=tool_calls)
-        return ChatResponse(content=str(content) if content else "", reasoning_content=reasoning_content)
+        tool_calls = self._openai_tool_calls_to_langchain(message.get("tool_calls") or [])
+        additional_kwargs: dict[str, Any] = {}
+        if reasoning_content:
+            additional_kwargs["reasoning_content"] = reasoning_content
+        return AIMessage(
+            content=str(content) if content is not None else "",
+            additional_kwargs=additional_kwargs,
+            tool_calls=tool_calls,
+            response_metadata={"raw": data},
+        )
+
+    def _openai_tool_calls_to_langchain(self, raw_tool_calls: list[dict]) -> list[dict[str, Any]]:
+        tool_calls: list[dict[str, Any]] = []
+        for index, tc in enumerate(self._normalize_tool_calls(raw_tool_calls)):
+            func = tc.get("function") or {}
+            raw_args = func.get("arguments") or "{}"
+            try:
+                args = json.loads(raw_args) if isinstance(raw_args, str) else dict(raw_args)
+                if not isinstance(args, dict):
+                    args = {"input": args}
+            except (TypeError, ValueError, json.JSONDecodeError):
+                args = {"input": str(raw_args)}
+            tool_calls.append(
+                {
+                    "name": func.get("name") or "",
+                    "args": args,
+                    "id": tc.get("id") or f"call_{index}",
+                }
+            )
+        return tool_calls
+
+    def _langchain_tool_call_chunks(self, tool_calls: list[dict]) -> list[dict[str, Any]]:
+        chunks = []
+        for index, call in enumerate(tool_calls):
+            chunks.append(
+                {
+                    "name": call.get("name") or "",
+                    "args": json.dumps(call.get("args") or {}, ensure_ascii=False),
+                    "id": call.get("id"),
+                    "index": index,
+                }
+            )
+        return chunks
+
+    def _openai_tool_call_chunks(self, raw_tool_calls: list[dict]) -> list[dict[str, Any]]:
+        chunks = []
+        for index, call in enumerate(raw_tool_calls):
+            func = call.get("function") or {}
+            args = func.get("arguments")
+            if args is None and call.get("args") is not None:
+                args = json.dumps(call.get("args") or {}, ensure_ascii=False)
+            chunks.append(
+                {
+                    "name": func.get("name") or call.get("name"),
+                    "args": args or "",
+                    "id": call.get("id"),
+                    "index": call.get("index", index),
+                }
+            )
+        return chunks
 
     def _api_key(self, settings, runtime_config: dict | None = None, *, purpose: str = "chat") -> str | None:
         if runtime_config and purpose == "chat" and runtime_config.get("api_key"):
@@ -375,7 +492,7 @@ class OpenAICompatibleProvider:
         normalized_base = (api_base or "").lower()
         return "api.deepseek.com" in normalized_base
 
-    def _post_json_stream(self, url: str, payload: dict, api_key: str, *, cancel_event: threading.Event | None = None) -> Iterable[ChatStreamChunk]:
+    def _post_json_stream(self, url: str, payload: dict, api_key: str, *, cancel_event: threading.Event | None = None) -> Iterable[AIMessageChunk]:
         request = urllib.request.Request(
             url,
             data=json.dumps(payload).encode("utf-8"),
@@ -420,16 +537,13 @@ class OpenAICompatibleProvider:
                 f"Model call failed: cannot connect to model gateway {url}. Check OPENAI_API_BASE, proxy, certs and API key. Raw error: {exc}"
             ) from exc
 
-    def _stream_delta(self, data: dict) -> str:
-        return "".join(chunk.content for chunk in self._stream_chunks(data) if chunk.type == "content")
-
-    def _stream_chunks(self, data: dict) -> list[ChatStreamChunk]:
+    def _stream_chunks(self, data: dict) -> list[AIMessageChunk]:
         choices = data.get("choices") or []
         if not choices:
             return []
         first = choices[0] or {}
         delta = first.get("delta") or {}
-        chunks: list[ChatStreamChunk] = []
+        chunks: list[AIMessageChunk] = []
         if isinstance(delta, dict):
             chunks.extend(self._typed_value_chunks(delta.get("reasoning_content"), "reasoning"))
             chunks.extend(self._typed_value_chunks(delta.get("reasoning"), "reasoning"))
@@ -437,7 +551,7 @@ class OpenAICompatibleProvider:
             chunks.extend(self._typed_value_chunks(delta.get("content"), "content"))
             chunks.extend(self._typed_value_chunks(delta.get("text"), "content"))
             if delta.get("tool_calls"):
-                chunks.append(ChatStreamChunk(type="tool_call_delta", tool_calls=delta.get("tool_calls") or []))
+                chunks.append(AIMessageChunk(content="", tool_call_chunks=self._openai_tool_call_chunks(delta.get("tool_calls") or [])))
             if chunks:
                 return chunks
         message = first.get("message") or {}
@@ -447,11 +561,11 @@ class OpenAICompatibleProvider:
             chunks.extend(self._typed_value_chunks(message.get("thinking"), "reasoning"))
             chunks.extend(self._typed_value_chunks(message.get("content"), "content"))
             if message.get("tool_calls"):
-                chunks.append(ChatStreamChunk(type="tool_calls", tool_calls=self._normalize_tool_calls(message.get("tool_calls") or [])))
+                chunks.append(AIMessageChunk(content="", tool_call_chunks=self._openai_tool_call_chunks(self._normalize_tool_calls(message.get("tool_calls") or []))))
             if chunks:
                 return chunks
         text = first.get("text")
-        return [ChatStreamChunk(type="content", content=text)] if isinstance(text, str) else []
+        return [AIMessageChunk(content=text)] if isinstance(text, str) else []
 
     def _normalize_tool_calls(self, raw_tool_calls: list[dict]) -> list[dict]:
         tool_calls = []
@@ -467,16 +581,18 @@ class OpenAICompatibleProvider:
             })
         return tool_calls
 
-    def _typed_value_chunks(self, value, default_type: str) -> list[ChatStreamChunk]:
+    def _typed_value_chunks(self, value, default_type: str) -> list[AIMessageChunk]:
         if not value:
             return []
         if isinstance(value, str):
-            return [ChatStreamChunk(type=default_type, content=value)]
+            if default_type == "reasoning":
+                return [AIMessageChunk(content="", additional_kwargs={"reasoning_content": value})]
+            return [AIMessageChunk(content=value)]
         if isinstance(value, list):
-            chunks: list[ChatStreamChunk] = []
+            chunks: list[AIMessageChunk] = []
             for item in value:
                 if isinstance(item, str):
-                    chunks.append(ChatStreamChunk(type=default_type, content=item))
+                    chunks.extend(self._typed_value_chunks(item, default_type))
                     continue
                 if not isinstance(item, dict):
                     continue
@@ -485,7 +601,7 @@ class OpenAICompatibleProvider:
                     continue
                 item_type = str(item.get("type") or default_type).lower()
                 chunk_type = "reasoning" if ("reason" in item_type or "thinking" in item_type) else default_type
-                chunks.append(ChatStreamChunk(type=chunk_type, content=text))
+                chunks.extend(self._typed_value_chunks(text, chunk_type))
             return chunks
         return []
 

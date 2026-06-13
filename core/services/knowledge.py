@@ -11,7 +11,7 @@ from core.config import get_settings
 from core.db.models import KnowledgeBase, KnowledgeChunk, KnowledgeDocument
 from core.integrations.llm import OpenAICompatibleProvider
 from core.integrations import vector_store as vector_store_module
-from core.services.rag import retrieve, _tokenize
+from core.services.rag import run_rag_pipeline, _tokenize
 from core.services.uploads import DOC_TYPES, extract_document_text, sanitize_extracted_text
 
 
@@ -361,7 +361,7 @@ def search_knowledge(
     top_k: int = 4,
     runtime_config: dict | None = None,
 ) -> list[dict]:
-    result = retrieve(
+    result = run_rag_pipeline(
         db,
         workspace_id=workspace_id,
         knowledge_base_ids=knowledge_base_ids,

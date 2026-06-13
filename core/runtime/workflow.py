@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 import json
 import logging
@@ -8,7 +7,13 @@ import re
 import threading
 import time
 from types import SimpleNamespace
+from typing import Any, Callable, TypedDict
 
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.tools import StructuredTool
+from langgraph.config import get_stream_writer
+from langgraph.graph import END, START, StateGraph
+from langgraph.prebuilt import ToolNode
 from sqlalchemy.orm import Session
 
 from core.db.models import (
@@ -22,7 +27,6 @@ from core.db.models import (
     Run,
     RunStep,
     Session as ChatSession,
-    SessionMemory,
     Skill,
     SkillKnowledgeBase,
     SkillTool,
@@ -31,14 +35,14 @@ from core.db.models import (
     Upload,
     WorkflowDefinition,
 )
-from core.integrations.llm import ChatResponse, OpenAICompatibleProvider, _CancelledError
+from core.integrations.llm import OpenAICompatibleProvider, _CancelledError
 from core.runtime.cancel import register_run, unregister_run, is_cancelled
 from core.services.agents import get_agent_detail, normalize_memory, normalize_rag, normalize_tool_policy, normalize_workdir
-from core.services.rag import retrieve
-from core.services.memory import format_profile_memory, get_memory_profile, memory_used_event
+from core.services.rag import run_rag_pipeline
+from core.services.memory import load_graph_memory_context, update_session_memory
 from core.services.models import resolve_agent_model
 from core.services.skills import normalize_activation_mode
-from core.services.tools import execute_tool, tool_call_event, tool_schema_for_llm
+from core.services.tools import build_langchain_tool, openai_schema_for_langchain_tool, tool_call_event
 from core.services.uploads import get_workspace_uploads
 from core.services.user_models import (
     resolve_user_model_config,
@@ -58,6 +62,45 @@ DSML_TOOL_CALL_START_MARKER = "<||DSML||tool_calls>"
 DSML_STREAM_GUARD_TAIL_CHARS = len(DSML_TOOL_CALL_START_MARKER) - 1
 
 logger = logging.getLogger(__name__)
+
+
+class WorkflowGraphState(TypedDict):
+    context: dict[str, Any]
+    steps: list[dict[str, Any]]
+
+
+class WorkflowGraphSpec(TypedDict):
+    nodes: list[dict[str, Any]]
+    edges: list[dict[str, Any]]
+    checkpoint: dict[str, Any]
+
+
+class ToolGraphState(TypedDict, total=False):
+    context: dict[str, Any]
+    node: dict[str, Any]
+    messages: list[BaseMessage]
+    bound_tools: list[Tool]
+    langchain_tools: list[Any]
+    tool_schemas: list[dict[str, Any]]
+    allowed_names: set[str]
+    total_calls: int
+    tools_used: list[str]
+    events: list[dict[str, Any]]
+    web_sources: list[dict[str, Any]]
+    search_status: dict[str, Any]
+    round_index: int
+    tool_loop_start: float
+    max_tool_calls: int
+    max_tool_wall_time: int
+    pending_calls: list[dict[str, Any]]
+    latest_response: AIMessage | None
+    loaded_skill_this_round: bool
+    output: dict[str, Any]
+
+
+class ToolNodeInvokeState(TypedDict):
+    messages: list[BaseMessage]
+
 
 _DSML_TOOL_CALLS_BLOCK_RE = re.compile(
     r"<\|\|DSML\|\|tool_calls\s*>(?P<body>.*?)</\|\|DSML\|\|tool_calls\s*>",
@@ -177,19 +220,80 @@ def _dsml_tool_names(tool_calls: list[dict]) -> list[str]:
     return [str((call.get("function") or {}).get("name") or "") for call in tool_calls if (call.get("function") or {}).get("name")]
 
 
-def _coerce_dsml_tool_calls(response: ChatResponse, *, stage: str) -> ChatResponse:
-    if not response.content or response.tool_calls or not contains_dsml_tool_calls(response.content):
+def _message_content_text(message: BaseMessage) -> str:
+    content = message.content
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, dict) and item.get("type") == "text":
+                parts.append(str(item.get("text", "")))
+        return "".join(parts)
+    return str(content or "")
+
+
+def _message_reasoning_content(message: BaseMessage) -> str:
+    return str(
+        getattr(message, "additional_kwargs", {}).get("reasoning_content")
+        or getattr(message, "additional_kwargs", {}).get("reasoning")
+        or getattr(message, "additional_kwargs", {}).get("thinking")
+        or ""
+    )
+
+
+def _coerce_dsml_tool_calls(response: AIMessage, *, stage: str) -> AIMessage:
+    content = _message_content_text(response)
+    if not content or response.tool_calls or not contains_dsml_tool_calls(content):
         return response
     logger.warning("Detected DSML tool call markup in assistant content during %s", stage)
-    dsml_calls = parse_dsml_tool_calls(response.content)
+    dsml_calls = parse_dsml_tool_calls(content)
     if dsml_calls:
         logger.warning("Parsed DSML tool calls during %s: tools=%s", stage, _dsml_tool_names(dsml_calls))
-        response.tool_calls = dsml_calls
-        response.content = ""
-        return response
-    logger.warning("Failed to parse DSML tool calls during %s; full content:\n%s", stage, response.content)
-    response.content = DSML_TOOL_MARKUP_ERROR
-    return response
+        return AIMessage(
+            content="",
+            additional_kwargs=response.additional_kwargs,
+            tool_calls=_openai_tool_calls_to_langchain(dsml_calls),
+        )
+    logger.warning("Failed to parse DSML tool calls during %s; full content:\n%s", stage, content)
+    return AIMessage(content=DSML_TOOL_MARKUP_ERROR, additional_kwargs=response.additional_kwargs)
+
+
+def _openai_tool_calls_to_langchain(tool_calls: list[dict] | None) -> list[dict[str, Any]]:
+    converted: list[dict[str, Any]] = []
+    for index, call in enumerate(tool_calls or []):
+        function = call.get("function") or {}
+        raw_args = function.get("arguments") or "{}"
+        try:
+            args = json.loads(raw_args) if isinstance(raw_args, str) else dict(raw_args)
+            if not isinstance(args, dict):
+                args = {"input": args}
+        except (TypeError, ValueError, json.JSONDecodeError):
+            args = {"input": str(raw_args)}
+        converted.append(
+            {
+                "name": function.get("name") or "",
+                "args": args,
+                "id": call.get("id") or f"call_{index}",
+            }
+        )
+    return converted
+
+
+def _langchain_tool_calls_to_openai(tool_calls: list[dict] | None) -> list[dict[str, Any]]:
+    normalized = []
+    for index, call in enumerate(tool_calls or []):
+        normalized.append(
+            {
+                "id": call.get("id") or f"call_{index}",
+                "type": "function",
+                "function": {
+                    "name": call.get("name") or "",
+                    "arguments": json.dumps(call.get("args") or {}, ensure_ascii=False),
+                },
+            }
+        )
+    return normalized
 
 
 def _buffer_stream_content(
@@ -229,6 +333,33 @@ def default_workflow() -> list[dict]:
         {"id": "llm", "type": "LLM", "name": "生成候选回答", "config": {}},
         {"id": "answer", "type": "Answer", "name": "输出最终回答", "config": {}},
     ]
+
+
+def workflow_graph_spec(definition: list[dict] | dict | None) -> WorkflowGraphSpec:
+    if isinstance(definition, dict) and isinstance(definition.get("nodes"), list):
+        nodes = [dict(node) for node in definition.get("nodes") or []]
+        raw_edges = definition.get("edges") if isinstance(definition.get("edges"), list) else []
+        checkpoint = dict(definition.get("checkpoint") or {})
+    else:
+        nodes = [dict(node) for node in (definition or default_workflow())]
+        raw_edges = []
+        checkpoint = {}
+    if not nodes:
+        nodes = [dict(node) for node in default_workflow()]
+    edges = []
+    node_ids = [str(node.get("id") or f"node_{index}") for index, node in enumerate(nodes)]
+    valid_ids = set(node_ids)
+    for edge in raw_edges:
+        source = str(edge.get("source") or "")
+        target = str(edge.get("target") or "")
+        if source in valid_ids and target in valid_ids:
+            edges.append({**edge, "source": source, "target": target})
+    if not edges:
+        edges = [
+            {"source": node_ids[index], "target": node_ids[index + 1], "type": "linear"}
+            for index in range(len(node_ids) - 1)
+        ]
+    return {"nodes": nodes, "edges": edges, "checkpoint": checkpoint}
 
 
 class WorkflowRunner:
@@ -277,15 +408,13 @@ class WorkflowRunner:
         self.db.commit()
         self.db.refresh(run)
 
-        memory = self._session_memory(chat_session.id)
-        profile_memory = get_memory_profile(
+        memory_context = load_graph_memory_context(
             self.db,
             workspace_id=agent.workspace_id,
             user_id=chat_session.user_id,
             agent_id=agent.id,
+            session_id=chat_session.id,
         )
-        profile_memory_text = format_profile_memory(profile_memory)
-        profile_memory_event = memory_used_event(profile_memory, session_summary_used=bool(memory and memory.summary))
         context: dict = {
             "session_id": chat_session.id,
             "run_id": run.id,
@@ -297,9 +426,9 @@ class WorkflowRunner:
             "current_message_id": None,
             "variables": self._merge_variables(runtime.settings.get("variables", []), variables or {}),
             "agent_workdir": runtime.settings.get("workdir"),
-            "memory_summary": memory.summary if memory else "",
-            "profile_memory": profile_memory_text,
-            "profile_memory_used": profile_memory_event,
+            "memory_summary": memory_context.session_summary,
+            "profile_memory": memory_context.profile_text,
+            "profile_memory_used": memory_context.profile_event,
             "memory_enabled": memory_config.get("enabled", False),
             "rag_enabled": effective_rag_enabled,
             **({"rag_enabled_request": rag_enabled} if rag_enabled is not None else {}),
@@ -314,46 +443,24 @@ class WorkflowRunner:
             "uploads": uploads,
         }
         self._apply_runtime_skills(runtime, context, chat_session)
-        steps: list[dict] = []
-        for node in runtime.workflow:
-            output = self._execute_node(runtime, node, context)
-            if not steps:
-                output.setdefault("events", []).append({"event": "memory_used", "data": profile_memory_event})
-                output.setdefault("events", []).append({"event": "thinking_status", "data": thinking_status})
-                output.setdefault("events", []).append({"event": "search_status", "data": self._search_status_event(search_status)})
-                output.setdefault("events", []).append({"event": "skill_selection", "data": context.get("skill_selection", {})})
-            events = output.pop("events", [])
-            context.update(output)
-            step = RunStep(
-                run_id=run.id,
-                node_id=node["id"],
-                node_type=node["type"],
-                status="succeeded",
-                input={"input": user_message},
-                output=output,
-            )
-            self.db.add(step)
-            self.db.flush()
-            self.db.commit()
-            self.db.refresh(step)
-            steps.append(
-                {
-                    "id": step.id,
-                    "node_id": step.node_id,
-                    "node_type": step.node_type,
-                    "status": step.status,
-                    "output": output,
-                    "events": events,
-                }
-            )
+        graph = self._build_langgraph_workflow(
+            runtime=runtime,
+            run=run,
+            user_message=user_message,
+            stream=False,
+        )
+        final_state = graph.invoke({"context": context, "steps": []})
+        context = final_state["context"]
+        steps = final_state["steps"]
 
         final_answer = strip_or_block_leaked_tool_markup(context.get("answer") or context.get("draft") or "当前智能体没有生成回答。")
         if context.get("memory_enabled"):
-            self._update_session_memory(
-                chat_session.id,
-                user_message,
-                final_answer,
-                int(runtime.settings.get("memory", {}).get("max_messages", 12)),
+            update_session_memory(
+                self.db,
+                session_id=chat_session.id,
+                user_message=user_message,
+                answer=final_answer,
+                max_messages=int(runtime.settings.get("memory", {}).get("max_messages", 12)),
             )
         run.status = "succeeded"
         run.completed_at = datetime.utcnow()
@@ -395,46 +502,37 @@ class WorkflowRunner:
 
         steps: list[dict] = []
         try:
-            for node in runtime.workflow:
+            graph = self._build_langgraph_workflow(
+                runtime=runtime,
+                run=run,
+                user_message=user_message,
+                stream=True,
+            )
+            final_state: WorkflowGraphState | None = None
+            for part in graph.stream(
+                {"context": context, "steps": []},
+                stream_mode=["custom", "values"],
+                version="v2",
+            ):
                 self._raise_if_cancelled()
+                if part["type"] == "custom":
+                    yield part["data"]
+                    continue
+                if part["type"] == "values":
+                    final_state = part["data"]
 
-                try:
-                    if node["type"] == "LLM":
-                        output = yield from self._stream_llm_node(runtime, node, context)
-                    elif node["type"] == "Tool":
-                        output = yield from self._stream_tool_node(runtime, node, context)
-                    else:
-                        output = self._execute_node(runtime, node, context)
-                except _CancelledError:
-                    raise
-
-                self._raise_if_cancelled()
-                if not steps:
-                    output.setdefault("events", []).append({"event": "memory_used", "data": context.get("profile_memory_used", {})})
-                    output.setdefault("events", []).append({"event": "thinking_status", "data": context.get("thinking_status", {})})
-                    output.setdefault("events", []).append({"event": "search_status", "data": self._search_status_event(context.get("search_status", {}))})
-                    output.setdefault("events", []).append({"event": "skill_selection", "data": context.get("skill_selection", {})})
-                events = output.pop("events", [])
-                context.update(output)
-                step = self._persist_step(run, node, user_message, output)
-                step_payload = {
-                    "id": step.id,
-                    "node_id": step.node_id,
-                    "node_type": step.node_type,
-                    "status": step.status,
-                    "output": output,
-                    "events": events,
-                }
-                steps.append(step_payload)
-                yield {"event": "step", "step": step_payload}
+            if final_state is not None:
+                context = final_state["context"]
+                steps = final_state["steps"]
 
             final_answer = strip_or_block_leaked_tool_markup(context.get("answer") or context.get("draft") or "当前智能体没有生成回答。")
             if context.get("memory_enabled"):
-                self._update_session_memory(
-                    chat_session.id,
-                    user_message,
-                    final_answer,
-                    int(runtime.settings.get("memory", {}).get("max_messages", 12)),
+                update_session_memory(
+                    self.db,
+                    session_id=chat_session.id,
+                    user_message=user_message,
+                    answer=final_answer,
+                    max_messages=int(runtime.settings.get("memory", {}).get("max_messages", 12)),
                 )
             run.status = "succeeded"
             run.completed_at = datetime.utcnow()
@@ -486,15 +584,13 @@ class WorkflowRunner:
         self.db.commit()
         self.db.refresh(run)
 
-        memory = self._session_memory(chat_session.id)
-        profile_memory = get_memory_profile(
+        memory_context = load_graph_memory_context(
             self.db,
             workspace_id=agent.workspace_id,
             user_id=chat_session.user_id,
             agent_id=agent.id,
+            session_id=chat_session.id,
         )
-        profile_memory_text = format_profile_memory(profile_memory)
-        profile_memory_event = memory_used_event(profile_memory, session_summary_used=bool(memory and memory.summary))
         context: dict = {
             "session_id": chat_session.id,
             "run_id": run.id,
@@ -506,9 +602,9 @@ class WorkflowRunner:
             "current_message_id": current_message_id,
             "variables": self._merge_variables(runtime.settings.get("variables", []), variables or {}),
             "agent_workdir": runtime.settings.get("workdir"),
-            "memory_summary": memory.summary if memory else "",
-            "profile_memory": profile_memory_text,
-            "profile_memory_used": profile_memory_event,
+            "memory_summary": memory_context.session_summary,
+            "profile_memory": memory_context.profile_text,
+            "profile_memory_used": memory_context.profile_event,
             "memory_enabled": memory_config.get("enabled", False),
             "rag_enabled": effective_rag_enabled,
             **({"rag_enabled_request": rag_enabled} if rag_enabled is not None else {}),
@@ -524,6 +620,131 @@ class WorkflowRunner:
         }
         self._apply_runtime_skills(runtime, context, chat_session)
         return runtime, run, context
+
+    def _build_langgraph_workflow(
+        self,
+        *,
+        runtime,
+        run: Run,
+        user_message: str,
+        stream: bool,
+    ):
+        spec = workflow_graph_spec(getattr(runtime, "workflow", None))
+        workflow = spec["nodes"]
+        graph_builder = StateGraph(WorkflowGraphState)
+        used_names: set[str] = set()
+        graph_names: dict[str, str] = {}
+
+        for index, node in enumerate(workflow):
+            graph_node_name = self._langgraph_node_name(node, index, used_names)
+            node_id = str(node.get("id") or f"node_{index}")
+            graph_names[node_id] = graph_node_name
+            graph_builder.add_node(
+                graph_node_name,
+                self._langgraph_node(runtime, run, user_message, node, stream=stream),
+            )
+
+        edge_sources = {edge["source"] for edge in spec["edges"]}
+        edge_targets = {edge["target"] for edge in spec["edges"]}
+        start_node_ids = [node_id for node_id in graph_names if node_id not in edge_targets] or [next(iter(graph_names))]
+        for node_id in start_node_ids:
+            graph_builder.add_edge(START, graph_names[node_id])
+        for edge in spec["edges"]:
+            source = graph_names.get(edge["source"])
+            target = graph_names.get(edge["target"])
+            if source and target:
+                graph_builder.add_edge(source, target)
+        terminal_node_ids = [node_id for node_id in graph_names if node_id not in edge_sources] or [next(reversed(graph_names))]
+        for node_id in terminal_node_ids:
+            graph_builder.add_edge(graph_names[node_id], END)
+        return graph_builder.compile()
+
+    def _langgraph_node(
+        self,
+        runtime,
+        run: Run,
+        user_message: str,
+        node: dict,
+        *,
+        stream: bool,
+    ) -> Callable[[WorkflowGraphState], dict[str, Any]]:
+        def execute(state: WorkflowGraphState) -> dict[str, Any]:
+            self._raise_if_cancelled()
+            context = state["context"]
+            steps = list(state.get("steps") or [])
+
+            if stream and node["type"] == "LLM":
+                writer = get_stream_writer()
+                output = self._consume_streaming_node(
+                    self._stream_llm_node(runtime, node, context),
+                    writer,
+                )
+            elif stream and node["type"] == "Tool":
+                writer = get_stream_writer()
+                output = self._run_tool_node(
+                    runtime,
+                    node,
+                    context,
+                    stream=True,
+                    writer=writer,
+                )
+            else:
+                writer = None
+                output = self._execute_node(runtime, node, context)
+
+            self._raise_if_cancelled()
+            output = dict(output or {})
+            if not steps:
+                output.setdefault("events", []).extend(self._initial_step_events(context))
+
+            events = list(output.pop("events", []))
+            context.update(output)
+            step = self._persist_step(run, node, user_message, output)
+            step_payload = {
+                "id": step.id,
+                "node_id": step.node_id,
+                "node_type": step.node_type,
+                "status": step.status,
+                "output": output,
+                "events": events,
+            }
+            next_steps = [*steps, step_payload]
+            if writer is not None:
+                writer({"event": "step", "step": step_payload})
+            return {"context": context, "steps": next_steps}
+
+        return execute
+
+    def _consume_streaming_node(self, events, writer: Callable[[dict], None]) -> dict:
+        while True:
+            try:
+                event = next(events)
+            except StopIteration as stop:
+                return dict(stop.value or {})
+            if event:
+                writer(event)
+
+    def _initial_step_events(self, context: dict) -> list[dict]:
+        return [
+            {"event": "memory_used", "data": context.get("profile_memory_used", {})},
+            {"event": "thinking_status", "data": context.get("thinking_status", {})},
+            {"event": "search_status", "data": self._search_status_event(context.get("search_status", {}))},
+            {"event": "skill_selection", "data": context.get("skill_selection", {})},
+        ]
+
+    @staticmethod
+    def _langgraph_node_name(node: dict, index: int, used_names: set[str]) -> str:
+        raw_name = str(node.get("id") or f"node_{index}").strip()
+        base_name = re.sub(r"[^0-9A-Za-z_.-]+", "_", raw_name).strip("_") or f"node_{index}"
+        if base_name in {START, END}:
+            base_name = f"workflow_{index}"
+        name = base_name
+        suffix = 2
+        while name in used_names:
+            name = f"{base_name}_{suffix}"
+            suffix += 1
+        used_names.add(name)
+        return name
 
     def _persist_step(self, run: Run, node: dict, user_message: str, output: dict) -> RunStep:
         step = RunStep(
@@ -541,481 +762,653 @@ class WorkflowRunner:
         return step
 
     def _execute_node(self, agent, node: dict, context: dict) -> dict:
-        node_type = node["type"]
-        if node_type == "Start":
-            return {
-                "started": True,
-                "variables": context.get("variables", {}),
-                "rag_enabled": context.get("rag_enabled", True),
-                "search_enabled": context.get("search_enabled", False),
-                "attachment_count": len(context.get("uploads", [])),
-                "loaded_skills": context.get("loaded_skills", []),
+        handlers = {
+            "Start": self._execute_start_node,
+            "Knowledge": self._execute_knowledge_node,
+            "Tool": lambda runtime, current_node, current_context: self._run_tool_node(runtime, current_node, current_context, stream=False),
+            "LLM": self._execute_llm_node,
+            "Answer": self._execute_answer_node,
+        }
+        handler = handlers.get(node["type"])
+        return handler(agent, node, context) if handler else {}
+
+    def _execute_start_node(self, agent, node: dict, context: dict) -> dict:
+        return {
+            "started": True,
+            "variables": context.get("variables", {}),
+            "rag_enabled": context.get("rag_enabled", True),
+            "search_enabled": context.get("search_enabled", False),
+            "attachment_count": len(context.get("uploads", [])),
+            "loaded_skills": context.get("loaded_skills", []),
+        }
+
+    def _execute_knowledge_node(self, agent, node: dict, context: dict) -> dict:
+        effective_source = "request" if "rag_enabled_request" in context else "agent_default"
+        if not context.get("rag_enabled", True):
+            status = {
+                "enabled": False,
+                "effective_source": effective_source,
+                "knowledge_base_ids": [],
+                "query": context["input"],
+                "top_k": int(context.get("rag_top_k") or node.get("config", {}).get("top_k", 4)),
+                "matched_chunks": 0,
+                "sources_emitted": False,
+                "reason": "disabled",
+                "dense": {"matched": 0},
+                "bm25": {"matched": 0},
+                "rrf": {"matched": 0},
+                "rerank": {"enabled": False, "applied": False, "model": None, "error": None},
+                "cache": {"enabled": False, "hit": False, "backend": "none"},
+                "no_evidence": False,
             }
-        if node_type == "Knowledge":
-            effective_source = "request" if "rag_enabled_request" in context else "agent_default"
-            if not context.get("rag_enabled", True):
-                status = {
-                    "enabled": False,
-                    "effective_source": effective_source,
-                    "knowledge_base_ids": [],
-                    "query": context["input"],
-                    "top_k": int(context.get("rag_top_k") or node.get("config", {}).get("top_k", 4)),
-                    "matched_chunks": 0,
-                    "sources_emitted": False,
-                    "reason": "disabled",
-                    "dense": {"matched": 0},
-                    "bm25": {"matched": 0},
-                    "rrf": {"matched": 0},
-                    "rerank": {"enabled": False, "applied": False, "model": None, "error": None},
-                    "cache": {"enabled": False, "hit": False, "backend": "none"},
-                    "no_evidence": False,
-                }
-                return {"sources": [], "rag_enabled": False, "rag_status": status, "events": [{"event": "rag_status", "data": status}]}
-            kb_ids = getattr(agent, "knowledge_base_ids", None)
-            if kb_ids is None:
-                kb_ids = [
-                    row.knowledge_base_id
-                    for row in self.db.query(AgentKnowledgeBase).filter(AgentKnowledgeBase.agent_id == agent.id).all()
-                ]
-            rag_result = retrieve(
-                self.db,
-                workspace_id=agent.workspace_id,
-                knowledge_base_ids=kb_ids,
-                query=context["input"],
-                config=context.get("rag_config") or {},
-                runtime_config=getattr(agent, "runtime_config", None),
-            )
-            sources = rag_result.sources
-            status = {**rag_result.status, "effective_source": effective_source}
-            return {"sources": sources, "rag_enabled": True, "rag_status": status, "events": [{"event": "rag_status", "data": status}]}
-        if node_type == "Tool":
-            bound_tools = self._runtime_tools(agent, node, context)
-            tool_policy = (agent.settings.get("tool_policy") or {})
-            allowed_names = set(tool_policy.get("allowed_tool_names") or [])
-            if allowed_names:
-                bound_tools = [t for t in bound_tools if t.name in allowed_names or t.type == "builtin_search"]
-            skill_loader_schema = self._skill_loader_schema(agent, context)
-            if not bound_tools and not skill_loader_schema:
-                return {"tool_outputs": [], "tool_stats": {"total_calls": 0, "tools_used": []}}
+            return {"sources": [], "rag_enabled": False, "rag_status": status, "events": [{"event": "rag_status", "data": status}]}
 
-            tool_schemas = [tool_schema_for_llm(t) for t in bound_tools]
-            if skill_loader_schema:
-                tool_schemas.append(skill_loader_schema)
-            messages = self._llm_messages(agent, context)
-            total_calls = 0
-            tools_used: list[str] = []
-            events = []
-            web_sources = list(context.get("web_sources", []))
-            search_status = dict(context.get("search_status") or {})
-            max_tool_calls = MAX_TOOL_CALLS_PER_RUN
-            max_tool_wall_time = MAX_TOOL_WALL_TIME_SECONDS
-            tool_loop_start = time.monotonic()
+        kb_ids = getattr(agent, "knowledge_base_ids", None)
+        if kb_ids is None:
+            kb_ids = [
+                row.knowledge_base_id
+                for row in self.db.query(AgentKnowledgeBase).filter(AgentKnowledgeBase.agent_id == agent.id).all()
+            ]
+        rag_result = run_rag_pipeline(
+            self.db,
+            workspace_id=agent.workspace_id,
+            knowledge_base_ids=kb_ids,
+            query=context["input"],
+            config=context.get("rag_config") or {},
+            runtime_config=getattr(agent, "runtime_config", None),
+        )
+        sources = rag_result.sources
+        status = {**rag_result.status, "effective_source": effective_source}
+        return {"sources": sources, "rag_enabled": True, "rag_status": status, "events": [{"event": "rag_status", "data": status}]}
 
-            for _round in range(MAX_TOOL_ROUNDS_PER_RUN):
-                self._raise_if_cancelled()
-                if total_calls >= max_tool_calls:
-                    break
-                if time.monotonic() - tool_loop_start > max_tool_wall_time:
-                    break
-                response = self.provider.chat(
-                    messages,
-                    model=agent.model,
-                    temperature=agent.temperature,
-                    runtime_config=agent.runtime_config,
-                    tools=tool_schemas,
-                    thinking_enabled=self._thinking_request_value(context),
-                    cancel_event=self._cancel_event,
-                )
-                response = _coerce_dsml_tool_calls(response, stage=f"tool node non-stream round {_round}")
-                if response.content and not response.tool_calls:
-                    return {
-                        "draft": strip_or_block_leaked_tool_markup(response.content),
-                        "draft_reasoning": response.reasoning_content or "",
-                        "web_sources": web_sources,
-                        "search_status": search_status,
-                        "tool_outputs": [],
-                        "tool_stats": {"total_calls": total_calls, "tools_used": tools_used},
-                        "events": events,
-                    }
-                if response.tool_calls:
-                    calls_this_round = response.tool_calls[:max_tool_calls - total_calls]
-                    if not calls_this_round:
-                        break
-                    if response.reasoning_content and context.get("thinking_enabled"):
-                        reasoning_content = response.reasoning_content.strip()
-                        if reasoning_content:
-                            events.append({"event": "reasoning_token", "data": {"content": f"{reasoning_content}\n\n"}})
-                    assistant_msg = {"role": "assistant", "content": response.content, "tool_calls": calls_this_round}
-                    if response.reasoning_content:
-                        assistant_msg["reasoning_content"] = response.reasoning_content
-                    messages.append(assistant_msg)
-                    self._persist_intermediate_message(
-                        context,
-                        role="assistant",
-                        content=response.content or "",
-                        reasoning=response.reasoning_content or "",
-                        tool_calls=calls_this_round,
-                        meta={"node_id": node["id"], "round": _round, "kind": "tool_calls"},
-                    )
-                    # 并发执行同一轮的所有工具调用
-                    _session_key = str(context.get("session_id") or "")
-                    jobs = []
-                    job_results = {}
-                    for tc in calls_this_round:
-                        func = tc["function"]
-                        tool_name = func["name"]
-                        try:
-                            tool_args = json.loads(func.get("arguments") or "{}")
-                        except json.JSONDecodeError:
-                            tool_args = {"input": func.get("arguments") or ""}
-                        is_skill_loader = tool_name == "load_skill"
-                        matching = next((t for t in bound_tools if t.name == tool_name), None)
-                        job = {
-                            "tc": tc, "tool_name": tool_name, "tool_args": tool_args,
-                            "matching": matching, "_session_key": _session_key,
-                            "_agent_workdir": context.get("agent_workdir"),
-                            "internal": is_skill_loader,
-                        }
-                        jobs.append(job)
-                        if is_skill_loader:
-                            job_results[id(job)] = self._handle_load_skill_call(agent, context, tool_args)
-
-                    # 使用线程池并发执行所有工具调用
-                    external_jobs = [job for job in jobs if not job.get("internal")]
-                    if external_jobs:
-                        with ThreadPoolExecutor(max_workers=min(len(external_jobs), 8)) as executor:
-                            future_to_job = {executor.submit(self._execute_single_tool_safe, job): job for job in external_jobs}
-                            for future in as_completed(future_to_job):
-                                job = future_to_job[future]
-                                try:
-                                    job_results[id(job)] = future.result()
-                                except Exception:
-                                    job_results[id(job)] = {"error": "thread_error", "content": "Error: tool execution failed", "result_preview": "", "latency_ms": 0}
-
-                    loaded_skill_this_round = False
-                    # 按原始顺序处理结果，确保副作用线程安全
-                    for job in jobs:
-                        tc = job["tc"]
-                        tool_name = job["tool_name"]
-                        tool_args = job["tool_args"]
-                        matching = job["matching"]
-                        result = job_results.get(id(job), {})
-
-                        if job.get("internal") and tool_name == "load_skill":
-                            internal_tool = type("_", (), {"id": None, "name": tool_name, "type": "internal"})()
-                            status = "error" if result.get("status") == "error" else "success"
-                            event_data = tool_call_event(
-                                internal_tool,
-                                result,
-                                status=status,
-                                input_preview=json.dumps(tool_args, ensure_ascii=False),
-                                error_code="skill_not_loadable" if status == "error" else None,
-                            )
-                            tool_content = result.get("content") or result.get("result_preview") or ""
-                            events.append({"event": "tool_call", "data": event_data})
-                            messages.append({"role": "tool", "tool_call_id": tc["id"], "content": tool_content})
-                            self._persist_intermediate_message(context, role="tool", content=tool_content, tool_call_id=tc["id"], tool_name=tool_name, meta={**event_data, "node_id": node["id"], "round": _round, "kind": "tool_result"})
-                            loaded_skill_this_round = loaded_skill_this_round or status == "success"
-                            total_calls += 1
-                            tools_used.append(tool_name)
-                            continue
-
-                        if matching:
-                            if result.get("error"):
-                                event_data = tool_call_event(matching, result, status="error", input_preview=json.dumps(tool_args, ensure_ascii=False), error_code="tool_error")
-                                tool_content = result.get("content") or f"Error: {result['error']}"
-                                events.append({"event": "tool_call", "data": event_data})
-                                messages.append({"role": "tool", "tool_call_id": tc["id"], "content": tool_content})
-                                self._persist_intermediate_message(context, role="tool", content=tool_content, tool_call_id=tc["id"], tool_name=tool_name, meta={**event_data, "node_id": node["id"], "round": _round, "kind": "tool_result"})
-                            else:
-                                tool_content = result.get("content") or result.get("result_preview") or ""
-                                event_data = tool_call_event(matching, result, input_preview=json.dumps(tool_args, ensure_ascii=False))
-                                events.append({"event": "tool_call", "data": event_data})
-                                if matching.type == "builtin_search":
-                                    web_sources, search_status = self._merge_web_search_tool_result(web_sources, search_status, result)
-                                    events.append({"event": "search_status", "data": self._search_status_event(search_status)})
-                                messages.append({"role": "tool", "tool_call_id": tc["id"], "content": tool_content})
-                                self._persist_intermediate_message(context, role="tool", content=tool_content, tool_call_id=tc["id"], tool_name=tool_name, meta={**event_data, "node_id": node["id"], "round": _round, "kind": "tool_result"})
-                        else:
-                            unknown_tool = type("_", (), {"id": None, "name": tool_name, "type": "unknown"})()
-                            event_data = tool_call_event(unknown_tool, {"tool": tool_name, "content": "", "result_preview": "", "latency_ms": 0}, status="error", input_preview="{}", error_code="tool_not_found")
-                            tool_content = f"Tool '{tool_name}' not found"
-                            events.append({"event": "tool_call", "data": event_data})
-                            messages.append({"role": "tool", "tool_call_id": tc["id"], "content": tool_content})
-                            self._persist_intermediate_message(context, role="tool", content=tool_content, tool_call_id=tc["id"], tool_name=tool_name, meta={**event_data, "node_id": node["id"], "round": _round, "kind": "tool_result"})
-
-                        total_calls += 1
-                        tools_used.append(tool_name)
-
-                    if loaded_skill_this_round:
-                        self._refresh_system_message(messages, agent, context)
-                        bound_tools = self._runtime_tools(agent, node, context)
-                        if allowed_names:
-                            bound_tools = [t for t in bound_tools if t.name in allowed_names or t.type == "builtin_search"]
-                        skill_loader_schema = self._skill_loader_schema(agent, context)
-                        tool_schemas = [tool_schema_for_llm(t) for t in bound_tools]
-                        if skill_loader_schema:
-                            tool_schemas.append(skill_loader_schema)
-
-            # Max rounds reached — get final answer from accumulated context
-            self._raise_if_cancelled()
-            final = self.provider.chat(
-                messages,
-                model=agent.model,
-                temperature=agent.temperature,
-                runtime_config=agent.runtime_config,
-                thinking_enabled=self._thinking_request_value(context),
-                cancel_event=self._cancel_event,
-            )
-            return {
-                "draft": strip_or_block_leaked_tool_markup(final.content or ""),
-                "draft_reasoning": final.reasoning_content or "",
-                "web_sources": web_sources,
-                "search_status": search_status,
-                "tool_outputs": [],
-                "tool_stats": {"total_calls": total_calls, "tools_used": tools_used, "max_rounds_reached": True},
-                "events": events,
-            }
-        if node_type == "LLM":
-            self._raise_if_cancelled()
-            if context.get("draft"):
-                return self._llm_output(agent, context, context["draft"], reasoning=context.get("draft_reasoning") or "")
-            messages = self._llm_messages(agent, context)
-            draft = self.provider.chat(
-                messages,
-                model=agent.model,
-                temperature=agent.temperature,
-                runtime_config=agent.runtime_config,
-                thinking_enabled=self._thinking_request_value(context),
-                cancel_event=self._cancel_event,
-            ).content or ""
-            draft = strip_or_block_leaked_tool_markup(draft)
-            return self._llm_output(agent, context, draft)
-        if node_type == "Answer":
-            answer = strip_or_block_leaked_tool_markup((context.get("draft") or "").strip()).strip()
-            if not answer:
-                raise ValueError("Model returned an empty answer")
-            return {"answer": answer, "citation_count": len([*context.get("sources", []), *context.get("web_sources", [])])}
-        return {}
-
-    def _stream_tool_node(self, agent, node: dict, context: dict):
-        bound_tools = self._runtime_tools(agent, node, context)
-        tool_policy = (agent.settings.get("tool_policy") or {})
-        allowed_names = set(tool_policy.get("allowed_tool_names") or [])
-        if allowed_names:
-            bound_tools = [t for t in bound_tools if t.name in allowed_names or t.type == "builtin_search"]
-        skill_loader_schema = self._skill_loader_schema(agent, context)
-        if not bound_tools and not skill_loader_schema:
-            return {"tool_outputs": [], "tool_stats": {"total_calls": 0, "tools_used": []}}
-
-        tool_schemas = [tool_schema_for_llm(t) for t in bound_tools]
-        if skill_loader_schema:
-            tool_schemas.append(skill_loader_schema)
+    def _execute_llm_node(self, agent, node: dict, context: dict) -> dict:
+        self._raise_if_cancelled()
+        if context.get("draft"):
+            return self._llm_output(agent, context, context["draft"], reasoning=context.get("draft_reasoning") or "")
         messages = self._llm_messages(agent, context)
-        total_calls = 0
-        tools_used: list[str] = []
-        events = []
-        web_sources = list(context.get("web_sources", []))
-        search_status = dict(context.get("search_status") or {})
-        max_tool_calls = MAX_TOOL_CALLS_PER_RUN
-        max_tool_wall_time = MAX_TOOL_WALL_TIME_SECONDS
-        tool_loop_start = time.monotonic()
+        response = self._invoke_chat_model(agent, messages, context)
+        draft = _message_content_text(response)
+        draft = strip_or_block_leaked_tool_markup(draft)
+        return self._llm_output(agent, context, draft)
 
-        for _round in range(MAX_TOOL_ROUNDS_PER_RUN):
-            self._raise_if_cancelled()
-            if total_calls >= max_tool_calls:
-                break
-            if time.monotonic() - tool_loop_start > max_tool_wall_time:
-                break
-            response = yield from self._stream_chat_response(
+    def _execute_answer_node(self, agent, node: dict, context: dict) -> dict:
+        answer = strip_or_block_leaked_tool_markup((context.get("draft") or "").strip()).strip()
+        if not answer:
+            raise ValueError("Model returned an empty answer")
+        return {"answer": answer, "citation_count": len([*context.get("sources", []), *context.get("web_sources", [])])}
+
+    def _invoke_chat_model(
+        self,
+        agent,
+        messages: list[BaseMessage],
+        context: dict,
+        *,
+        tools: list[dict] | None = None,
+    ) -> AIMessage:
+        response = self.provider.invoke(
+            messages,
+            model=agent.model,
+            temperature=agent.temperature,
+            runtime_config=agent.runtime_config,
+            tools=tools,
+            thinking_enabled=self._thinking_request_value(context),
+            cancel_event=self._cancel_event,
+        )
+        if isinstance(response, AIMessage):
+            return response
+        return AIMessage(content=_message_content_text(response), additional_kwargs=getattr(response, "additional_kwargs", {}))
+
+    def _run_tool_node(
+        self,
+        agent,
+        node: dict,
+        context: dict,
+        *,
+        stream: bool,
+        writer: Callable[[dict], None] | None = None,
+    ) -> dict:
+        state = self._initial_tool_graph_state(agent, node, context)
+        if state.get("output"):
+            return state["output"]
+        graph = self._build_tool_loop_graph(agent, stream=stream, writer=writer)
+        final_state = graph.invoke(state)
+        return final_state.get("output") or self._tool_final_output(final_state, AIMessage(content=""), stream=stream, max_rounds_reached=True)
+
+    def _initial_tool_graph_state(self, agent, node: dict, context: dict) -> ToolGraphState:
+        tool_policy = agent.settings.get("tool_policy") or {}
+        allowed_names = set(tool_policy.get("allowed_tool_names") or [])
+        bound_tools, langchain_tools, tool_schemas = self._tool_runtime_bindings(agent, node, context, allowed_names)
+        if not tool_schemas:
+            return {
+                "context": context,
+                "node": node,
+                "output": {"tool_outputs": [], "tool_stats": {"total_calls": 0, "tools_used": []}},
+            }
+        return {
+            "context": context,
+            "node": node,
+            "messages": self._llm_messages(agent, context),
+            "bound_tools": bound_tools,
+            "langchain_tools": langchain_tools,
+            "tool_schemas": tool_schemas,
+            "allowed_names": allowed_names,
+            "total_calls": 0,
+            "tools_used": [],
+            "events": [],
+            "web_sources": list(context.get("web_sources", [])),
+            "search_status": dict(context.get("search_status") or {}),
+            "round_index": 0,
+            "tool_loop_start": time.monotonic(),
+            "max_tool_calls": MAX_TOOL_CALLS_PER_RUN,
+            "max_tool_wall_time": MAX_TOOL_WALL_TIME_SECONDS,
+            "pending_calls": [],
+            "latest_response": None,
+            "loaded_skill_this_round": False,
+        }
+
+    def _tool_runtime_bindings(self, agent, node: dict, context: dict, allowed_names: set[str]) -> tuple[list[Tool], list[Any], list[dict]]:
+        bound_tools = self._runtime_tools(agent, node, context)
+        if allowed_names:
+            bound_tools = [tool for tool in bound_tools if tool.name in allowed_names or tool.type == "builtin_search"]
+        langchain_tools = [
+            build_langchain_tool(
+                tool,
+                session_key=str(context.get("session_id") or ""),
+                agent_workdir=context.get("agent_workdir"),
+            )
+            for tool in bound_tools
+        ]
+        tool_schemas = [openai_schema_for_langchain_tool(tool) for tool in langchain_tools]
+        skill_loader_tool = self._skill_loader_tool(agent, context)
+        if skill_loader_tool:
+            langchain_tools.append(skill_loader_tool)
+            tool_schemas.append(openai_schema_for_langchain_tool(skill_loader_tool))
+        return bound_tools, langchain_tools, tool_schemas
+
+    def _build_tool_loop_graph(
+        self,
+        agent,
+        *,
+        stream: bool,
+        writer: Callable[[dict], None] | None,
+    ):
+        graph_builder = StateGraph(ToolGraphState)
+        graph_builder.add_node("check_limits", lambda state: state)
+        graph_builder.add_node("call_model", lambda state: self._tool_graph_call_model(agent, state, stream=stream, writer=writer))
+        graph_builder.add_node("execute_tools", lambda state: self._tool_graph_execute_tools(agent, state, stream=stream, writer=writer))
+        graph_builder.add_node("final_answer", lambda state: self._tool_graph_final_answer(agent, state, stream=stream, writer=writer))
+        graph_builder.add_edge(START, "check_limits")
+        graph_builder.add_conditional_edges(
+            "check_limits",
+            lambda state: "final_answer" if self._tool_limits_reached(state) else "call_model",
+            {"call_model": "call_model", "final_answer": "final_answer"},
+        )
+        graph_builder.add_conditional_edges(
+            "call_model",
+            self._route_after_tool_model,
+            {"execute_tools": "execute_tools", "final_answer": "final_answer", "end": END},
+        )
+        graph_builder.add_conditional_edges(
+            "execute_tools",
+            lambda state: "final_answer" if self._tool_limits_reached(state) else "call_model",
+            {"call_model": "call_model", "final_answer": "final_answer"},
+        )
+        graph_builder.add_edge("final_answer", END)
+        return graph_builder.compile()
+
+    def _tool_graph_call_model(
+        self,
+        agent,
+        state: ToolGraphState,
+        *,
+        stream: bool,
+        writer: Callable[[dict], None] | None,
+    ) -> ToolGraphState:
+        self._raise_if_cancelled()
+        state = dict(state)
+        state.pop("output", None)
+        context = state["context"]
+        round_index = int(state.get("round_index") or 0)
+        if stream:
+            response = self._stream_chat_response_to_writer(
                 agent,
-                messages,
+                state.get("messages", []),
                 context,
-                tools=tool_schemas,
-                stream_content=True,
+                writer,
+                tools=state.get("tool_schemas") or [],
                 provisional_stream=True,
             )
-            response = _coerce_dsml_tool_calls(response, stage=f"tool node stream round {_round}")
-            if response.content and not response.tool_calls:
-                return {
-                    "draft": strip_or_block_leaked_tool_markup(response.content),
-                    "draft_streamed": True,
-                    "draft_reasoning": response.reasoning_content or "",
-                    "draft_reasoning_streamed": bool(response.reasoning_content and context.get("thinking_enabled")),
-                    "web_sources": web_sources,
-                    "search_status": search_status,
-                    "tool_outputs": [],
-                    "tool_stats": {"total_calls": total_calls, "tools_used": tools_used},
-                    "events": events,
-                }
-            if response.tool_calls:
-                calls_this_round = response.tool_calls[:max_tool_calls - total_calls]
-                if not calls_this_round:
-                    break
-                assistant_msg = {"role": "assistant", "content": response.content, "tool_calls": calls_this_round}
-                if response.reasoning_content:
-                    assistant_msg["reasoning_content"] = response.reasoning_content
-                messages.append(assistant_msg)
-                self._persist_intermediate_message(
-                    context,
-                    role="assistant",
-                    content=response.content or "",
-                    reasoning=response.reasoning_content or "",
-                    tool_calls=calls_this_round,
-                    meta={"node_id": node["id"], "round": _round, "kind": "tool_calls"},
-                )
-                # 并发执行同一轮的所有工具调用（流式模式）
-                _session_key = str(context.get("session_id") or "")
-                stream_jobs = []
-                stream_results = {}
-                for tc in calls_this_round:
-                    func = tc["function"]
-                    tool_name = func["name"]
-                    try:
-                        tool_args = json.loads(func.get("arguments") or "{}")
-                    except json.JSONDecodeError:
-                        tool_args = {"input": func.get("arguments") or ""}
-                    is_skill_loader = tool_name == "load_skill"
-                    matching = next((t for t in bound_tools if t.name == tool_name), None)
-                    job = {
-                        "tc": tc, "tool_name": tool_name, "tool_args": tool_args,
-                        "matching": matching, "_session_key": _session_key,
-                        "_agent_workdir": context.get("agent_workdir"),
-                        "internal": is_skill_loader,
-                    }
-                    stream_jobs.append(job)
-                    if is_skill_loader:
-                        stream_results[id(job)] = self._handle_load_skill_call(agent, context, tool_args)
+            response = _coerce_dsml_tool_calls(response, stage=f"tool node stream round {round_index}")
+        else:
+            response = self._invoke_chat_model(
+                agent,
+                state.get("messages", []),
+                context,
+                tools=state.get("tool_schemas") or [],
+            )
+            response = _coerce_dsml_tool_calls(response, stage=f"tool node non-stream round {round_index}")
 
-                # 先发送所有 tool_call_start 事件
-                for job in stream_jobs:
-                    tc = job["tc"]
-                    matching = job["matching"]
-                    tool_name = job["tool_name"]
-                    tool_args = job["tool_args"]
-                    display_tool = matching
-                    if not display_tool and tool_name == "load_skill":
-                        display_tool = type("_", (), {"id": None, "name": tool_name, "type": "internal"})()
-                    start_data = self._tool_call_start_event(
-                        display_tool, tool_name=tool_name,
-                        tool_call_id=tc.get("id") or "",
-                        input_preview=json.dumps(tool_args, ensure_ascii=False),
-                    )
-                    yield {"event": "tool_call_start", "data": start_data}
+        state["latest_response"] = response
+        state["pending_calls"] = []
+        response_content = _message_content_text(response)
+        response_reasoning = _message_reasoning_content(response)
+        if response_content and not response.tool_calls:
+            state["output"] = self._tool_direct_output(state, response, stream=stream)
+            return state
+        if not response.tool_calls:
+            return state
 
-                # 使用线程池并发执行所有外部工具调用
-                external_stream_jobs = [job for job in stream_jobs if not job.get("internal")]
-                if external_stream_jobs:
-                    with ThreadPoolExecutor(max_workers=min(len(external_stream_jobs), 8)) as executor:
-                        future_to_job = {executor.submit(self._execute_single_tool_safe, job): job for job in external_stream_jobs}
-                        for future in as_completed(future_to_job):
-                            job = future_to_job[future]
-                            try:
-                                stream_results[id(job)] = future.result()
-                            except Exception:
-                                stream_results[id(job)] = {"error": "thread_error", "content": "Error: tool execution failed", "result_preview": "", "latency_ms": 0}
+        remaining_calls = max(0, int(state.get("max_tool_calls") or MAX_TOOL_CALLS_PER_RUN) - int(state.get("total_calls") or 0))
+        ai_calls_this_round = response.tool_calls[:remaining_calls]
+        calls_this_round = _langchain_tool_calls_to_openai(ai_calls_this_round)
+        if not ai_calls_this_round:
+            return state
+        events = list(state.get("events") or [])
+        if response_reasoning and context.get("thinking_enabled") and not stream:
+            reasoning_content = response_reasoning.strip()
+            if reasoning_content:
+                events.append({"event": "reasoning_token", "data": {"content": f"{reasoning_content}\n\n"}})
+        messages = list(state.get("messages") or [])
+        messages.append(
+            AIMessage(
+                content=response_content,
+                additional_kwargs=response.additional_kwargs,
+                tool_calls=ai_calls_this_round,
+            )
+        )
+        self._persist_intermediate_message(
+            context,
+            role="assistant",
+            content=response_content,
+            reasoning=response_reasoning,
+            tool_calls=calls_this_round,
+            meta={"node_id": state["node"]["id"], "round": round_index, "kind": "tool_calls"},
+        )
+        state["messages"] = messages
+        state["events"] = events
+        state["pending_calls"] = calls_this_round
+        return state
 
-                loaded_skill_this_round = False
-                # 按原始顺序处理结果
-                for job in stream_jobs:
-                    tc = job["tc"]
-                    tool_name = job["tool_name"]
-                    tool_args = job["tool_args"]
-                    matching = job["matching"]
-                    result = stream_results.get(id(job), {})
+    def _route_after_tool_model(self, state: ToolGraphState) -> str:
+        if state.get("output"):
+            return "end"
+        if state.get("pending_calls"):
+            return "execute_tools"
+        return "final_answer"
 
-                    if job.get("internal") and tool_name == "load_skill":
-                        internal_tool = type("_", (), {"id": None, "name": tool_name, "type": "internal"})()
-                        status = "error" if result.get("status") == "error" else "success"
-                        event_data = {
-                            **tool_call_event(
-                                internal_tool,
-                                result,
-                                status=status,
-                                input_preview=json.dumps(tool_args, ensure_ascii=False),
-                                error_code="skill_not_loadable" if status == "error" else None,
-                            ),
-                            "type": "tool_call_result",
-                            "tool_call_id": tc.get("id") or "",
-                        }
-                        tool_content = result.get("content") or result.get("result_preview") or ""
-                        yield {"event": "tool_call_result", "data": event_data}
-                        messages.append({"role": "tool", "tool_call_id": tc["id"], "content": tool_content})
-                        self._persist_intermediate_message(context, role="tool", content=tool_content, tool_call_id=tc["id"], tool_name=tool_name, meta={**event_data, "node_id": node["id"], "round": _round, "kind": "tool_result"})
-                        loaded_skill_this_round = loaded_skill_this_round or status == "success"
-                        total_calls += 1
-                        tools_used.append(tool_name)
-                        continue
+    def _tool_graph_execute_tools(
+        self,
+        agent,
+        state: ToolGraphState,
+        *,
+        stream: bool,
+        writer: Callable[[dict], None] | None,
+    ) -> ToolGraphState:
+        self._raise_if_cancelled()
+        state = dict(state)
+        context = state["context"]
+        node = state["node"]
+        round_index = int(state.get("round_index") or 0)
+        jobs = self._tool_jobs(agent, state)
+        if stream and writer:
+            for job in jobs:
+                writer({"event": "tool_call_start", "data": self._tool_job_start_event(job)})
 
-                    if matching:
-                        if result.get("error"):
-                            event_data = {
-                                **tool_call_event(matching, result, status="error", input_preview=json.dumps(tool_args, ensure_ascii=False), error_code="tool_error"),
-                                "type": "tool_call_result",
-                                "tool_call_id": tc.get("id") or "",
-                            }
-                            tool_content = result.get("content") or f"Error: {result['error']}"
-                            yield {"event": "tool_call_result", "data": event_data}
-                            messages.append({"role": "tool", "tool_call_id": tc["id"], "content": tool_content})
-                            self._persist_intermediate_message(context, role="tool", content=tool_content, tool_call_id=tc["id"], tool_name=tool_name, meta={**event_data, "node_id": node["id"], "round": _round, "kind": "tool_result"})
-                        else:
-                            tool_content = result.get("content") or result.get("result_preview") or ""
-                            event_data = {
-                                **tool_call_event(matching, result, input_preview=json.dumps(tool_args, ensure_ascii=False)),
-                                "type": "tool_call_result",
-                                "tool_call_id": tc.get("id") or "",
-                            }
-                            yield {"event": "tool_call_result", "data": event_data}
-                            if matching.type == "builtin_search":
-                                web_sources, search_status = self._merge_web_search_tool_result(web_sources, search_status, result)
-                                search_event = self._search_status_event(search_status)
-                                search_event["tool_call_id"] = tc.get("id") or ""
-                                yield {"event": "search_status", "data": search_event}
-                            messages.append({"role": "tool", "tool_call_id": tc["id"], "content": tool_content})
-                            self._persist_intermediate_message(context, role="tool", content=tool_content, tool_call_id=tc["id"], tool_name=tool_name, meta={**event_data, "node_id": node["id"], "round": _round, "kind": "tool_result"})
-                    else:
-                        unknown_tool = type("_", (), {"id": None, "name": tool_name, "type": "unknown"})()
-                        event_data = {
-                            **tool_call_event(unknown_tool, {"tool": tool_name, "content": "", "result_preview": "", "latency_ms": 0}, status="error", input_preview="{}", error_code="tool_not_found"),
-                            "type": "tool_call_result",
-                            "tool_call_id": tc.get("id") or "",
-                        }
-                        tool_content = f"Tool '{tool_name}' not found"
-                        yield {"event": "tool_call_result", "data": event_data}
-                        messages.append({"role": "tool", "tool_call_id": tc["id"], "content": tool_content})
-                        self._persist_intermediate_message(context, role="tool", content=tool_content, tool_call_id=tc["id"], tool_name=tool_name, meta={**event_data, "node_id": node["id"], "round": _round, "kind": "tool_result"})
+        tool_messages, job_results = self._invoke_toolnode(state)
+        tool_messages_by_id = {message.tool_call_id: message for message in tool_messages}
 
-                    total_calls += 1
-                    tools_used.append(tool_name)
-                if loaded_skill_this_round:
-                    self._refresh_system_message(messages, agent, context)
-                    bound_tools = self._runtime_tools(agent, node, context)
-                    if allowed_names:
-                        bound_tools = [t for t in bound_tools if t.name in allowed_names or t.type == "builtin_search"]
-                    skill_loader_schema = self._skill_loader_schema(agent, context)
-                    tool_schemas = [tool_schema_for_llm(t) for t in bound_tools]
-                    if skill_loader_schema:
-                        tool_schemas.append(skill_loader_schema)
-            else:
-                break
+        messages = list(state.get("messages") or [])
+        events = list(state.get("events") or [])
+        tools_used = list(state.get("tools_used") or [])
+        total_calls = int(state.get("total_calls") or 0)
+        web_sources = list(state.get("web_sources") or [])
+        search_status = dict(state.get("search_status") or {})
+        loaded_skill_this_round = False
 
-        final = yield from self._stream_chat_response(agent, messages, context, stream_content=True)
-        return {
-            "draft": strip_or_block_leaked_tool_markup(final.content or ""),
-            "draft_streamed": bool(final.content),
-            "draft_reasoning": final.reasoning_content or "",
-            "draft_reasoning_streamed": bool(final.reasoning_content and context.get("thinking_enabled")),
-            "web_sources": web_sources,
-            "search_status": search_status,
+        for job in jobs:
+            tool_call_id = job["tc"].get("id") or ""
+            result = job_results.get(tool_call_id)
+            if result is None:
+                tool_message = tool_messages_by_id.get(tool_call_id)
+                result = self._tool_message_fallback_result(job, tool_message)
+            total_calls += 1
+            tools_used.append(job["tool_name"])
+            loaded, web_sources, search_status = self._record_tool_job_result(
+                job,
+                result,
+                context=context,
+                node=node,
+                round_index=round_index,
+                messages=messages,
+                events=events,
+                web_sources=web_sources,
+                search_status=search_status,
+                stream=stream,
+                writer=writer,
+            )
+            loaded_skill_this_round = loaded_skill_this_round or loaded
+
+        if loaded_skill_this_round:
+            self._refresh_system_message(messages, agent, context)
+            bound_tools, langchain_tools, tool_schemas = self._tool_runtime_bindings(
+                agent,
+                node,
+                context,
+                state.get("allowed_names") or set(),
+            )
+            state["bound_tools"] = bound_tools
+            state["langchain_tools"] = langchain_tools
+            state["tool_schemas"] = tool_schemas
+
+        state["messages"] = messages
+        state["events"] = events
+        state["tools_used"] = tools_used
+        state["total_calls"] = total_calls
+        state["web_sources"] = web_sources
+        state["search_status"] = search_status
+        state["round_index"] = round_index + 1
+        state["pending_calls"] = []
+        state["loaded_skill_this_round"] = loaded_skill_this_round
+        return state
+
+    def _tool_graph_final_answer(
+        self,
+        agent,
+        state: ToolGraphState,
+        *,
+        stream: bool,
+        writer: Callable[[dict], None] | None,
+    ) -> ToolGraphState:
+        self._raise_if_cancelled()
+        state = dict(state)
+        if stream:
+            final = self._stream_chat_response_to_writer(
+                agent,
+                state.get("messages", []),
+                state["context"],
+                writer,
+                stream_content=True,
+            )
+        else:
+            final = self._invoke_chat_model(
+                agent,
+                state.get("messages", []),
+                state["context"],
+            )
+        state["output"] = self._tool_final_output(state, final, stream=stream, max_rounds_reached=True)
+        return state
+
+    def _stream_chat_response_to_writer(
+        self,
+        agent,
+        messages: list[BaseMessage],
+        context: dict,
+        writer: Callable[[dict], None] | None,
+        *,
+        tools: list[dict] | None = None,
+        stream_content: bool = True,
+        provisional_stream: bool = False,
+    ) -> AIMessage:
+        stream_events = self._stream_chat_response(
+            agent,
+            messages,
+            context,
+            tools=tools,
+            stream_content=stream_content,
+            provisional_stream=provisional_stream,
+        )
+        while True:
+            try:
+                event = next(stream_events)
+            except StopIteration as stop:
+                return stop.value or AIMessage(content="")
+            if event and writer:
+                writer(event)
+
+    def _tool_direct_output(self, state: ToolGraphState, response: AIMessage, *, stream: bool) -> dict:
+        response_content = _message_content_text(response)
+        response_reasoning = _message_reasoning_content(response)
+        output = {
+            "draft": strip_or_block_leaked_tool_markup(response_content),
+            "draft_reasoning": response_reasoning,
+            "web_sources": state.get("web_sources", []),
+            "search_status": state.get("search_status", {}),
             "tool_outputs": [],
-            "tool_stats": {"total_calls": total_calls, "tools_used": tools_used, "max_rounds_reached": True},
-            "events": events,
+            "tool_stats": {"total_calls": int(state.get("total_calls") or 0), "tools_used": list(state.get("tools_used") or [])},
+            "events": list(state.get("events") or []),
         }
+        if stream:
+            output["draft_streamed"] = True
+            output["draft_reasoning_streamed"] = bool(response_reasoning and state["context"].get("thinking_enabled"))
+        return output
+
+    def _tool_final_output(self, state: ToolGraphState, response: AIMessage, *, stream: bool, max_rounds_reached: bool) -> dict:
+        response_content = _message_content_text(response)
+        response_reasoning = _message_reasoning_content(response)
+        output = {
+            "draft": strip_or_block_leaked_tool_markup(response_content),
+            "draft_reasoning": response_reasoning,
+            "web_sources": state.get("web_sources", []),
+            "search_status": state.get("search_status", {}),
+            "tool_outputs": [],
+            "tool_stats": {
+                "total_calls": int(state.get("total_calls") or 0),
+                "tools_used": list(state.get("tools_used") or []),
+                "max_rounds_reached": max_rounds_reached,
+            },
+            "events": list(state.get("events") or []),
+        }
+        if stream:
+            output["draft_streamed"] = bool(response_content)
+            output["draft_reasoning_streamed"] = bool(response_reasoning and state["context"].get("thinking_enabled"))
+        return output
+
+    def _tool_limits_reached(self, state: ToolGraphState) -> bool:
+        if int(state.get("total_calls") or 0) >= int(state.get("max_tool_calls") or MAX_TOOL_CALLS_PER_RUN):
+            return True
+        if int(state.get("round_index") or 0) >= MAX_TOOL_ROUNDS_PER_RUN:
+            return True
+        return (time.monotonic() - float(state.get("tool_loop_start") or time.monotonic())) > int(state.get("max_tool_wall_time") or MAX_TOOL_WALL_TIME_SECONDS)
+
+    def _invoke_toolnode(self, state: ToolGraphState) -> tuple[list[ToolMessage], dict[str, dict]]:
+        messages = list(state.get("messages") or [])
+        if not messages or not isinstance(messages[-1], AIMessage):
+            return [], {}
+        captured_results: dict[str, dict] = {}
+
+        def wrap_tool_call(request, handler):
+            tool_call = request.tool_call
+            tool_name = str(tool_call.get("name") or "")
+            tool_call_id = str(tool_call.get("id") or "")
+            started = time.monotonic()
+            try:
+                result = request.tool.invoke(tool_call.get("args") or {})
+                if not isinstance(result, dict):
+                    result = {"tool": tool_name, "content": str(result), "result_preview": str(result)}
+                result["latency_ms"] = result.get("latency_ms", int((time.monotonic() - started) * 1000))
+            except ValueError as exc:
+                result = {
+                    "tool_name": tool_name,
+                    "error": str(exc),
+                    "content": f"Error: {exc}",
+                    "result_preview": "",
+                    "latency_ms": int((time.monotonic() - started) * 1000),
+                }
+            except Exception as exc:
+                result = {
+                    "tool_name": tool_name,
+                    "error": str(exc),
+                    "content": f"Error: {exc}",
+                    "result_preview": "",
+                    "latency_ms": int((time.monotonic() - started) * 1000),
+                }
+            captured_results[tool_call_id] = result
+            status = "error" if result.get("error") or result.get("status") == "error" else "success"
+            return ToolMessage(
+                content=result.get("content") or result.get("result_preview") or "",
+                name=tool_name,
+                tool_call_id=tool_call_id,
+                status=status,
+            )
+
+        graph_builder = StateGraph(ToolNodeInvokeState)
+        graph_builder.add_node(
+            "tools",
+            ToolNode(state.get("langchain_tools") or [], wrap_tool_call=wrap_tool_call),
+        )
+        graph_builder.add_edge(START, "tools")
+        graph_builder.add_edge("tools", END)
+        output = graph_builder.compile().invoke({"messages": [messages[-1]]})
+        tool_messages = [message for message in output.get("messages", []) if isinstance(message, ToolMessage)]
+        return tool_messages, captured_results
+
+    def _tool_message_fallback_result(self, job: dict, tool_message: ToolMessage | None) -> dict:
+        content = tool_message.content if tool_message else f"Tool '{job['tool_name']}' not found"
+        if tool_message and tool_message.status == "error":
+            error_code = "tool_not_found" if not job.get("matching") and not job.get("internal") else "tool_error"
+            return {"error": error_code, "content": content, "result_preview": content[:500], "latency_ms": 0}
+        return {"content": content, "result_preview": str(content)[:500], "latency_ms": 0}
+
+    def _tool_jobs(self, agent, state: ToolGraphState) -> list[dict]:
+        context = state["context"]
+        jobs = []
+        for tc in state.get("pending_calls") or []:
+            func = tc["function"]
+            tool_name = func["name"]
+            try:
+                tool_args = json.loads(func.get("arguments") or "{}")
+            except json.JSONDecodeError:
+                tool_args = {"input": func.get("arguments") or ""}
+            is_skill_loader = tool_name == "load_skill"
+            matching = next((tool for tool in state.get("bound_tools", []) if tool.name == tool_name), None)
+            langchain_tool = next((tool for tool in state.get("langchain_tools", []) if tool.name == tool_name), None)
+            job = {
+                "tc": tc,
+                "tool_name": tool_name,
+                "tool_args": tool_args,
+                "matching": matching,
+                "langchain_tool": langchain_tool,
+                "_session_key": str(context.get("session_id") or ""),
+                "_agent_workdir": context.get("agent_workdir"),
+                "internal": is_skill_loader,
+            }
+            jobs.append(job)
+        return jobs
+
+    def _tool_job_start_event(self, job: dict) -> dict:
+        display_tool = job.get("matching")
+        if not display_tool and job.get("tool_name") == "load_skill":
+            display_tool = type("_", (), {"id": None, "name": job["tool_name"], "type": "internal"})()
+        return self._tool_call_start_event(
+            display_tool,
+            tool_name=job["tool_name"],
+            tool_call_id=job["tc"].get("id") or "",
+            input_preview=json.dumps(job["tool_args"], ensure_ascii=False),
+        )
+
+    def _record_tool_job_result(
+        self,
+        job: dict,
+        result: dict,
+        *,
+        context: dict,
+        node: dict,
+        round_index: int,
+        messages: list[BaseMessage],
+        events: list[dict],
+        web_sources: list[dict],
+        search_status: dict,
+        stream: bool,
+        writer: Callable[[dict], None] | None,
+    ) -> tuple[bool, list[dict], dict]:
+        tc = job["tc"]
+        tool_name = job["tool_name"]
+        tool_args = job["tool_args"]
+        matching = job.get("matching")
+        loaded_skill = False
+
+        if job.get("internal") and tool_name == "load_skill":
+            display_tool = type("_", (), {"id": None, "name": tool_name, "type": "internal"})()
+            status = "error" if result.get("status") == "error" else "success"
+            event_data = tool_call_event(
+                display_tool,
+                result,
+                status=status,
+                input_preview=json.dumps(tool_args, ensure_ascii=False),
+                error_code="skill_not_loadable" if status == "error" else None,
+            )
+            tool_content = result.get("content") or result.get("result_preview") or ""
+            loaded_skill = status == "success"
+        elif matching:
+            if result.get("error"):
+                event_data = tool_call_event(
+                    matching,
+                    result,
+                    status="error",
+                    input_preview=json.dumps(tool_args, ensure_ascii=False),
+                    error_code="tool_error",
+                )
+                tool_content = result.get("content") or f"Error: {result['error']}"
+            else:
+                event_data = tool_call_event(matching, result, input_preview=json.dumps(tool_args, ensure_ascii=False))
+                tool_content = result.get("content") or result.get("result_preview") or ""
+        else:
+            display_tool = type("_", (), {"id": None, "name": tool_name, "type": "unknown"})()
+            event_data = tool_call_event(
+                display_tool,
+                {"tool": tool_name, "content": "", "result_preview": "", "latency_ms": 0},
+                status="error",
+                input_preview="{}",
+                error_code="tool_not_found",
+            )
+            tool_content = f"Tool '{tool_name}' not found"
+
+        if stream:
+            stream_event_data = {**event_data, "type": "tool_call_result", "tool_call_id": tc.get("id") or ""}
+            if writer:
+                writer({"event": "tool_call_result", "data": stream_event_data})
+        else:
+            stream_event_data = event_data
+            events.append({"event": "tool_call", "data": event_data})
+
+        if matching and not result.get("error") and matching.type == "builtin_search":
+            web_sources, search_status = self._merge_web_search_tool_result(web_sources, search_status, result)
+            search_event = self._search_status_event(search_status)
+            if stream:
+                search_event["tool_call_id"] = tc.get("id") or ""
+                if writer:
+                    writer({"event": "search_status", "data": search_event})
+            else:
+                events.append({"event": "search_status", "data": search_event})
+
+        messages.append(ToolMessage(content=tool_content, tool_call_id=tc["id"], name=tool_name))
+        self._persist_intermediate_message(
+            context,
+            role="tool",
+            content=tool_content,
+            tool_call_id=tc["id"],
+            tool_name=tool_name,
+            meta={**stream_event_data, "node_id": node["id"], "round": round_index, "kind": "tool_result"},
+        )
+        return loaded_skill, web_sources, search_status
+
+    def _stream_tool_node(self, agent, node: dict, context: dict):
+        buffered_events: list[dict] = []
+        output = self._run_tool_node(
+            agent,
+            node,
+            context,
+            stream=True,
+            writer=buffered_events.append,
+        )
+        for event in buffered_events:
+            yield event
+        return output
 
     def _stream_chat_response(
         self,
         agent,
-        messages: list[dict],
+        messages: list[BaseMessage],
         context: dict,
         *,
         tools: list[dict] | None = None,
@@ -1031,13 +1424,12 @@ class WorkflowRunner:
         suppress_content_stream = False
         emitted_live_content = False
         provisional_active = bool(provisional_stream and tools)
-        emitted_provisional_content = False
-        cleared_provisional = False
+        provisional_chunks: list[str] = []
         # With tools available, models may emit a short natural-language preface
-        # before deciding to call a tool. Stream it as provisional content so the
-        # UI can retract it if a tool call arrives later in the same response.
+        # before deciding to call a tool. Buffer it until we know no tool call is
+        # coming so final direct answers still stream as normal token chunks.
         should_stream_content_live = stream_content and (not tools or provisional_active)
-        for chunk in self.provider.chat_stream_events(
+        for chunk in self.provider.stream(
             messages,
             model=agent.model,
             temperature=agent.temperature,
@@ -1047,39 +1439,36 @@ class WorkflowRunner:
             cancel_event=self._cancel_event,
         ):
             self._raise_if_cancelled()
-            if chunk.type == "reasoning":
-                if not context.get("thinking_enabled"):
-                    continue
-                reasoning_chunks.append(chunk.content)
-                if stream_content and not saw_tool_call:
-                    yield {"event": "reasoning_token", "content": chunk.content}
-            elif chunk.type == "content":
-                content_chunks.append(chunk.content)
+            reasoning_chunk = _message_reasoning_content(chunk)
+            content_chunk = _message_content_text(chunk)
+            if reasoning_chunk:
+                if context.get("thinking_enabled"):
+                    reasoning_chunks.append(reasoning_chunk)
+                    if stream_content and not saw_tool_call:
+                        yield {"event": "reasoning_token", "content": reasoning_chunk}
+            if content_chunk:
+                content_chunks.append(content_chunk)
                 if should_stream_content_live and not saw_tool_call:
                     pending_live_content, suppress_content_stream, safe_chunks = _buffer_stream_content(
                         pending_live_content,
-                        chunk.content,
+                        content_chunk,
                         suppress_content_stream,
                     )
                     for safe_content in safe_chunks:
                         emitted_live_content = True
                         if provisional_active:
-                            emitted_provisional_content = True
-                            yield {"event": "provisional_token", "content": safe_content}
+                            provisional_chunks.append(safe_content)
                         else:
                             yield {"event": "token", "content": safe_content}
-            elif chunk.type == "tool_call_delta":
-                if provisional_active and emitted_provisional_content and not cleared_provisional:
-                    yield {"event": "provisional_clear", "data": {"content": emitted_provisional_content}}
-                    cleared_provisional = True
+            tool_call_chunks = getattr(chunk, "tool_call_chunks", []) or []
+            if tool_call_chunks:
                 saw_tool_call = True
-                self._merge_stream_tool_call_deltas(tool_call_builders, chunk.tool_calls or [])
-            elif chunk.type == "tool_calls":
-                if provisional_active and emitted_provisional_content and not cleared_provisional:
-                    yield {"event": "provisional_clear", "data": {"content": emitted_provisional_content}}
-                    cleared_provisional = True
+                provisional_chunks = []
+                self._merge_stream_tool_call_chunks(tool_call_builders, tool_call_chunks)
+            elif getattr(chunk, "tool_calls", None):
                 saw_tool_call = True
-                final_tool_calls = chunk.tool_calls or []
+                provisional_chunks = []
+                final_tool_calls = _langchain_tool_calls_to_openai(chunk.tool_calls or [])
         self._raise_if_cancelled()
         if not final_tool_calls:
             final_tool_calls = self._finalize_stream_tool_calls(tool_call_builders)
@@ -1108,50 +1497,40 @@ class WorkflowRunner:
             logger.warning("Blocked incomplete tool call markup in streamed content; full content:\n%s", joined_content)
             content_for_response = DSML_TOOL_MARKUP_ERROR
 
-        if final_tool_calls and provisional_active and emitted_provisional_content and not cleared_provisional:
-            yield {"event": "provisional_clear", "data": {"content": emitted_provisional_content}}
-            cleared_provisional = True
-
         if stream_content and not final_tool_calls and content_for_response:
             if should_stream_content_live:
                 if suppress_content_stream:
                     if content_for_response == DSML_TOOL_MARKUP_ERROR or not emitted_live_content:
-                        if provisional_active:
-                            emitted_provisional_content = True
-                            yield {"event": "provisional_token", "content": content_for_response}
-                        else:
-                            yield {"event": "token", "content": content_for_response}
-                elif not _contains_leaked_tool_markup(joined_content) and pending_live_content:
+                        yield {"event": "token", "content": content_for_response}
+                elif not _contains_leaked_tool_markup(joined_content):
                     if provisional_active:
-                        emitted_provisional_content = True
-                        yield {"event": "provisional_token", "content": pending_live_content}
-                    else:
+                        for safe_content in provisional_chunks:
+                            yield {"event": "token", "content": safe_content}
+                        if pending_live_content:
+                            yield {"event": "token", "content": pending_live_content}
+                    elif pending_live_content:
                         yield {"event": "token", "content": pending_live_content}
-            if provisional_active and emitted_provisional_content:
-                yield {"event": "provisional_commit", "data": {"content": emitted_provisional_content}}
-        return ChatResponse(
-            content=content_for_response or None,
-            reasoning_content="".join(reasoning_chunks),
-            tool_calls=final_tool_calls or None,
+        additional_kwargs = {}
+        if reasoning_chunks:
+            additional_kwargs["reasoning_content"] = "".join(reasoning_chunks)
+        return AIMessage(
+            content=content_for_response or "",
+            additional_kwargs=additional_kwargs,
+            tool_calls=_openai_tool_calls_to_langchain(final_tool_calls),
         )
 
-    def _merge_stream_tool_call_deltas(self, builders: dict[int, dict], deltas: list[dict]) -> None:
-        for delta in deltas:
-            if not isinstance(delta, dict):
+    def _merge_stream_tool_call_chunks(self, builders: dict[int, dict], chunks: list[dict]) -> None:
+        for chunk in chunks:
+            if not isinstance(chunk, dict):
                 continue
             try:
-                index = int(delta.get("index")) if delta.get("index") is not None else len(builders)
+                index = int(chunk.get("index")) if chunk.get("index") is not None else len(builders)
             except (TypeError, ValueError):
                 index = len(builders)
             call = builders.setdefault(index, {"id": "", "type": "function", "function": {"name": "", "arguments": ""}})
-            if delta.get("id"):
-                call["id"] = str(delta.get("id"))
-            if delta.get("type"):
-                call["type"] = str(delta.get("type"))
-            func = delta.get("function") or {}
-            if not isinstance(func, dict):
-                continue
-            name_part = func.get("name")
+            if chunk.get("id"):
+                call["id"] = str(chunk.get("id"))
+            name_part = chunk.get("name")
             if name_part:
                 name_part = str(name_part)
                 current_name = call["function"].get("name") or ""
@@ -1159,8 +1538,8 @@ class WorkflowRunner:
                     call["function"]["name"] = name_part
                 elif not current_name.endswith(name_part):
                     call["function"]["name"] = current_name + name_part
-            if func.get("arguments") is not None:
-                call["function"]["arguments"] = (call["function"].get("arguments") or "") + str(func.get("arguments"))
+            if chunk.get("args") is not None:
+                call["function"]["arguments"] = (call["function"].get("arguments") or "") + str(chunk.get("args"))
 
     def _finalize_stream_tool_calls(self, builders: dict[int, dict]) -> list[dict]:
         calls = []
@@ -1182,102 +1561,6 @@ class WorkflowRunner:
             )
         return calls
 
-    def _execute_stream_tool_call(
-        self,
-        tc: dict,
-        bound_tools: list[Tool],
-        messages: list[dict],
-        web_sources: list[dict],
-        search_status: dict,
-        context: dict,
-        node: dict,
-        round_index: int,
-    ) -> tuple[list[dict], dict, str]:
-        func = tc["function"]
-        tool_name = func["name"]
-        try:
-            tool_args = json.loads(func.get("arguments") or "{}")
-        except json.JSONDecodeError:
-            tool_args = {"input": func.get("arguments") or ""}
-        matching = next((t for t in bound_tools if t.name == tool_name), None)
-        start_data = self._tool_call_start_event(
-            matching,
-            tool_name=tool_name,
-            tool_call_id=tc.get("id") or "",
-            input_preview=json.dumps(tool_args, ensure_ascii=False),
-        )
-        yield {"event": "tool_call_start", "data": start_data}
-        started = time.monotonic()
-        if matching:
-            try:
-                result = execute_tool(
-                    matching,
-                    {
-                        "input": tool_args,
-                        "_session_key": str(context.get("session_id") or ""),
-                        "_agent_workdir": context.get("agent_workdir"),
-                    },
-                )
-                result["latency_ms"] = result.get("latency_ms", int((time.monotonic() - started) * 1000))
-                tool_content = result.get("content") or result.get("result_preview") or ""
-                event_data = {
-                    **tool_call_event(matching, result, input_preview=json.dumps(tool_args, ensure_ascii=False)),
-                    "type": "tool_call_result",
-                    "tool_call_id": tc.get("id") or "",
-                }
-                yield {"event": "tool_call_result", "data": event_data}
-                if matching.type == "builtin_search":
-                    web_sources, search_status = self._merge_web_search_tool_result(web_sources, search_status, result)
-                    search_event = self._search_status_event(search_status)
-                    search_event["tool_call_id"] = tc.get("id") or ""
-                    yield {"event": "search_status", "data": search_event}
-                messages.append({"role": "tool", "tool_call_id": tc["id"], "content": tool_content})
-                self._persist_intermediate_message(
-                    context,
-                    role="tool",
-                    content=tool_content,
-                    tool_call_id=tc["id"],
-                    tool_name=tool_name,
-                    meta={**event_data, "node_id": node["id"], "round": round_index, "kind": "tool_result"},
-                )
-            except ValueError as exc:
-                error_result = {"tool": tool_name, "content": "", "result_preview": "", "latency_ms": int((time.monotonic() - started) * 1000), "error": str(exc)}
-                event_data = {
-                    **tool_call_event(matching, error_result, status="error", input_preview=json.dumps(tool_args, ensure_ascii=False), error_code="tool_error"),
-                    "type": "tool_call_result",
-                    "tool_call_id": tc.get("id") or "",
-                }
-                tool_content = f"Error: {exc}"
-                yield {"event": "tool_call_result", "data": event_data}
-                messages.append({"role": "tool", "tool_call_id": tc["id"], "content": tool_content})
-                self._persist_intermediate_message(
-                    context,
-                    role="tool",
-                    content=tool_content,
-                    tool_call_id=tc["id"],
-                    tool_name=tool_name,
-                    meta={**event_data, "node_id": node["id"], "round": round_index, "kind": "tool_result"},
-                )
-        else:
-            unknown_tool = type("_", (), {"id": None, "name": tool_name, "type": "unknown"})()
-            event_data = {
-                **tool_call_event(unknown_tool, {"tool": tool_name, "content": "", "result_preview": "", "latency_ms": 0}, status="error", input_preview="{}", error_code="tool_not_found"),
-                "type": "tool_call_result",
-                "tool_call_id": tc.get("id") or "",
-            }
-            tool_content = f"Tool '{tool_name}' not found"
-            yield {"event": "tool_call_result", "data": event_data}
-            messages.append({"role": "tool", "tool_call_id": tc["id"], "content": tool_content})
-            self._persist_intermediate_message(
-                context,
-                role="tool",
-                content=tool_content,
-                tool_call_id=tc["id"],
-                tool_name=tool_name,
-                meta={**event_data, "node_id": node["id"], "round": round_index, "kind": "tool_result"},
-            )
-        return web_sources, search_status, tool_name
-
     def _tool_call_start_event(self, tool: Tool | None, *, tool_name: str, tool_call_id: str, input_preview: str = "") -> dict:
         return {
             "type": "tool_call_start",
@@ -1291,31 +1574,6 @@ class WorkflowRunner:
             "latency_ms": 0,
             "error_code": "",
         }
-
-    @staticmethod
-    def _execute_single_tool_safe(job: dict) -> dict:
-        """在子线程中安全执行单个工具调用，捕获异常并返回错误结果。"""
-        matching = job.get("matching")
-        tool_name = job["tool_name"]
-        tool_args = job["tool_args"]
-        session_key = job.get("_session_key", "")
-        agent_workdir = job.get("_agent_workdir")
-
-        if not matching:
-            return {"tool_name": tool_name, "error": "tool_not_found", "content": f"Tool '{tool_name}' not found", "result_preview": "", "latency_ms": 0}
-
-        started = time.monotonic()
-        try:
-            result = execute_tool(
-                matching,
-                {"input": tool_args, "_session_key": session_key, "_agent_workdir": agent_workdir},
-            )
-            result["latency_ms"] = result.get("latency_ms", int((time.monotonic() - started) * 1000))
-            return result
-        except ValueError as exc:
-            return {"tool_name": tool_name, "error": str(exc), "content": f"Error: {exc}", "result_preview": "", "latency_ms": int((time.monotonic() - started) * 1000)}
-        except Exception as exc:
-            return {"tool_name": tool_name, "error": str(exc), "content": f"Error: {exc}", "result_preview": "", "latency_ms": int((time.monotonic() - started) * 1000)}
 
     def _stream_llm_node(self, agent, node: dict, context: dict):
         draft = strip_or_block_leaked_tool_markup(context.get("draft", ""))
@@ -1335,7 +1593,7 @@ class WorkflowRunner:
         pending_live_content = ""
         suppress_content_stream = False
         emitted_live_content = False
-        for chunk in self.provider.chat_stream_events(
+        for chunk in self.provider.stream(
             messages,
             model=agent.model,
             temperature=agent.temperature,
@@ -1344,16 +1602,16 @@ class WorkflowRunner:
             cancel_event=self._cancel_event,
         ):
             self._raise_if_cancelled()
-            if chunk.type == "reasoning":
-                if not context.get("thinking_enabled"):
-                    continue
-                reasoning_chunks.append(chunk.content)
-                yield {"event": "reasoning_token", "content": chunk.content}
-            elif chunk.type == "content":
-                chunks.append(chunk.content)
+            reasoning_chunk = _message_reasoning_content(chunk)
+            content_chunk = _message_content_text(chunk)
+            if reasoning_chunk and context.get("thinking_enabled"):
+                reasoning_chunks.append(reasoning_chunk)
+                yield {"event": "reasoning_token", "content": reasoning_chunk}
+            if content_chunk:
+                chunks.append(content_chunk)
                 pending_live_content, suppress_content_stream, safe_chunks = _buffer_stream_content(
                     pending_live_content,
-                    chunk.content,
+                    content_chunk,
                     suppress_content_stream,
                 )
                 for safe_content in safe_chunks:
@@ -1378,7 +1636,7 @@ class WorkflowRunner:
             return None
         return bool(status.get("enabled"))
 
-    def _llm_messages(self, agent, context: dict) -> list[dict]:
+    def _llm_messages(self, agent, context: dict) -> list[BaseMessage]:
         source_text = "\n".join(f"- {item['title']}: {item['snippet']}" for item in context.get("sources", []))
         web_source_text = self._web_source_text(context.get("web_sources", []))
         tool_text = "\n".join(f"- {item['tool']}: {item['content']}" for item in context.get("tool_outputs", []))
@@ -1428,15 +1686,15 @@ class WorkflowRunner:
         max_system_chars = 100_000  # ~50k tokens, safe for most model context windows
         if len(system_content) > max_system_chars:
             system_content = system_content[:max_system_chars] + "\n\n[上下文已截断以避免超出模型上下文窗口限制]"
-        messages = [{"role": "system", "content": system_content}]
+        messages: list[BaseMessage] = [SystemMessage(content=system_content)]
         history_messages = self._history_messages_for_llm(context)
         messages.extend(history_messages)
         if not self._history_contains_current_message(context):
-            messages.append({"role": "user", "content": self._user_content(context["input"], context.get("uploads", []))})
+            messages.append(HumanMessage(content=self._user_content(context["input"], context.get("uploads", []))))
         return messages
 
-    def _history_messages_for_llm(self, context: dict) -> list[dict]:
-        messages = []
+    def _history_messages_for_llm(self, context: dict) -> list[BaseMessage]:
+        messages: list[BaseMessage] = []
         current_message_id = context.get("current_message_id")
         history = context.get("history_messages") or []
         index = 0
@@ -1479,25 +1737,34 @@ class WorkflowRunner:
                         tool_messages.append(tool_item)
                     next_index += 1
                 if tool_call_ids and tool_call_ids.issubset({tool.get("tool_call_id") for tool in tool_messages}):
-                    assistant_message = {"role": "assistant", "content": content, "tool_calls": tool_calls}
+                    additional_kwargs = {}
                     if item.get("reasoning") and (item.get("meta") or {}).get("requires_reasoning_replay"):
-                        assistant_message["reasoning_content"] = item.get("reasoning")
-                    messages.append(assistant_message)
+                        additional_kwargs["reasoning_content"] = item.get("reasoning")
+                    messages.append(
+                        AIMessage(
+                            content=content or "",
+                            additional_kwargs=additional_kwargs,
+                            tool_calls=_openai_tool_calls_to_langchain(tool_calls),
+                        )
+                    )
                     for tool_item in tool_messages:
                         messages.append(
-                            {
-                                "role": "tool",
-                                "tool_call_id": tool_item.get("tool_call_id"),
-                                "content": tool_item.get("content") or "",
-                            }
+                            ToolMessage(
+                                content=tool_item.get("content") or "",
+                                tool_call_id=tool_item.get("tool_call_id") or "",
+                                name=tool_item.get("tool_name") or None,
+                            )
                         )
                 index = next_index
                 continue
             if content:
-                message = {"role": role, "content": content}
-                if role == "assistant" and item.get("reasoning") and (item.get("meta") or {}).get("requires_reasoning_replay"):
-                    message["reasoning_content"] = item.get("reasoning")
-                messages.append(message)
+                if role == "user":
+                    messages.append(HumanMessage(content=content))
+                elif role == "assistant":
+                    additional_kwargs = {}
+                    if item.get("reasoning") and (item.get("meta") or {}).get("requires_reasoning_replay"):
+                        additional_kwargs["reasoning_content"] = item.get("reasoning")
+                    messages.append(AIMessage(content=content, additional_kwargs=additional_kwargs))
             index += 1
         return messages
 
@@ -2007,6 +2274,25 @@ class WorkflowRunner:
             lines.append(f"- [{mode}] {skill.get('name')}#{skill.get('id')}{score_text}")
         return "\n".join(lines)
 
+    def _skill_loader_tool(self, agent, context: dict) -> StructuredTool | None:
+        schema = self._skill_loader_schema(agent, context)
+        if not schema:
+            return None
+        description = schema["function"]["description"]
+
+        def load_skill(skill_id: int | None = None, skill_name: str = "", reason: str = "") -> dict:
+            return self._handle_load_skill_call(
+                agent,
+                context,
+                {"skill_id": skill_id, "skill_name": skill_name, "reason": reason},
+            )
+
+        return StructuredTool.from_function(
+            load_skill,
+            name="load_skill",
+            description=description,
+        )
+
     def _skill_loader_schema(self, agent, context: dict) -> dict | None:
         loaded_ids = {item.get("id") for item in context.get("loaded_skills", [])}
         loadable = [
@@ -2110,7 +2396,7 @@ class WorkflowRunner:
         kb_ids = item.get("knowledge_base_ids") or []
         if not kb_ids or not context.get("rag_enabled", True):
             return []
-        rag_result = retrieve(
+        rag_result = run_rag_pipeline(
             self.db,
             workspace_id=agent.workspace_id,
             knowledge_base_ids=kb_ids,
@@ -2130,8 +2416,8 @@ class WorkflowRunner:
             context["sources"] = [*context.get("sources", []), *added]
         return added
 
-    def _refresh_system_message(self, messages: list[dict], agent, context: dict) -> None:
-        if not messages or messages[0].get("role") != "system":
+    def _refresh_system_message(self, messages: list[BaseMessage], agent, context: dict) -> None:
+        if not messages or not isinstance(messages[0], SystemMessage):
             return
         messages[0] = self._llm_messages(agent, context)[0]
 
@@ -2187,9 +2473,6 @@ class WorkflowRunner:
             if key not in merged:
                 merged[key] = value
         return merged
-
-    def _session_memory(self, session_id: int) -> SessionMemory | None:
-        return self.db.query(SessionMemory).filter(SessionMemory.session_id == session_id).first()
 
     def _persist_intermediate_message(
         self,
@@ -2269,49 +2552,4 @@ class WorkflowRunner:
         if len(text) <= limit:
             return text
         return text[:limit] + "\n[历史消息过长，已截断]"
-
-    def _update_session_memory(self, session_id: int, user_message: str, answer: str, max_messages: int) -> None:
-        memory = self._session_memory(session_id)
-        if not memory:
-            memory = SessionMemory(session_id=session_id, summary="", message_count=0)
-            self.db.add(memory)
-        memory.message_count += 2
-        
-        # Try parsing structured dialogue turns
-        try:
-            dialogue_turns = json.loads(memory.summary) if memory.summary else []
-            if not isinstance(dialogue_turns, list):
-                dialogue_turns = []
-        except Exception:
-            # Fallback: parse legacy plain text formatted summary
-            dialogue_turns = []
-            if memory.summary.strip():
-                raw_turns = memory.summary.split("\n===\n")
-                for turn_text in raw_turns:
-                    if "助手：" in turn_text:
-                        parts = turn_text.split("助手：", 1)
-                        u_part = parts[0].replace("用户：", "").strip()
-                        a_part = parts[1].strip()
-                        dialogue_turns.append({"user": u_part, "assistant": a_part})
-
-        # Append current dialogue turn
-        dialogue_turns.append({
-            "user": user_message.strip(),
-            "assistant": answer.strip()
-        })
-        
-        # max_messages represents dialogue turns (one turn has user + assistant, so max_turns = max_messages // 2)
-        max_turns = max(1, max_messages // 2)
-        truncated_turns = dialogue_turns[-max_turns:]
-        
-        # Re-serialize to JSON summary
-        serialized = json.dumps(truncated_turns, ensure_ascii=False)
-        # Limit token usage for extra long assistant codes/texts
-        if len(serialized) > 2000:
-            for turn in truncated_turns:
-                if len(turn["assistant"]) > 500:
-                    turn["assistant"] = turn["assistant"][:500] + "...(此回答过长已截断)..."
-            serialized = json.dumps(truncated_turns, ensure_ascii=False)
-            
-        memory.summary = serialized
 
