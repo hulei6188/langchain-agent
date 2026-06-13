@@ -1,26 +1,33 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Callable, TypedDict
+from typing import Any, Callable
 
+from langchain_core.messages import HumanMessage
 from langgraph.config import get_stream_writer
-from langgraph.graph import END, START, StateGraph
+from langgraph.graph import END, START, MessagesState, StateGraph
 
 from core.runtime.langgraph_persistence import get_graph_memory_store, get_workflow_checkpointer
 from core.runtime.spec import workflow_graph_spec
 from core.runtime.status import search_status_event
 
 
-class WorkflowGraphState(TypedDict):
+class WorkflowGraphState(MessagesState, total=False):
     context: dict[str, Any]
     steps: list[dict[str, Any]]
+
+
+def initial_workflow_state(*, user_message: str, context: dict[str, Any]) -> WorkflowGraphState:
+    return {
+        "messages": [HumanMessage(content=user_message)],
+        "context": context,
+        "steps": [],
+    }
 
 
 def build_langgraph_workflow(
     *,
     runtime,
-    run_id: int,
-    user_message: str,
     stream: bool,
     execute_node: Callable[[Any, dict, dict], dict],
     stream_llm_node: Callable[[Any, dict, dict], Any],
@@ -41,8 +48,6 @@ def build_langgraph_workflow(
             graph_node_name,
             langgraph_node(
                 runtime=runtime,
-                run_id=run_id,
-                user_message=user_message,
                 node=node,
                 stream=stream,
                 execute_node=execute_node,
@@ -76,8 +81,6 @@ def workflow_thread_config(context: dict) -> dict:
 def langgraph_node(
     *,
     runtime,
-    run_id: int,
-    user_message: str,
     node: dict,
     stream: bool,
     execute_node: Callable[[Any, dict, dict], dict],

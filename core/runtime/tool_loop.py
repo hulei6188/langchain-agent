@@ -99,8 +99,6 @@ class ToolLoopRunner:
             "max_tool_calls": MAX_TOOL_CALLS_PER_RUN,
             "max_tool_wall_time": MAX_TOOL_WALL_TIME_SECONDS,
             "pending_calls": [],
-            "latest_response": None,
-            "loaded_skill_this_round": False,
         }
 
     def _build_graph(
@@ -111,13 +109,11 @@ class ToolLoopRunner:
         writer: Callable[[dict], None] | None,
     ):
         graph_builder = StateGraph(ToolGraphState)
-        graph_builder.add_node("check_limits", lambda state: state)
         graph_builder.add_node("call_model", lambda state: self._call_model(agent, state, stream=stream, writer=writer))
         graph_builder.add_node("tools", lambda state: self._execute_tools(agent, state, stream=stream, writer=writer))
         graph_builder.add_node("final_answer", lambda state: self._final_answer(agent, state, stream=stream, writer=writer))
-        graph_builder.add_edge(START, "check_limits")
         graph_builder.add_conditional_edges(
-            "check_limits",
+            START,
             lambda state: "final_answer"
             if tool_limits_reached(state, max_tool_calls=MAX_TOOL_CALLS_PER_RUN, max_tool_rounds=MAX_TOOL_ROUNDS_PER_RUN)
             else "call_model",
@@ -174,7 +170,6 @@ class ToolLoopRunner:
             )
             response = dsml_tool_call_parser.invoke(response, stage=f"tool node non-stream round {round_index}")
 
-        state["latest_response"] = response
         state["pending_calls"] = []
         response_content = message_content_text(response)
         response_reasoning = message_reasoning_content(response)
@@ -290,7 +285,6 @@ class ToolLoopRunner:
         state["search_status"] = search_status
         state["round_index"] = round_index + 1
         state["pending_calls"] = []
-        state["loaded_skill_this_round"] = loaded_skill_this_round
         return state
 
     def _final_answer(

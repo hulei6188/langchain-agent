@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import logging
 import threading
 from collections.abc import Iterable, Iterator, Sequence
 from typing import Any
@@ -27,8 +26,6 @@ from core.integrations.model_clients import (
     api_base,
     api_key,
 )
-
-logger = logging.getLogger(__name__)
 
 class _CancelledError(Exception):
     """Raised when a chat request is cancelled mid-flight."""
@@ -113,37 +110,18 @@ class OpenAICompatibleProvider(BaseChatModel):
         **kwargs: Any,
     ) -> AIMessage:
         settings = get_settings()
-        chat_api_key = api_key(settings, runtime_config, purpose="chat")
-        formatted_tools = self._openai_tools(tools)
         if settings.mock_llm:
-            self.last_chat_mock = True
-            if cancel_event is not None and cancel_event.is_set():
-                raise _CancelledError()
-            user_text = self._content_text(next((m.content for m in reversed(messages) if isinstance(m, HumanMessage)), ""))
-            context_hint = " ".join(self._content_text(m.content)[:160] for m in messages if isinstance(m, SystemMessage))
-            if formatted_tools:
-                tool_names = [t.get("function", {}).get("name", "") for t in formatted_tools]
-                call_id = f"mock_call_{hashlib.md5(user_text.encode()).hexdigest()[:8]}"
-                return AIMessage(
-                    content="",
-                    tool_calls=[{"name": tool_names[0], "args": {"query": user_text[:120]}, "id": call_id}],
-                )
-            return AIMessage(content=f"Mock answer for: {user_text}\n\nContext summary: {context_hint[:220]}")
-        if not chat_api_key:
-            raise RuntimeError("Chat model API key is not configured")
-        self.last_chat_mock = False
-
-        chat_api_base = api_base(settings, runtime_config, purpose="chat")
-        chat_model = model or (runtime_config or {}).get("chat_model") or settings.openai_model
-        llm, http_client = create_chat_openai(
-            api_base=chat_api_base,
-            api_key=chat_api_key,
-            model=chat_model,
+            return self._mock_chat_message(messages, tools=tools, cancel_event=cancel_event)
+        runnable, http_client = self._chat_runnable(
+            settings=settings,
+            model=model,
             temperature=temperature,
+            runtime_config=runtime_config,
+            tools=tools,
             thinking_enabled=thinking_enabled,
             streaming=False,
+            tool_choice=kwargs.get("tool_choice"),
         )
-        runnable = self._bind_chat_tools(llm, tools, tool_choice=kwargs.get("tool_choice"))
         self._active_http_client = http_client
         try:
             if cancel_event is not None and cancel_event.is_set():
@@ -175,20 +153,8 @@ class OpenAICompatibleProvider(BaseChatModel):
         **kwargs: Any,
     ) -> Iterable[AIMessageChunk]:
         settings = get_settings()
-        chat_api_key = api_key(settings, runtime_config, purpose="chat")
-        formatted_tools = self._openai_tools(tools)
         if settings.mock_llm:
-            self.last_chat_mock = True
-            message = self._chat_message(
-                messages,
-                model=model,
-                temperature=temperature,
-                runtime_config=runtime_config,
-                tools=formatted_tools,
-                thinking_enabled=thinking_enabled,
-                cancel_event=cancel_event,
-                **kwargs,
-            )
+            message = self._mock_chat_message(messages, tools=tools, cancel_event=cancel_event)
             if message.tool_calls:
                 yield AIMessageChunk(content="", tool_call_chunks=self._tool_call_chunks(message.tool_calls))
                 return
@@ -198,21 +164,16 @@ class OpenAICompatibleProvider(BaseChatModel):
                     return
                 yield AIMessageChunk(content=content[index : index + 24])
             return
-        if not chat_api_key:
-            raise RuntimeError("Chat model API key is not configured")
-        self.last_chat_mock = False
-
-        chat_api_base = api_base(settings, runtime_config, purpose="chat")
-        chat_model = model or (runtime_config or {}).get("chat_model") or settings.openai_model
-        llm, http_client = create_chat_openai(
-            api_base=chat_api_base,
-            api_key=chat_api_key,
-            model=chat_model,
+        runnable, http_client = self._chat_runnable(
+            settings=settings,
+            model=model,
             temperature=temperature,
+            runtime_config=runtime_config,
+            tools=tools,
             thinking_enabled=thinking_enabled,
             streaming=True,
+            tool_choice=kwargs.get("tool_choice"),
         )
-        runnable = self._bind_chat_tools(llm, tools, tool_choice=kwargs.get("tool_choice"))
         self._active_http_client = http_client
         try:
             for chunk in runnable.stream(messages, stop=stop):
@@ -235,6 +196,56 @@ class OpenAICompatibleProvider(BaseChatModel):
         return requires_reasoning_replay(api_base=chat_api_base, model=chat_model)
 
     # ── private helpers ──────────────────────────────────────────
+
+    def _mock_chat_message(
+        self,
+        messages: list[BaseMessage],
+        *,
+        tools: Sequence[dict[str, Any] | Any] | None,
+        cancel_event: threading.Event | None,
+    ) -> AIMessage:
+        self.last_chat_mock = True
+        if cancel_event is not None and cancel_event.is_set():
+            raise _CancelledError()
+        formatted_tools = self._openai_tools(tools)
+        user_text = self._content_text(next((m.content for m in reversed(messages) if isinstance(m, HumanMessage)), ""))
+        context_hint = " ".join(self._content_text(m.content)[:160] for m in messages if isinstance(m, SystemMessage))
+        if formatted_tools:
+            tool_names = [t.get("function", {}).get("name", "") for t in formatted_tools]
+            call_id = f"mock_call_{hashlib.md5(user_text.encode()).hexdigest()[:8]}"
+            return AIMessage(
+                content="",
+                tool_calls=[{"name": tool_names[0], "args": {"query": user_text[:120]}, "id": call_id}],
+            )
+        return AIMessage(content=f"Mock answer for: {user_text}\n\nContext summary: {context_hint[:220]}")
+
+    def _chat_runnable(
+        self,
+        *,
+        settings,
+        model: str | None,
+        temperature: float,
+        runtime_config: dict | None,
+        tools: Sequence[dict[str, Any] | Any] | None,
+        thinking_enabled: bool | None,
+        streaming: bool,
+        tool_choice: str | dict | bool | None,
+    ) -> tuple[Runnable, httpx.Client]:
+        chat_api_key = api_key(settings, runtime_config, purpose="chat")
+        if not chat_api_key:
+            raise RuntimeError("Chat model API key is not configured")
+        self.last_chat_mock = False
+        chat_api_base = api_base(settings, runtime_config, purpose="chat")
+        chat_model = model or (runtime_config or {}).get("chat_model") or settings.openai_model
+        llm, http_client = create_chat_openai(
+            api_base=chat_api_base,
+            api_key=chat_api_key,
+            model=chat_model,
+            temperature=temperature,
+            thinking_enabled=thinking_enabled,
+            streaming=streaming,
+        )
+        return self._bind_chat_tools(llm, tools, tool_choice=tool_choice), http_client
 
     def _bind_chat_tools(
         self,

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-import logging
 import threading
 from typing import Any, Callable
 
@@ -22,7 +21,7 @@ from core.runtime.cancel import register_run, unregister_run
 from core.runtime.dsml import (
     strip_or_block_leaked_tool_markup,
 )
-from core.runtime.graph_runtime import WorkflowGraphState, build_langgraph_workflow, workflow_thread_config
+from core.runtime.graph_runtime import build_langgraph_workflow, initial_workflow_state, workflow_thread_config
 from core.runtime.memory_runtime import load_runtime_memory_state, save_runtime_memory_state
 from core.runtime.message_utils import (
     message_content_text as _message_content_text,
@@ -40,9 +39,6 @@ from core.runtime.tool_loop import ToolLoopRunner
 from core.services.agents import normalize_memory, normalize_rag
 from core.services.rag import run_rag_pipeline
 from core.services.uploads import get_workspace_uploads
-
-logger = logging.getLogger(__name__)
-
 
 @dataclass
 class WorkflowStreamRun:
@@ -97,10 +93,9 @@ class WorkflowRunner:
         graph = self._build_langgraph_workflow(
             runtime=runtime,
             run=run,
-            user_message=user_message,
             stream=False,
         )
-        final_state = graph.invoke({"context": context, "steps": []}, config=workflow_thread_config(context))
+        final_state = graph.invoke(initial_workflow_state(user_message=user_message, context=context), config=workflow_thread_config(context))
         context = final_state["context"]
         steps = final_state["steps"]
 
@@ -145,14 +140,13 @@ class WorkflowRunner:
         graph = self._build_langgraph_workflow(
             runtime=runtime,
             run=run,
-            user_message=user_message,
             stream=True,
         )
         return WorkflowStreamRun(runtime=runtime, run=run, context=context, graph=graph)
 
     def stream_graph_parts(self, stream_run: WorkflowStreamRun):
         for part in stream_run.graph.stream(
-            {"context": stream_run.context, "steps": []},
+            initial_workflow_state(user_message=str(stream_run.context.get("input") or ""), context=stream_run.context),
             config=workflow_thread_config(stream_run.context),
             stream_mode=["custom", "values"],
             version="v2",
@@ -279,13 +273,10 @@ class WorkflowRunner:
         *,
         runtime,
         run: Run,
-        user_message: str,
         stream: bool,
     ):
         return build_langgraph_workflow(
             runtime=runtime,
-            run_id=run.id,
-            user_message=user_message,
             stream=stream,
             execute_node=self._execute_node,
             stream_llm_node=self._stream_llm_node,

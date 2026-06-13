@@ -7,7 +7,7 @@ from langchain_core.tools import StructuredTool
 pytest.importorskip("langgraph")
 
 from core.runtime.workflow import WorkflowRunner
-from core.runtime.graph_runtime import workflow_thread_config
+from core.runtime.graph_runtime import initial_workflow_state, workflow_thread_config
 
 
 def _runner_with_fake_persistence(monkeypatch):
@@ -37,11 +37,13 @@ def test_langgraph_workflow_invokes_nodes_in_order(monkeypatch):
     graph = runner._build_langgraph_workflow(
         runtime=runtime,
         run=SimpleNamespace(id=1),
-        user_message="hello",
         stream=False,
     )
     initial_context = _initial_context()
-    final_state = graph.invoke({"context": initial_context, "steps": []}, config=workflow_thread_config(initial_context))
+    final_state = graph.invoke(
+        initial_workflow_state(user_message="hello", context=initial_context),
+        config=workflow_thread_config(initial_context),
+    )
 
     assert final_state["context"]["trace"] == ["start", "knowledge", "answer"]
     assert [step["node_id"] for step in final_state["steps"]] == ["start", "knowledge", "answer"]
@@ -63,7 +65,6 @@ def test_langgraph_workflow_streams_custom_events(monkeypatch):
     graph = runner._build_langgraph_workflow(
         runtime=runtime,
         run=SimpleNamespace(id=1),
-        user_message="hello",
         stream=True,
     )
 
@@ -71,7 +72,7 @@ def test_langgraph_workflow_streams_custom_events(monkeypatch):
     final_state = None
     initial_context = _initial_context()
     for part in graph.stream(
-        {"context": initial_context, "steps": []},
+        initial_workflow_state(user_message="hello", context=initial_context),
         config=workflow_thread_config(initial_context),
         stream_mode=["custom", "values"],
         version="v2",

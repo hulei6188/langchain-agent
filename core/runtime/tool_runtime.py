@@ -32,8 +32,6 @@ class ToolGraphState(MessagesState, total=False):
     max_tool_calls: int
     max_tool_wall_time: int
     pending_calls: list[dict[str, Any]]
-    latest_response: AIMessage | None
-    loaded_skill_this_round: bool
     output: dict[str, Any]
 
 
@@ -137,13 +135,11 @@ def tool_jobs(state: ToolGraphState) -> list[dict]:
             tool_args = {"input": tool_args}
         is_skill_loader = tool_name == "load_skill"
         matching = next((tool for tool in state.get("bound_tools", []) if tool.name == tool_name), None)
-        langchain_tool = next((tool for tool in state.get("langchain_tools", []) if tool.name == tool_name), None)
         job = {
             "tc": tc,
             "tool_name": tool_name,
             "tool_args": tool_args,
             "matching": matching,
-            "langchain_tool": langchain_tool,
             "_session_key": str(context.get("session_id") or ""),
             "_agent_workdir": context.get("agent_workdir"),
             "internal": is_skill_loader,
