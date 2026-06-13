@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 import time
 
+from langchain_core.messages import HumanMessage
 from sqlalchemy.orm import Session
 
 from core.config import get_settings
@@ -180,8 +181,8 @@ def test_user_model_config(config: UserModelConfig, *, detect_image: bool = Fals
     try:
         runtime = user_model_runtime_config(config)
         provider = OpenAICompatibleProvider()
-        provider.chat(
-            [{"role": "user", "content": "connection test"}],
+        provider.invoke(
+            [HumanMessage(content="connection test")],
             model=runtime["chat_model"],
             temperature=0,
             runtime_config=runtime,
@@ -347,15 +348,14 @@ def _check_image_capability(provider: OpenAICompatibleProvider, runtime: dict, *
             "message": "" if ok else "Mock image probe treats this model name as text-only",
         }
     try:
-        provider.chat(
+        provider.invoke(
             [
-                {
-                    "role": "user",
-                    "content": [
+                HumanMessage(
+                    content=[
                         {"type": "text", "text": "describe this image briefly"},
                         {"type": "image_url", "image_url": {"url": _tiny_png_data_url()}},
-                    ],
-                }
+                    ]
+                )
             ],
             model=runtime["chat_model"],
             temperature=0,
