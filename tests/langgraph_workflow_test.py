@@ -278,6 +278,44 @@ def test_tool_subgraph_loops_back_to_model_after_tool_call(monkeypatch):
     )
 
 
+def test_tool_subgraph_stops_after_repeated_tool_errors(monkeypatch):
+    executed = []
+    provider = _FakeProvider(
+        responses=[
+            AIMessage(content="", tool_calls=[_tool_call(arguments={"query": "x"})]),
+            AIMessage(content="", tool_calls=[_tool_call(arguments={"query": "x"})]),
+            AIMessage(content="", tool_calls=[_tool_call(arguments={"query": "x"})]),
+            AIMessage(content="I could not use the tool with those arguments."),
+        ]
+    )
+    runner = WorkflowRunner(db=SimpleNamespace())
+    runner.provider = provider
+    monkeypatch.setattr("core.runtime.tool_runtime.runtime_tools", lambda db, agent, context: [_tool()])
+
+    def fake_tool(query: str = ""):
+        executed.append({"query": query})
+        raise ValueError("MCP tool request failed: Invalid input")
+
+    monkeypatch.setattr(
+        "core.runtime.tool_runtime.build_langchain_tool",
+        lambda *args, **kwargs: StructuredTool.from_function(fake_tool, name="test_tool", description="Test tool"),
+    )
+
+    output = runner._run_tool_node(
+        _agent(),
+        {"id": "tool", "type": "Tool", "config": {}},
+        _tool_context(),
+        stream=False,
+    )
+
+    assert output["draft"] == "I could not use the tool with those arguments."
+    assert output["tool_stats"]["total_calls"] == 3
+    assert output["tool_stats"]["max_rounds_reached"] is True
+    assert executed == [{"query": "x"}, {"query": "x"}, {"query": "x"}]
+    assert len(provider.chat_calls) == 4
+    assert provider.chat_calls[-1]["tools"] is None
+
+
 def test_tool_subgraph_disables_inherited_checkpointing():
     runner = ToolLoopRunner(
         db=SimpleNamespace(),

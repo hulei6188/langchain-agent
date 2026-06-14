@@ -32,6 +32,9 @@ class ToolGraphState(MessagesState, total=False):
     max_tool_calls: int
     max_tool_wall_time: int
     pending_calls: list[dict[str, Any]]
+    last_tool_error_signature: str
+    consecutive_tool_error_count: int
+    force_final_answer: bool
     output: dict[str, Any]
 
 

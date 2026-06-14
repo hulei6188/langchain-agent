@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 from datetime import timedelta
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, ToolMessage
+from langchain_core.tools import ToolException
 
 from core.integrations import mcp_client as mcp_client_module
 from core.integrations.mcp_client import _adapter_connection, _adapter_tool_result, _stdio_adapter_connection
@@ -173,6 +174,62 @@ def test_pooled_stdio_session_invokes_langchain_adapter_tool(monkeypatch):
             "input_schema": {"type": "object", "properties": {"selector": {"type": "string"}}},
         }
     ]
+
+
+def test_pooled_stdio_session_reports_tool_exception_without_restarting(monkeypatch):
+    fake_session = SimpleNamespace(initialized=False)
+    session_entries = []
+
+    async def initialize():
+        fake_session.initialized = True
+
+    fake_session.initialize = initialize
+
+    class FakeSessionContext:
+        def __init__(self, connection):
+            self.connection = connection
+
+        async def __aenter__(self):
+            session_entries.append(self.connection)
+            return fake_session
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+    class FakeAdapterTool:
+        name = "browser_click"
+        description = "Click in browser"
+        args_schema = {"type": "object", "properties": {"element": {"type": "string"}}}
+
+        async def ainvoke(self, arguments):
+            raise ToolException("Invalid input: expected string, received null")
+
+    monkeypatch.setattr(mcp_client_module, "create_adapter_session", FakeSessionContext)
+
+    async def fake_load_mcp_tools(session):
+        assert session is fake_session
+        return [FakeAdapterTool()]
+
+    monkeypatch.setattr(mcp_client_module, "load_adapter_mcp_tools", fake_load_mcp_tools)
+    pooled = mcp_client_module._PooledSession("key", "npx", ["@playwright/mcp"], None, None)
+
+    async def scenario():
+        try:
+            await pooled.call_tool("browser_click", {"element": None}, timeout_seconds=3)
+        except mcp_client_module.MCPClientError as exc:
+            message = str(exc)
+        else:  # pragma: no cover - defensive
+            raise AssertionError("Expected MCPClientError")
+        was_alive_after_tool_error = not pooled._dead
+        await pooled._stop()
+        return message, was_alive_after_tool_error
+
+    message, was_alive_after_tool_error = asyncio.run(scenario())
+
+    assert fake_session.initialized is True
+    assert len(session_entries) == 1
+    assert was_alive_after_tool_error is True
+    assert "Invalid input" in message
 
 
 def test_tool_graph_limit_and_event_helpers():

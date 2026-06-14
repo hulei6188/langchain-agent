@@ -127,6 +127,16 @@ def validate_mcp_input(schema, arguments: dict, *, path: str = "") -> None:
         value = arguments.get(key) if isinstance(arguments, dict) else None
         if _is_missing_mcp_value(value, spec):
             raise ValueError(f"MCP input '{field_path}' is required")
+
+    if not isinstance(arguments, dict):
+        return
+    for key, spec in properties.items():
+        if key not in arguments:
+            continue
+        field_path = f"{path}.{key}" if path else str(key)
+        value = arguments.get(key)
+        if isinstance(spec, dict) and spec.get("type") and value is None:
+            raise ValueError(f"MCP input '{field_path}' cannot be null")
         if isinstance(spec, dict):
             field_type = spec.get("type")
             if field_type == "object" and isinstance(value, dict):

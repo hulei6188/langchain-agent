@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import time
 from collections.abc import Callable
 from typing import Any
@@ -32,6 +33,7 @@ from core.runtime.tool_runtime import (
 MAX_TOOL_CALLS_PER_RUN = 200
 MAX_TOOL_ROUNDS_PER_RUN = 50
 MAX_TOOL_WALL_TIME_SECONDS = 1800
+MAX_REPEATED_TOOL_ERRORS_PER_RUN = 3
 
 
 class ToolLoopRunner:
@@ -63,7 +65,7 @@ class ToolLoopRunner:
         if state.get("output"):
             return state["output"]
         graph = self._build_graph(agent, stream=stream, writer=writer)
-        final_state = graph.invoke(state)
+        final_state = graph.invoke(state, config={"recursion_limit": (MAX_TOOL_ROUNDS_PER_RUN * 2) + 10})
         return final_state.get("output") or tool_final_output(
             final_state,
             AIMessage(content=""),
@@ -98,6 +100,9 @@ class ToolLoopRunner:
             "max_tool_calls": MAX_TOOL_CALLS_PER_RUN,
             "max_tool_wall_time": MAX_TOOL_WALL_TIME_SECONDS,
             "pending_calls": [],
+            "last_tool_error_signature": "",
+            "consecutive_tool_error_count": 0,
+            "force_final_answer": False,
         }
 
     def _build_graph(
@@ -126,7 +131,8 @@ class ToolLoopRunner:
         graph_builder.add_conditional_edges(
             "tools",
             lambda state: "final_answer"
-            if tool_limits_reached(state, max_tool_calls=MAX_TOOL_CALLS_PER_RUN, max_tool_rounds=MAX_TOOL_ROUNDS_PER_RUN)
+            if state.get("force_final_answer")
+            or tool_limits_reached(state, max_tool_calls=MAX_TOOL_CALLS_PER_RUN, max_tool_rounds=MAX_TOOL_ROUNDS_PER_RUN)
             else "call_model",
             {"call_model": "call_model", "final_answer": "final_answer"},
         )
@@ -234,6 +240,7 @@ class ToolLoopRunner:
         web_sources = list(state.get("web_sources") or [])
         search_status = dict(state.get("search_status") or {})
         loaded_skill_this_round = False
+        round_error_signatures: list[str] = []
 
         for job in jobs:
             tool_call_id = job["tc"].get("id") or ""
@@ -258,12 +265,28 @@ class ToolLoopRunner:
                 writer=writer,
             )
             loaded_skill_this_round = loaded_skill_this_round or loaded
+            if result.get("error") or result.get("status") == "error":
+                round_error_signatures.append(_tool_error_signature(job, result))
 
         if loaded_skill_this_round:
             _refresh_system_message(messages, agent, context)
             bound_tools, langchain_tools = tool_runtime_bindings(self.db, agent, context, state.get("allowed_names") or set())
             state["bound_tools"] = bound_tools
             state["langchain_tools"] = langchain_tools
+
+        if jobs and len(round_error_signatures) == len(jobs):
+            current_error_signature = "\n".join(round_error_signatures)
+            previous_error_signature = str(state.get("last_tool_error_signature") or "")
+            consecutive_errors = int(state.get("consecutive_tool_error_count") or 0)
+            consecutive_errors = consecutive_errors + 1 if current_error_signature == previous_error_signature else 1
+            state["last_tool_error_signature"] = current_error_signature
+            state["consecutive_tool_error_count"] = consecutive_errors
+            if consecutive_errors >= MAX_REPEATED_TOOL_ERRORS_PER_RUN:
+                state["force_final_answer"] = True
+        else:
+            state["last_tool_error_signature"] = ""
+            state["consecutive_tool_error_count"] = 0
+            state["force_final_answer"] = False
 
         state["messages"] = messages
         state["events"] = events
@@ -285,6 +308,8 @@ class ToolLoopRunner:
     ) -> ToolGraphState:
         self.raise_if_cancelled()
         state = dict(state)
+        if state.get("output"):
+            return state
         latest = next(
             (message for message in reversed(state.get("messages", [])) if isinstance(message, AIMessage)),
             None,
@@ -355,3 +380,12 @@ def _refresh_system_message(messages: list[BaseMessage], agent, context: dict) -
     if not messages or not isinstance(messages[0], SystemMessage):
         return
     messages[0] = build_llm_messages(agent, context)[0]
+
+
+def _tool_error_signature(job: dict, result: dict) -> str:
+    try:
+        args_preview = json.dumps(job.get("tool_args") or {}, sort_keys=True, default=str)
+    except TypeError:
+        args_preview = str(job.get("tool_args") or {})
+    error = result.get("error") or result.get("content") or result.get("result_preview") or ""
+    return f"{job.get('tool_name') or ''}|{args_preview}|{str(error)[:500]}"

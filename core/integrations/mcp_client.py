@@ -14,6 +14,8 @@ import logging
 import threading
 import time
 
+from langchain_core.tools import ToolException
+
 logger = logging.getLogger("mcp_client")
 
 try:
@@ -627,6 +629,8 @@ class _PooledSession:
                     return _adapter_tool_result(result)
                 except MCPClientError:
                     raise
+                except ToolException as exc:
+                    raise MCPClientError(_describe_mcp_exception(exc)) from exc
                 except BaseException:
                     logger.warning("MCP stdio session [%s] call_tool failed", self.key, exc_info=True)
                     self._dead = True
@@ -761,6 +765,8 @@ class _StdioSessionPool:
             return self._run_coroutine(
                 self._call_tool_with_retry(session, tool_name, arguments, timeout_seconds)
             )
+        except MCPClientError:
+            raise
         except BaseException:
             # If retry also failed, remove from pool
             with self._sync_lock:
@@ -783,6 +789,8 @@ class _StdioSessionPool:
         session = self._acquire_session(session_key, command, args, env, cwd)
         try:
             return self._run_coroutine(self._discover_with_retry(session, timeout_seconds))
+        except MCPClientError:
+            raise
         except BaseException:
             with self._sync_lock:
                 removed = self._sessions.pop(session.key, None) if self._sessions.get(session.key) is session else None
