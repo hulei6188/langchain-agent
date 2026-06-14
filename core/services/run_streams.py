@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import time
@@ -17,6 +18,8 @@ from core.services.run_events import append_run_event, sse_event
 from core.services.user_models import resolve_user_model_config, user_model_runtime_config
 
 logger = logging.getLogger(__name__)
+_BACKGROUND_STREAM_TASKS: set[asyncio.Task] = set()
+_QUEUE_DONE = object()
 
 PUBLIC_CHAT_ERRORS = (
     "Selected model does not support document input",
@@ -36,17 +39,46 @@ PUBLIC_CHAT_ERRORS = (
 
 
 async def stream_workflow_sse(params: dict) -> AsyncIterator[str]:
-    """Stream a workflow run directly from LangGraph runtime events as SSE."""
-    db = SessionLocal()
+    """Stream workflow events without tying workflow execution to the HTTP client.
+
+    Browser refreshes cancel the current StreamingResponse task. The producer task
+    keeps running, persists events to run_events, and later clients can replay them
+    via /api/runs/{run_id}/events.
+    """
+    queue: asyncio.Queue[str | object] = asyncio.Queue()
+    consumer_active = True
+
+    async def publish(item: str | object) -> None:
+        if consumer_active:
+            await queue.put(item)
+
+    async def produce() -> None:
+        db = SessionLocal()
+        try:
+            async for event in execute_workflow_stream(db, params):
+                await publish(event)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.exception("Workflow stream crashed")
+            _mark_latest_running_run_failed(db, session_id=params["session_id"])
+            await publish(sse_event("error", safe_stream_error(exc)))
+        finally:
+            db.close()
+            await publish(_QUEUE_DONE)
+
+    producer = asyncio.create_task(produce())
+    _BACKGROUND_STREAM_TASKS.add(producer)
+    producer.add_done_callback(_BACKGROUND_STREAM_TASKS.discard)
+
     try:
-        async for event in execute_workflow_stream(db, params):
-            yield event
-    except Exception as exc:
-        logger.exception("Workflow stream crashed")
-        _mark_latest_running_run_failed(db, session_id=params["session_id"])
-        yield sse_event("error", safe_stream_error(exc))
+        while True:
+            item = await queue.get()
+            if item is _QUEUE_DONE:
+                break
+            yield str(item)
     finally:
-        db.close()
+        consumer_active = False
 
 
 async def execute_workflow_stream(db: Session, params: dict) -> AsyncIterator[str]:

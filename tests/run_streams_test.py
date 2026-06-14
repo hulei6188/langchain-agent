@@ -39,6 +39,113 @@ def test_stream_workflow_sse_closes_session(monkeypatch):
     assert db.closed is True
 
 
+def test_stream_workflow_sse_continues_after_consumer_disconnect(monkeypatch):
+    async def scenario():
+        agent = SimpleNamespace(id=1, user_model_config_id=None)
+        chat_session = SimpleNamespace(id=2, title="Existing title")
+        allow_continue = asyncio.Event()
+        done_persisted = asyncio.Event()
+
+        class FakeRunDb:
+            def __init__(self):
+                self.added = []
+                self.closed = False
+
+            def get(self, model, row_id):
+                if model is Agent:
+                    return agent
+                if model is ChatSession:
+                    return chat_session
+                return None
+
+            def add(self, item):
+                self.added.append(item)
+
+            def commit(self):
+                pass
+
+            def refresh(self, item):
+                if getattr(item, "id", None) is None:
+                    item.id = 42
+
+            def rollback(self):
+                pass
+
+            def close(self):
+                self.closed = True
+
+        class FakeRunner:
+            def __init__(self, db):
+                self.db = db
+                self.closed = False
+
+            def start_stream_run(self, **kwargs):
+                self.started = kwargs
+                return SimpleNamespace(run=SimpleNamespace(id=99), context={"session_id": 2})
+
+            async def astream_graph_events(self, workflow_stream):
+                await allow_continue.wait()
+                yield {
+                    "event": "on_chain_stream",
+                    "name": "LangGraph",
+                    "data": {"chunk": ("custom", {"event": "token", "content": "hello"})},
+                }
+                yield {
+                    "event": "on_chain_stream",
+                    "name": "LangGraph",
+                    "data": {"chunk": ("values", {"context": {"answer": "hello"}, "steps": []})},
+                }
+
+            def complete_stream_run(self, **kwargs):
+                return "hello", []
+
+            def close_stream_run(self, run):
+                self.closed = True
+
+        db = FakeRunDb()
+        persisted = []
+
+        def fake_append_run_event(db, run_id, event, payload, sse):
+            persisted.append((run_id, event, payload))
+            if event == "done":
+                done_persisted.set()
+
+        monkeypatch.setattr("core.services.run_streams.SessionLocal", lambda: db)
+        monkeypatch.setattr("core.services.run_streams.WorkflowRunner", FakeRunner)
+        monkeypatch.setattr("core.services.run_streams.append_run_event", fake_append_run_event)
+
+        stream = stream_workflow_sse(
+            {
+                "agent_id": 1,
+                "session_id": 2,
+                "user_message": "hi",
+                "mode": "draft",
+                "variables": {},
+                "rag_enabled": None,
+                "rag_options": {},
+                "thinking_enabled": None,
+                "search_enabled": None,
+                "attachments": [],
+                "user_message_id": 7,
+                "user_id": 3,
+            }
+        )
+
+        first = await stream.__anext__()
+        assert first.startswith("event: run_started")
+
+        await stream.aclose()
+        allow_continue.set()
+        await asyncio.wait_for(done_persisted.wait(), timeout=1)
+
+        return persisted, db
+
+    persisted, db = asyncio.run(scenario())
+
+    assert [event for _, event, _ in persisted] == ["run_started", "token", "done"]
+    assert db.closed is True
+
+
 def test_execute_workflow_stream_consumes_graph_stream_parts(monkeypatch):
     agent = SimpleNamespace(id=1, user_model_config_id=None)
     chat_session = SimpleNamespace(id=2, title="Existing title")

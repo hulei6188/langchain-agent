@@ -2,17 +2,18 @@ from __future__ import annotations
 
 import time
 from collections.abc import Iterable
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from api.deps import get_current_membership
-from core.db.models import Run, Session as ChatSession, WorkspaceMember
+from core.db.models import Message, Run, Session as ChatSession, WorkspaceMember
 from core.db.session import SessionLocal, get_db
 from core.runtime.cancel import cancel_run
 from core.security.permissions import can_manage
-from core.services.run_events import list_run_events_since, run_stream_snapshot, sse_event, sse_event_name
+from core.services.run_events import append_run_event, list_run_events_since, run_stream_snapshot, sse_event, sse_event_name
 
 
 router = APIRouter(prefix="/api/runs", tags=["runs"])
@@ -57,10 +58,50 @@ def cancel_run_endpoint(
     membership: WorkspaceMember = Depends(get_current_membership),
     db: Session = Depends(get_db),
 ):
-    _run, _session_id = _require_run_access(db, run_id, membership)
+    run, session_id = _require_run_access(db, run_id, membership)
     if cancel_run(run_id):
         return {"cancelled": True, "run_id": run_id}
+    if run.status == "running":
+        message_id = _mark_disconnected_run_cancelled(db, run=run, session_id=session_id)
+        return {
+            "cancelled": True,
+            "run_id": run_id,
+            "message_id": message_id,
+            "message": "Run was no longer active and has been marked cancelled",
+        }
     return {"cancelled": False, "run_id": run_id, "message": "Run not active or already completed"}
+
+
+def _mark_disconnected_run_cancelled(db: Session, *, run: Run, session_id: int) -> int | None:
+    snapshot = run_stream_snapshot(db, run_id=run.id)
+    content = str(snapshot.get("content") or "")
+    reasoning = str(snapshot.get("reasoning") or "")
+    raw_sources = snapshot.get("sources")
+    sources = raw_sources if isinstance(raw_sources, list) else []
+    assistant_id = None
+    if content or reasoning:
+        assistant = Message(
+            session_id=session_id,
+            role="assistant",
+            content=content,
+            reasoning=reasoning,
+            sources=sources,
+            meta={"cancelled": True, "partial": True},
+        )
+        db.add(assistant)
+        db.flush()
+        assistant_id = assistant.id
+    run.status = "cancelled"
+    run.completed_at = datetime.now(timezone.utc)
+    payload = {
+        "session_id": session_id,
+        "run_id": run.id,
+        "message_id": assistant_id,
+        "content": content,
+        "reasoning_duration_ms": None,
+    }
+    append_run_event(db, run_id=run.id, event="cancelled", payload=payload, sse=sse_event("cancelled", payload))
+    return assistant_id
 
 
 @router.get("/{run_id}/events")
