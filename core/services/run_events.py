@@ -48,6 +48,21 @@ def run_event_count(db: Session, *, run_id: int) -> int:
     return int(db.query(func.count(RunEvent.id)).filter(RunEvent.run_id == run_id).scalar() or 0)
 
 
+def append_snapshot_timeline_event(timeline_events: list[dict], event_name: str, data: dict) -> None:
+    if event_name == "reasoning_token":
+        content = str(data.get("content") or "")
+        if not content:
+            return
+        if timeline_events and timeline_events[-1].get("event") == "reasoning_token":
+            previous_data = timeline_events[-1].setdefault("data", {})
+            previous_data["content"] = f"{previous_data.get('content') or ''}{content}"
+            return
+        timeline_events.append({"event": "reasoning_token", "data": {"content": content}})
+        return
+    if event_name in {"tool_call", "tool_call_start", "tool_call_result", "search_status"}:
+        timeline_events.append({"event": event_name, "data": data})
+
+
 def run_stream_snapshot(db: Session, *, run_id: int) -> dict:
     rows = (
         db.query(RunEvent)
@@ -76,12 +91,14 @@ def run_stream_snapshot(db: Session, *, run_id: int) -> dict:
         elif event_name == "provisional_commit":
             provisional_content = ""
         elif event_name == "reasoning_token":
-            reasoning += str(data.get("content") or "")
+            chunk = str(data.get("content") or "")
+            reasoning += chunk
+            append_snapshot_timeline_event(timeline_events, event_name, {"content": chunk})
         elif event_name == "sources":
             items = data.get("items")
             sources = items if isinstance(items, list) else []
-        elif event_name in {"tool_call", "tool_call_start", "tool_call_result", "search_status"}:
-            timeline_events.append({"event": event_name, "data": data})
+        else:
+            append_snapshot_timeline_event(timeline_events, event_name, data)
 
     return {
         "event_index": len(rows),

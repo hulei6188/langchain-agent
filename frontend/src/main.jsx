@@ -2011,37 +2011,45 @@ function App() {
       const snapshotContent = String(data.content || '');
       const snapshotReasoning = String(data.reasoning || '');
       const snapshotSources = Array.isArray(data.sources) ? data.sources : [];
+      const snapshotTimelineEvents = Array.isArray(data.timeline_events) ? data.timeline_events : [];
+      const hasSnapshotReasoningTimeline = snapshotTimelineEvents.some((item) => item?.event === 'reasoning_token' && item?.data?.content);
       if (snapshotSources.length) {
         writeSessionSources(messageKey, snapshotSources, { visible });
       }
       updateSessionMessages(messageKey, (currentMessages) => {
         const { next, last, index } = ensureAssistantTail(currentMessages, {
           pending: true,
-          reasoningVisible: Boolean(snapshotReasoning),
+          reasoningVisible: Boolean(snapshotReasoning || hasSnapshotReasoningTimeline),
           reasoningPending: Boolean(snapshotReasoning) && !snapshotContent,
-          reasoningStartedAt: snapshotReasoning ? Date.now() : null,
+          reasoningStartedAt: snapshotReasoning || hasSnapshotReasoningTimeline ? Date.now() : null,
         });
         let assistant = {
           ...last,
           pending: true,
           content: snapshotContent || last.content || '',
           reasoning: snapshotReasoning || last.reasoning || '',
-          reasoningVisible: Boolean(snapshotReasoning) || last.reasoningVisible,
+          reasoningVisible: Boolean(snapshotReasoning || hasSnapshotReasoningTimeline) || last.reasoningVisible,
           reasoningPending: Boolean(snapshotReasoning) && !snapshotContent,
-          reasoningStartedAt: snapshotReasoning ? (last.reasoningStartedAt || Date.now()) : last.reasoningStartedAt,
+          reasoningStartedAt: snapshotReasoning || hasSnapshotReasoningTimeline ? (last.reasoningStartedAt || Date.now()) : last.reasoningStartedAt,
           sources: snapshotSources.length ? snapshotSources : last.sources,
           _provisionalContent: data.provisional_content || last._provisionalContent,
         };
-        if (snapshotReasoning) {
+        if (snapshotTimelineEvents.length) {
+          assistant.reasoningTimeline = [];
+          snapshotTimelineEvents.forEach((item) => {
+            if (item?.event === 'reasoning_token') {
+              assistant = appendReasoningTimelineItem(assistant, item?.data?.content || '');
+            } else {
+              assistant = appendToolTimelineItem(assistant, item?.data || {}, item?.event || 'tool_call');
+            }
+          });
+        } else if (snapshotReasoning) {
           assistant.reasoningTimeline = [{
             id: `snapshot-reasoning-${data.event_index || Date.now()}`,
             type: 'reasoning',
             content: snapshotReasoning,
           }];
         }
-        (Array.isArray(data.timeline_events) ? data.timeline_events : []).forEach((item) => {
-          assistant = appendToolTimelineItem(assistant, item?.data || {}, item?.event || 'tool_call');
-        });
         next[index] = assistant;
         return next;
       }, { visible });

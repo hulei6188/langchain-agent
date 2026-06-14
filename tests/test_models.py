@@ -48,16 +48,48 @@ def test_run_events_persist_replay_and_snapshot():
 
         append_run_event(db, run_id=1, event="token", payload={"content": "hello "}, sse="event: token\ndata: {}\n\n")
         append_run_event(db, run_id=1, event="token", payload={"content": "world"}, sse="event: token\ndata: {}\n\n")
+        append_run_event(db, run_id=1, event="reasoning_token", payload={"content": "inspect page"}, sse="event: reasoning_token\ndata: {}\n\n")
+        append_run_event(
+            db,
+            run_id=1,
+            event="tool_call_start",
+            payload={"tool_name": "browser_snapshot", "status": "running"},
+            sse="event: tool_call_start\ndata: {}\n\n",
+        )
+        append_run_event(db, run_id=1, event="reasoning_token", payload={"content": "after tool"}, sse="event: reasoning_token\ndata: {}\n\n")
+        append_run_event(
+            db,
+            run_id=1,
+            event="tool_call_result",
+            payload={"tool_name": "browser_snapshot", "status": "success", "result_preview": "ok"},
+            sse="event: tool_call_result\ndata: {}\n\n",
+        )
         append_run_event(db, run_id=1, event="sources", payload={"items": [{"title": "doc"}]}, sse="event: sources\ndata: {}\n\n")
 
         replay = list_run_events_since(db, run_id=1, since=1)
-        assert [event.sequence for event in replay] == [1, 2]
-        assert [event.event for event in replay] == ["token", "sources"]
+        assert [event.sequence for event in replay] == [1, 2, 3, 4, 5, 6]
+        assert [event.event for event in replay] == [
+            "token",
+            "reasoning_token",
+            "tool_call_start",
+            "reasoning_token",
+            "tool_call_result",
+            "sources",
+        ]
 
         snapshot = run_stream_snapshot(db, run_id=1)
-        assert snapshot["event_index"] == 3
+        assert snapshot["event_index"] == 7
         assert snapshot["content"] == "hello world"
+        assert snapshot["reasoning"] == "inspect pageafter tool"
         assert snapshot["sources"] == [{"title": "doc"}]
+        assert [event["event"] for event in snapshot["timeline_events"]] == [
+            "reasoning_token",
+            "tool_call_start",
+            "reasoning_token",
+            "tool_call_result",
+        ]
+        assert snapshot["timeline_events"][0]["data"]["content"] == "inspect page"
+        assert snapshot["timeline_events"][2]["data"]["content"] == "after tool"
     finally:
         db.close()
 
