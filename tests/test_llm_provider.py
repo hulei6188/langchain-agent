@@ -109,6 +109,28 @@ def test_chat_model_factory_reasoning_kwargs():
         model="deepseek-reasoner",
         thinking_enabled=False,
     ) == {"extra_body": {"thinking": {"type": "disabled"}}}
+    assert chat_models_module.chat_model_kwargs(
+        api_base="https://gateway.example/v1",
+        model="custom-reasoner",
+        thinking_enabled=True,
+        runtime_config={"reasoning_type": "native"},
+    ) == {"extra_body": {"enable_thinking": True}}
+    assert chat_models_module.chat_model_kwargs(
+        api_base="https://gateway.example/v1",
+        model="deepseek-v4-pro",
+        thinking_enabled=True,
+        runtime_config={"reasoning_type": "native"},
+    ) == {"reasoning_effort": "high", "extra_body": {"thinking": {"type": "enabled"}}}
+    assert chat_models_module.chat_model_kwargs(
+        api_base="https://gateway.example/v1",
+        model="deepseek-v4-pro",
+        thinking_enabled=False,
+        runtime_config={"reasoning_type": "native"},
+    ) == {"extra_body": {"thinking": {"type": "disabled"}}}
+    assert chat_models_module.requires_reasoning_replay(
+        api_base="https://gateway.example/v1",
+        model="deepseek-ai/deepseek-r1",
+    ) is True
     assert chat_models_module.requires_reasoning_replay(
         api_base="https://api.deepseek.com",
         model="deepseek-chat",

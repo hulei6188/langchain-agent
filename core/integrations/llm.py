@@ -244,6 +244,7 @@ class OpenAICompatibleProvider(BaseChatModel):
             temperature=temperature,
             thinking_enabled=thinking_enabled,
             streaming=streaming,
+            runtime_config=runtime_config,
         )
         return self._bind_chat_tools(llm, tools, tool_choice=tool_choice), http_client
 

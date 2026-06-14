@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import httpx
@@ -14,6 +15,7 @@ def create_chat_openai(
     temperature: float,
     thinking_enabled: bool | None,
     streaming: bool,
+    runtime_config: dict | None = None,
 ) -> tuple[ChatOpenAI, httpx.Client]:
     timeout = httpx.Timeout(120.0 if streaming else 60.0)
     http_client = httpx.Client(timeout=timeout)
@@ -21,6 +23,7 @@ def create_chat_openai(
         api_base=api_base,
         model=model,
         thinking_enabled=thinking_enabled,
+        runtime_config=runtime_config,
     )
     return (
         ChatOpenAI(
@@ -38,7 +41,13 @@ def create_chat_openai(
     )
 
 
-def chat_model_kwargs(*, api_base: str, model: str, thinking_enabled: bool | None) -> dict[str, Any]:
+def chat_model_kwargs(
+    *,
+    api_base: str,
+    model: str,
+    thinking_enabled: bool | None,
+    runtime_config: dict | None = None,
+) -> dict[str, Any]:
     kwargs: dict[str, Any] = {}
     extra_body: dict[str, Any] = {}
     if is_deepseek(api_base, model):
@@ -46,10 +55,12 @@ def chat_model_kwargs(*, api_base: str, model: str, thinking_enabled: bool | Non
         extra_body["thinking"] = {"type": "enabled" if enabled else "disabled"}
         if enabled:
             kwargs["reasoning_effort"] = "high"
-    elif thinking_enabled is not None and is_dashscope_qwen(api_base, model):
-        extra_body["enable_thinking"] = bool(thinking_enabled)
     elif thinking_enabled and is_openai_reasoning_model(api_base, model):
         kwargs["reasoning_effort"] = "high"
+    elif thinking_enabled is not None and is_dashscope_qwen(api_base, model):
+        extra_body["enable_thinking"] = bool(thinking_enabled)
+    elif thinking_enabled is not None and runtime_reasoning_type(runtime_config) == "native":
+        extra_body["enable_thinking"] = bool(thinking_enabled)
     if extra_body:
         kwargs["extra_body"] = extra_body
     return kwargs

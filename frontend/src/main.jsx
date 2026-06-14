@@ -1668,6 +1668,7 @@ function App() {
     const effectiveRagEnabled = ragRuntime.available && ragEnabled;
     const thinkingCapability = reasoningCapabilityForModel(currentModel);
     const effectiveThinkingEnabled = thinkingEnabled && thinkingCapability.supported;
+    const expectsReasoningStream = effectiveThinkingEnabled && thinkingCapability.type === 'native';
     const effectiveSearchEnabled = webSearchRuntime.available && searchEnabled;
     if (thinkingEnabled && !thinkingCapability.supported) {
       setThinkingEnabled(false);
@@ -1729,9 +1730,9 @@ function App() {
         pending: true,
         reasoning: '',
         reasoningTimeline: [],
-        reasoningVisible: effectiveThinkingEnabled,
-        reasoningPending: effectiveThinkingEnabled,
-        reasoningStartedAt: effectiveThinkingEnabled ? Date.now() : null,
+        reasoningVisible: expectsReasoningStream,
+        reasoningPending: expectsReasoningStream,
+        reasoningStartedAt: expectsReasoningStream ? Date.now() : null,
         reasoningFinishedAt: null,
       },
     ], { visible: true });

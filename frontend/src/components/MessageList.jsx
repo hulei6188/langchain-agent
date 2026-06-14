@@ -105,6 +105,7 @@ function MessageActivity({ message }) {
     message.reasoningPending
     || normalizeReasoningBlock(message.reasoning)
     || timeline.some((item) => item?.type === 'reasoning' && normalizeReasoningBlock(item.content))
+    || (message.reasoningVisible !== false && message.reasoningStartedAt)
   );
   const toolItems = reasoningTimelineItems(
     message.reasoning || '',
@@ -169,11 +170,12 @@ function MessageReasoning({ content, timeline = [], toolCalls = [], pending, sta
   }
 
   const duration = formatThinkingDuration(startedAt, finishedAt, now, pending ? null : durationMs);
-  const statusText = pending ? '思考中' : '已思考';
-  const durationText = duration ? (pending ? `（${duration}）` : `（用时 ${duration}）`) : '';
   const timelineItems = reasoningTimelineItems(content, timeline, toolCalls, pending);
+  const hasVisibleReasoning = timelineItems.some((item) => item.type === 'reasoning' && !item.placeholder);
+  const statusText = pending ? '思考中' : hasVisibleReasoning ? '已思考' : '已请求深度思考';
+  const durationText = duration ? (pending ? `（${duration}）` : `（用时 ${duration}）`) : '';
   const contentLength = timelineItems
-    .filter((item) => item.type === 'reasoning')
+    .filter((item) => item.type === 'reasoning' && !item.placeholder)
     .reduce((total, item) => total + String(item.content || '').length, 0);
 
   return (
@@ -345,7 +347,10 @@ function reasoningTimelineItems(content, timeline, toolCalls, pending) {
     items.push({
       id: 'reasoning-waiting',
       type: 'reasoning',
-      content: pending ? '等待模型返回推理过程...' : '暂无推理过程。',
+      placeholder: true,
+      content: pending
+        ? '等待模型返回推理过程...'
+        : '已向模型开启深度思考，但当前模型或 API 网关没有返回可展示的推理过程。',
     });
   }
   return items;

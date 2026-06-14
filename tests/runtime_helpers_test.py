@@ -9,6 +9,7 @@ from core.integrations.mcp_client import _adapter_connection, _adapter_tool_resu
 from core.integrations.vector_store import MemoryVectorStore
 from core.runtime.agent_runtime import validate_model_capabilities
 from core.runtime.langgraph_persistence import postgres_conn_string
+from core.runtime.message_utils import message_reasoning_content
 from core.runtime.memory_runtime import save_runtime_memory_state
 from core.services.memory import delete_session_memory_payload, get_session_memory_payload, update_session_memory
 from core.runtime.persistence import persist_intermediate_message, trim_history_content
@@ -252,6 +253,26 @@ def test_stream_llm_response_emits_reasoning_and_tokens():
     ]
     assert response.content == "answer"
     assert response.additional_kwargs["reasoning_content"] == "why"
+
+
+def test_reasoning_content_supports_blocks_and_response_metadata():
+    block_chunk = AIMessageChunk(
+        content=[
+            {"type": "reasoning", "text": "first "},
+            {"type": "text", "text": "answer"},
+        ]
+    )
+    metadata_chunk = AIMessageChunk(
+        content="",
+        response_metadata={
+            "reasoning_details": [
+                {"type": "reasoning.text", "text": "second"},
+            ]
+        },
+    )
+
+    assert message_reasoning_content(block_chunk) == "first "
+    assert message_reasoning_content(metadata_chunk) == "second"
 
 
 def test_prompting_helpers_filter_leaked_dsml_history_and_merge_variables():
