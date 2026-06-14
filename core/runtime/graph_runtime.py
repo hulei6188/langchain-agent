@@ -58,8 +58,7 @@ def build_langgraph_workflow(
         )
 
     edge_sources = {edge["source"] for edge in spec["edges"]}
-    edge_targets = {edge["target"] for edge in spec["edges"]}
-    start_node_ids = [node_id for node_id in graph_names if node_id not in edge_targets] or [next(iter(graph_names))]
+    start_node_ids = [spec["entrypoint"]] if spec.get("entrypoint") in graph_names else [next(iter(graph_names))]
     for node_id in start_node_ids:
         graph_builder.add_edge(START, graph_names[node_id])
     for edge in spec["edges"]:

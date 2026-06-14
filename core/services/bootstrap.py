@@ -13,15 +13,10 @@ from core.db.models import (
 )
 from core.security.auth import hash_password
 from core.services.builtin_tools import BUILTIN_TOOLS
+from core.runtime.spec import default_workflow
 
 
-DEFAULT_WORKFLOW = [
-    {"id": "start", "type": "Start", "name": "接收用户输入", "config": {}},
-    {"id": "knowledge", "type": "Knowledge", "name": "检索绑定知识库", "config": {"top_k": 4}},
-    {"id": "tool", "type": "Tool", "name": "调用绑定工具", "config": {"tools": []}},
-    {"id": "llm", "type": "LLM", "name": "生成候选回答", "config": {}},
-    {"id": "answer", "type": "Answer", "name": "输出最终回答", "config": {}},
-]
+DEFAULT_WORKFLOW = default_workflow()
 
 
 def ensure_builtin_tools(db: Session) -> None:

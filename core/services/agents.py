@@ -27,6 +27,7 @@ from core.db.models import (
     WorkflowDefinition,
 )
 from core.config import get_settings
+from core.runtime.spec import workflow_graph_spec
 from core.services.bootstrap import DEFAULT_WORKFLOW
 from core.services.memory import delete_session_memory_payload
 from core.services.models import model_payload
@@ -106,6 +107,7 @@ def get_agent_detail(db: Session, agent: Agent) -> dict:
     tool_ids = [row.tool_id for row in db.query(AgentTool).filter(AgentTool.agent_id == agent.id).all()]
     tools = db.query(Tool).filter(Tool.id.in_(tool_ids)).all() if tool_ids else []
     workflow = db.query(WorkflowDefinition).filter(WorkflowDefinition.agent_id == agent.id).first()
+    workflow_graph = workflow_graph_spec(workflow.nodes if workflow else DEFAULT_WORKFLOW)
     settings = ensure_agent_settings(db, agent.id)
     model_config = db.get(ModelConfig, agent.model_id) if agent.model_id else None
     user_model_config = db.get(UserModelConfig, agent.user_model_config_id) if agent.user_model_config_id else None
@@ -115,7 +117,8 @@ def get_agent_detail(db: Session, agent: Agent) -> dict:
         "system_prompt": current_agent_text("system_prompt", agent.system_prompt),
         "knowledge_base_ids": kb_ids,
         "tools": [tool_payload(tool) for tool in tools],
-        "workflow": workflow.nodes if workflow else DEFAULT_WORKFLOW,
+        "workflow": workflow_graph["nodes"],
+        "workflow_graph": workflow_graph,
         "model_config": model_payload(model_config) if model_config else None,
         "user_model_config": user_model_snapshot(user_model_config),
         "suggested_questions": settings.suggested_questions or [],
@@ -144,7 +147,7 @@ def create_agent(db: Session, *, workspace_id: int, user_id: int, payload: dict)
     )
     db.add(agent)
     db.flush()
-    db.add(WorkflowDefinition(agent_id=agent.id, nodes=DEFAULT_WORKFLOW))
+    db.add(WorkflowDefinition(agent_id=agent.id, nodes=workflow_graph_spec(DEFAULT_WORKFLOW)))
     db.add(
         AgentSettings(
             agent_id=agent.id,
@@ -344,7 +347,7 @@ def copy_agent_from_market(db: Session, *, source: Agent, user_id: int, workspac
     )
     workflow = db.query(WorkflowDefinition).filter(WorkflowDefinition.agent_id == copied.id).first()
     if workflow:
-        workflow.nodes = snapshot.get("workflow") or DEFAULT_WORKFLOW
+        workflow.nodes = workflow_graph_spec(snapshot.get("workflow_graph") or snapshot.get("workflow") or DEFAULT_WORKFLOW)
         db.commit()
     db.refresh(copied)
     return copied

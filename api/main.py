@@ -371,15 +371,15 @@ def get_workflow(agent_id: int, membership: WorkspaceMember = Depends(get_curren
 def update_workflow(agent_id: int, request: WorkflowUpdateRequest, membership: WorkspaceMember = Depends(get_current_membership), db: Session = Depends(get_db)):
     agent = require_workspace_agent(db, membership.workspace_id, agent_id)
     require_agent_write_access(agent, membership)
-    validate_workflow_nodes(request.nodes)
+    graph = workflow_graph_spec(workflow_request_definition(request))
+    validate_workflow_nodes(graph["nodes"])
     workflow = db.query(WorkflowDefinition).filter(WorkflowDefinition.agent_id == agent.id).first()
     if not workflow:
-        workflow = WorkflowDefinition(agent_id=agent.id, nodes=request.nodes)
+        workflow = WorkflowDefinition(agent_id=agent.id, nodes=graph)
         db.add(workflow)
     else:
-        workflow.nodes = request.nodes
+        workflow.nodes = graph
     db.commit()
-    graph = workflow_graph_spec(workflow.nodes)
     return {"graph": graph, "nodes": graph["nodes"]}
 
 
@@ -450,6 +450,12 @@ def validate_workflow_nodes(nodes: list[dict]) -> None:
         raise HTTPException(status_code=400, detail="Unsupported workflow node type")
     if not {"Start", "Answer"}.issubset(seen):
         raise HTTPException(status_code=400, detail="Workflow requires Start and Answer nodes")
+
+
+def workflow_request_definition(request: WorkflowUpdateRequest) -> dict:
+    if request.graph is not None:
+        return request.graph
+    return request.model_dump(exclude_none=True, exclude={"graph"})
 
 
 def apply_model_selection(db: Session, payload: dict, *, user_id: int) -> dict:

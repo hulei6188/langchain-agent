@@ -120,7 +120,12 @@ class SessionUpdateRequest(BaseModel):
 
 
 class WorkflowUpdateRequest(BaseModel):
-    nodes: list[dict]
+    nodes: list[dict] | None = None
+    edges: list[dict] | None = None
+    conditional_edges: list[dict] | None = None
+    entrypoint: str | None = None
+    checkpointer_config: dict | None = None
+    graph: dict | None = None
 
 
 class ChatRequest(BaseModel):

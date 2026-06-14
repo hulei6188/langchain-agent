@@ -8,6 +8,7 @@ pytest.importorskip("langgraph")
 
 from core.runtime.workflow import WorkflowRunner
 from core.runtime.graph_runtime import initial_workflow_state, workflow_thread_config
+from core.runtime.spec import workflow_graph_spec
 
 
 def _runner_with_fake_persistence(monkeypatch):
@@ -86,6 +87,62 @@ def test_langgraph_workflow_streams_custom_events(monkeypatch):
     assert custom_events[-1]["event"] == "step"
     assert final_state["context"]["draft"] == "hello"
     assert final_state["steps"][0]["output"]["draft_streamed"] is True
+
+
+def test_workflow_graph_spec_preserves_graph_fields():
+    graph = workflow_graph_spec(
+        {
+            "nodes": [
+                {"id": "start", "type": "Start"},
+                {"id": "answer", "type": "Answer"},
+            ],
+            "edges": [{"source": "start", "target": "answer", "type": "linear"}],
+            "conditional_edges": [{"source": "start", "path_map": {"ok": "answer", "bad": "missing"}}],
+            "entrypoint": "start",
+            "checkpointer_config": {"namespace": "agent"},
+        }
+    )
+
+    assert graph["entrypoint"] == "start"
+    assert graph["edges"] == [{"source": "start", "target": "answer", "type": "linear"}]
+    assert graph["conditional_edges"] == [{"source": "start", "path_map": {"ok": "answer"}}]
+    assert graph["checkpointer_config"] == {"namespace": "agent"}
+
+
+def test_langgraph_workflow_uses_graph_spec_entrypoint(monkeypatch):
+    runner = _runner_with_fake_persistence(monkeypatch)
+
+    def execute_node(runtime, node, context):
+        return {"trace": [*context.get("trace", []), node["id"]]}
+
+    monkeypatch.setattr(runner, "_execute_node", execute_node)
+    runtime = SimpleNamespace(
+        workflow={
+            "nodes": [
+                {"id": "start", "type": "Start", "config": {}},
+                {"id": "knowledge", "type": "Knowledge", "config": {}},
+                {"id": "answer", "type": "Answer", "config": {}},
+            ],
+            "edges": [
+                {"source": "start", "target": "knowledge"},
+                {"source": "knowledge", "target": "answer"},
+            ],
+            "entrypoint": "knowledge",
+        }
+    )
+    graph = runner._build_langgraph_workflow(
+        runtime=runtime,
+        run=SimpleNamespace(id=1),
+        stream=False,
+    )
+    initial_context = _initial_context()
+
+    final_state = graph.invoke(
+        initial_workflow_state(user_message="hello", context=initial_context),
+        config=workflow_thread_config(initial_context),
+    )
+
+    assert final_state["context"]["trace"] == ["knowledge", "answer"]
 
 
 def test_tool_subgraph_loops_back_to_model_after_tool_call(monkeypatch):
