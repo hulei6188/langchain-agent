@@ -220,7 +220,6 @@ AgentBase 是一个全栈智能体平台：
 | `knowledge_documents` | 文档（status / text / chunk_count / segment_config） |
 | `knowledge_chunks` | 文档分段（parent_id / chunk_id / embedding_model / metadata） |
 | `sessions` | 会话（agent_id / user_id / title） |
-| `session_memory` | 会话记忆摘要 |
 | `messages` | 消息（role / content / reasoning / tool_calls / sources） |
 | `runs` | 运行记录（status / started_at / completed_at） |
 | `run_events` | 运行事件（sequence / event / payload / sse） |

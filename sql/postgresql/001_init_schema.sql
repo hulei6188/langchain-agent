@@ -412,15 +412,6 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_run_event_sequence ON run_events (run_id, s
 CREATE INDEX IF NOT EXISTS ix_run_events_run_id ON run_events (run_id);
 CREATE INDEX IF NOT EXISTS ix_run_events_event ON run_events (event);
 
-CREATE TABLE IF NOT EXISTS session_memory (
-    id BIGSERIAL PRIMARY KEY,
-    session_id BIGINT NOT NULL UNIQUE REFERENCES sessions(id) ON DELETE CASCADE,
-    summary TEXT NOT NULL DEFAULT '',
-    message_count INTEGER NOT NULL DEFAULT 0 CHECK (message_count >= 0),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-CREATE INDEX IF NOT EXISTS ix_session_memory_session_id ON session_memory (session_id);
-
 CREATE TABLE IF NOT EXISTS agent_memory_profiles (
     id BIGSERIAL PRIMARY KEY,
     workspace_id BIGINT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
@@ -730,12 +721,6 @@ COMMENT ON COLUMN run_events.payload IS '事件 payload';
 COMMENT ON COLUMN run_events.sse IS '原始 SSE 文本';
 COMMENT ON COLUMN run_events.created_at IS '事件创建时间';
 
-COMMENT ON COLUMN session_memory.id IS '会话记忆主键';
-COMMENT ON COLUMN session_memory.session_id IS '所属会话 ID';
-COMMENT ON COLUMN session_memory.summary IS '会话摘要';
-COMMENT ON COLUMN session_memory.message_count IS '累计消息数';
-COMMENT ON COLUMN session_memory.updated_at IS '会话记忆更新时间';
-
 COMMENT ON COLUMN agent_memory_profiles.id IS '智能体记忆画像主键';
 COMMENT ON COLUMN agent_memory_profiles.workspace_id IS '所属工作区 ID';
 COMMENT ON COLUMN agent_memory_profiles.user_id IS '所属用户 ID';
@@ -817,11 +802,6 @@ FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 DROP TRIGGER IF EXISTS trg_sessions_updated_at ON sessions;
 CREATE TRIGGER trg_sessions_updated_at
 BEFORE UPDATE ON sessions
-FOR EACH ROW EXECUTE FUNCTION set_updated_at();
-
-DROP TRIGGER IF EXISTS trg_session_memory_updated_at ON session_memory;
-CREATE TRIGGER trg_session_memory_updated_at
-BEFORE UPDATE ON session_memory
 FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
 DROP TRIGGER IF EXISTS trg_agent_memory_profiles_updated_at ON agent_memory_profiles;
