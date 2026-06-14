@@ -12,7 +12,7 @@ from core.runtime.langgraph_persistence import postgres_conn_string
 from core.runtime.message_utils import message_reasoning_content
 from core.runtime.memory_runtime import save_runtime_memory_state
 from core.services.memory import delete_session_memory_payload, get_session_memory_payload, update_session_memory
-from core.runtime.persistence import persist_intermediate_message, trim_history_content
+from core.runtime.persistence import persist_intermediate_message, session_history, trim_history_content
 from core.runtime.prompting import build_llm_messages, history_messages_for_llm, merge_variables, user_content
 from core.runtime.skill_runtime import apply_runtime_skills, handle_load_skill_call, skill_loader_schema
 from core.runtime.streaming import stream_chat_response, stream_llm_response
@@ -22,6 +22,7 @@ from core.runtime.tool_graph_helpers import (
     tool_limits_reached,
     tool_message_fallback_result,
 )
+from core.services.tools import SEARCH_RESULT_SNIPPET_CHARS, _compact_search_items
 
 
 def test_tool_graph_final_output_helper_preserves_stream_flags():
@@ -337,6 +338,46 @@ class FakeMessageDb:
         self.committed = True
 
 
+class FakeHistoryQuery:
+    def __init__(self, rows):
+        self.rows = rows
+        self.limit_value = len(rows)
+
+    def filter(self, *args):
+        return self
+
+    def order_by(self, *args):
+        return self
+
+    def limit(self, value):
+        self.limit_value = value
+        return self
+
+    def all(self):
+        return self.rows[: self.limit_value]
+
+
+class FakeHistoryDb:
+    def __init__(self, rows):
+        self.rows = rows
+
+    def query(self, model):
+        return FakeHistoryQuery(self.rows)
+
+
+def _history_message(message_id, role, content, *, meta=None, tool_calls=None):
+    return SimpleNamespace(
+        id=message_id,
+        role=role,
+        content=content,
+        reasoning="",
+        tool_calls=tool_calls or [],
+        tool_call_id="",
+        tool_name="",
+        meta=meta or {},
+    )
+
+
 def test_persist_intermediate_message_keeps_visible_reasoning_and_meta():
     db = FakeMessageDb()
     persist_intermediate_message(
@@ -385,6 +426,40 @@ def test_persist_intermediate_message_blocks_leaked_dsml_content():
 def test_trim_history_content_strips_and_truncates():
     text = "  " + ("x" * 20) + "  "
     assert trim_history_content(text, limit=5) == "xxxxx\n[历史消息过长，已截断]"
+
+
+def test_session_history_skips_intermediate_messages_before_limiting():
+    rows_newest_first = [
+        _history_message(5, "assistant", "final"),
+        _history_message(4, "tool", "large raw tool output", meta={"is_intermediate": True}),
+        _history_message(3, "assistant", "", meta={"is_intermediate": True}, tool_calls=[{"id": "call_1"}]),
+        _history_message(2, "user", "current question"),
+        _history_message(1, "assistant", "older answer"),
+    ]
+
+    history = session_history(FakeHistoryDb(rows_newest_first), 42, max_messages=2)
+
+    assert [item["id"] for item in history] == [2, 5]
+    assert [item["content"] for item in history] == ["current question", "final"]
+
+
+def test_compact_search_items_limits_snippet_size():
+    long_snippet = " ".join(["latest"] * 200)
+
+    items = _compact_search_items(
+        [
+            {
+                "title": "News",
+                "url": "https://example.com/story",
+                "snippet": long_snippet,
+            }
+        ]
+    )
+
+    assert items[0]["title"] == "News"
+    assert items[0]["url"] == "https://example.com/story"
+    assert items[0]["snippet"].endswith("...")
+    assert len(items[0]["snippet"]) <= SEARCH_RESULT_SNIPPET_CHARS + 3
 
 
 def test_apply_runtime_skills_loads_always_manual_and_matching_auto_skills():

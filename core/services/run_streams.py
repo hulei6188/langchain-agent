@@ -69,9 +69,8 @@ async def execute_workflow_stream(db: Session, params: dict) -> AsyncIterator[st
         if tracked_run_id is None:
             return sse_str
         try:
-            append_run_event(db, run_id=tracked_run_id, event=event_name, payload=payload, sse=sse_str)
+            _append_run_event_isolated(run_id=tracked_run_id, event=event_name, payload=payload, sse=sse_str)
         except Exception:
-            db.rollback()
             logger.exception("Failed to persist run event %s for run %s", event_name, tracked_run_id)
         return sse_str
 
@@ -301,6 +300,17 @@ def langgraph_stream_chunk(graph_event: dict):
     if isinstance(chunk, list) and len(chunk) == 2:
         return tuple(chunk)
     return None
+
+
+def _append_run_event_isolated(*, run_id: int, event: str, payload: dict, sse: str) -> None:
+    event_db = SessionLocal()
+    try:
+        append_run_event(event_db, run_id=run_id, event=event, payload=payload, sse=sse)
+    except Exception:
+        event_db.rollback()
+        raise
+    finally:
+        event_db.close()
 
 
 def safe_stream_error(exc: Exception) -> dict:

@@ -58,19 +58,23 @@ def persist_intermediate_message(
 
 
 def session_history(db: Session, session_id: int, *, max_messages: int) -> list[dict]:
+    max_count = max(1, min(int(max_messages or 12), 100))
+    fetch_limit = min(max(max_count * 4, max_count), 400)
     rows = (
         db.query(Message)
         .filter(Message.session_id == session_id, Message.role.in_(["user", "assistant", "tool"]))
         .order_by(Message.id.desc())
-        .limit(max(1, min(int(max_messages or 12), 100)))
+        .limit(fetch_limit)
         .all()
     )
-    history = []
-    for message in reversed(rows):
+    selected = []
+    for message in rows:
+        if _message_is_intermediate(message):
+            continue
         content = trim_history_content(message.content or "")
         if not content and message.role != "assistant":
             continue
-        history.append(
+        selected.append(
             {
                 "id": message.id,
                 "role": message.role,
@@ -82,7 +86,14 @@ def session_history(db: Session, session_id: int, *, max_messages: int) -> list[
                 "meta": message.meta or {},
             }
         )
-    return history
+        if len(selected) >= max_count:
+            break
+    return list(reversed(selected))
+
+
+def _message_is_intermediate(message: Message) -> bool:
+    meta = message.meta if isinstance(message.meta, dict) else {}
+    return bool(meta.get("is_intermediate"))
 
 
 def trim_history_content(content: str, limit: int = 6000) -> str:

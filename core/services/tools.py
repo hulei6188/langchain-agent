@@ -62,6 +62,9 @@ HTTP_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE"}
 AUTH_TYPES = {"none", "bearer", "header", "query"}
 DEFAULT_HTTP_TIMEOUT_SECONDS = 10
 MAX_HTTP_TIMEOUT_SECONDS = 30
+SEARCH_RESULT_TITLE_CHARS = 200
+SEARCH_RESULT_URL_CHARS = 500
+SEARCH_RESULT_SNIPPET_CHARS = 500
 
 
 def tool_payload(tool: Tool) -> dict:
@@ -571,7 +574,7 @@ def _execute_builtin_search(tool: Tool, context: dict) -> dict:
     search_options = tool.search_options or {}
     top_k = int(search_options.get("top_k") or search_options.get("max_results") or 3)
     search_result = web_search_service.search_web(query, top_k=top_k, timeout_seconds=tool.timeout_seconds)
-    items = search_result["items"]
+    items = _compact_search_items(search_result["items"])
     preview = json.dumps(items, ensure_ascii=False)
     return {
         "tool": tool.name,
@@ -583,6 +586,28 @@ def _execute_builtin_search(tool: Tool, context: dict) -> dict:
         "result_preview": _preview(preview),
         "result_json": {"query": search_result["query"], "provider": search_result["provider"], "items": items},
     }
+
+
+def _compact_search_items(items: list[dict]) -> list[dict]:
+    compact_items = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        compact_items.append(
+            {
+                "title": _truncate_search_text(item.get("title"), SEARCH_RESULT_TITLE_CHARS),
+                "url": _truncate_search_text(item.get("url"), SEARCH_RESULT_URL_CHARS),
+                "snippet": _truncate_search_text(item.get("snippet"), SEARCH_RESULT_SNIPPET_CHARS),
+            }
+        )
+    return compact_items
+
+
+def _truncate_search_text(value, limit: int) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= limit:
+        return text
+    return text[:limit].rstrip() + "..."
 
 
 def _execute_builtin_tool(tool: Tool, context: dict) -> dict:
