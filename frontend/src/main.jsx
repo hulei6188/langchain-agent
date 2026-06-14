@@ -206,6 +206,7 @@ function App() {
   const messagesRef = useRef(messages);
   const messageCacheRef = useRef({});
   const sourcesCacheRef = useRef({});
+  const reasoningIdleTimersRef = useRef({});
   // Track newly-created session ID from done event for finally cleanup
   const newSessionIdRef = useRef(null);
   // Track placeholder session ID so we can replace it with the real one in the sidebar
@@ -219,6 +220,11 @@ function App() {
   useEffect(() => {
     messagesRef.current = messages;
   }, [messages]);
+
+  useEffect(() => () => {
+    Object.values(reasoningIdleTimersRef.current).forEach((timer) => window.clearTimeout(timer));
+    reasoningIdleTimersRef.current = {};
+  }, []);
 
   function sessionCacheKey(value) {
     if (value === null || value === undefined || value === '') return '';
@@ -264,6 +270,37 @@ function App() {
       : messagesRef.current;
     const next = updater(current);
     return writeSessionMessages(key, next, options);
+  }
+
+  function clearReasoningIdleTimer(sessionKey) {
+    const key = sessionCacheKey(sessionKey);
+    const timer = key ? reasoningIdleTimersRef.current[key] : null;
+    if (!timer) return;
+    window.clearTimeout(timer);
+    delete reasoningIdleTimersRef.current[key];
+  }
+
+  function scheduleReasoningIdle(sessionKey, genId) {
+    const key = sessionCacheKey(sessionKey);
+    if (!key || !genId) return;
+    clearReasoningIdleTimer(key);
+    reasoningIdleTimersRef.current[key] = window.setTimeout(() => {
+      delete reasoningIdleTimersRef.current[key];
+      if (sessionRunRef.current[key]?.genId !== genId) return;
+      updateSessionMessages(key, (items) => {
+        const next = [...items];
+        const last = next[next.length - 1];
+        if (last?.role !== 'assistant' || !last.pending || !last.reasoningPending || last.content) {
+          return next;
+        }
+        next[next.length - 1] = {
+          ...last,
+          reasoningPending: false,
+          reasoningFinishedAt: last.reasoningStartedAt && !last.reasoningFinishedAt ? Date.now() : last.reasoningFinishedAt,
+        };
+        return next;
+      }, { visible: isSessionKeyVisible(key) });
+    }, 1200);
   }
 
   function writeSessionSources(sessionKey, items, options = {}) {
@@ -1963,6 +2000,9 @@ function App() {
       ctx.resolvedSessionId = sessionId;
       ctx.realSessionId = sessionId;
       moveSessionCache(previousKey || sessionKey, sessionId);
+      if (previousKey && previousKey !== sessionCacheKey(sessionId)) {
+        clearReasoningIdleTimer(previousKey);
+      }
       messageKey = _streamCacheKey(ctx);
       visible = _streamVisible(ctx);
     };
@@ -2005,6 +2045,9 @@ function App() {
         next[index] = assistant;
         return next;
       }, { visible });
+      if (snapshotReasoning && !snapshotContent) {
+        scheduleReasoningIdle(messageKey, genId);
+      }
       return;
     }
 
@@ -2042,6 +2085,7 @@ function App() {
       return;
     }
     if (event === 'cancelled') {
+      clearReasoningIdleTimer(messageKey);
       // Always clean up running state for this session
       if (data.session_id) clearSessionRunning(data.session_id);
       if (sessionKey && sessionKey !== data.session_id) clearSessionRunning(sessionKey);
@@ -2079,6 +2123,7 @@ function App() {
           pending: false,
           reasoningPending: false,
           reasoningFinishedAt: last.reasoningStartedAt && !last.reasoningFinishedAt ? Date.now() : last.reasoningFinishedAt,
+          reasoningDurationMs: data.reasoning_duration_ms ?? last.reasoningDurationMs,
           content: data.content || last.content || '',
           meta: { ...(last.meta || {}), cancelled: true },
           _provisionalContent: undefined,
@@ -2088,6 +2133,7 @@ function App() {
       return;
     }
     if (event === 'done') {
+      clearReasoningIdleTimer(messageKey);
       // Always clean up running state and transition temp keys
       if (sessionKey?.startsWith?.('__new__') && data.session_id) {
         resolveRealSession(data.session_id);
@@ -2148,6 +2194,7 @@ function App() {
       return;
     }
     if (event === 'token') {
+      clearReasoningIdleTimer(messageKey);
       updateSessionMessages(messageKey, (items) => {
         const { next, last, index } = ensureAssistantTail(items);
         next[index] = {
@@ -2161,6 +2208,7 @@ function App() {
       }, { visible });
     }
     if (event === 'provisional_token') {
+      clearReasoningIdleTimer(messageKey);
       updateSessionMessages(messageKey, (items) => {
         const { next, last, index } = ensureAssistantTail(items);
         const content = data.content || '';
@@ -2214,6 +2262,7 @@ function App() {
         }, data.content || '');
         return next;
       }, { visible });
+      scheduleReasoningIdle(messageKey, genId);
     }
     if (event === 'sources') {
       const items = data.items || [];
@@ -2249,6 +2298,7 @@ function App() {
       }
     }
     if (event === 'error') {
+      clearReasoningIdleTimer(messageKey);
       const detail = errorMessage(data.detail || data.message || '智能体运行失败');
       if (visible) {
         setError(detail);

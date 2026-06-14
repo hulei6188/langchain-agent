@@ -217,7 +217,7 @@ def drain_stream(generator):
             return events, exc.value
 
 
-def test_stream_chat_response_replays_provisional_tokens_when_no_tool_call():
+def test_stream_chat_response_streams_and_commits_provisional_tokens_when_no_tool_call():
     provider = FakeStreamProvider([AIMessageChunk(content="hello"), AIMessageChunk(content=" world")])
     agent = SimpleNamespace(model="m", temperature=0.1, runtime_config={})
     events, response = drain_stream(
@@ -231,9 +231,48 @@ def test_stream_chat_response_replays_provisional_tokens_when_no_tool_call():
             provisional_stream=True,
         )
     )
-    assert [event["content"] for event in events if event["event"] == "token"] == ["hello", " world"]
+    assert events == [
+        {"event": "provisional_token", "content": "hello"},
+        {"event": "provisional_token", "content": " world"},
+        {"event": "provisional_commit", "data": {}},
+    ]
     assert response.content == "hello world"
     assert provider.calls[0]["tools"]
+
+
+def test_stream_chat_response_clears_provisional_tokens_when_tool_call_appears():
+    provider = FakeStreamProvider(
+        [
+            AIMessageChunk(content="draft answer"),
+            AIMessageChunk(
+                content="",
+                tool_call_chunks=[
+                    {"index": 0, "id": "call_1", "name": "web_search", "args": '{"query":"news"}'},
+                ],
+            ),
+        ]
+    )
+    agent = SimpleNamespace(model="m", temperature=0.1, runtime_config={})
+    events, response = drain_stream(
+        stream_chat_response(
+            provider,
+            agent=agent,
+            messages=[],
+            context={"thinking_enabled": False},
+            tools=[object()],
+            stream_content=True,
+            provisional_stream=True,
+        )
+    )
+
+    assert events == [
+        {"event": "provisional_token", "content": "draft answer"},
+        {"event": "provisional_clear", "data": {"reason": "tool_call"}},
+    ]
+    assert response.content == ""
+    assert response.tool_calls[0]["id"] == "call_1"
+    assert response.tool_calls[0]["name"] == "web_search"
+    assert response.tool_calls[0]["args"] == {"query": "news"}
 
 
 def test_stream_llm_response_emits_reasoning_and_tokens():

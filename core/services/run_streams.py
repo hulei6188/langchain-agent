@@ -242,8 +242,10 @@ async def execute_workflow_stream(db: Session, params: dict) -> AsyncIterator[st
             runner.mark_stream_run_cancelled(run)
         partial = partial_answer()
         partial_reasoning = "".join(reasoning_parts)
-        if not assistant_saved and partial:
-            _persist_partial_assistant(
+        finish_reasoning_duration()
+        partial_assistant: Message | None = None
+        if not assistant_saved and (partial or partial_reasoning):
+            partial_assistant = _persist_partial_assistant(
                 db,
                 chat_session=chat_session,
                 content=partial,
@@ -257,7 +259,13 @@ async def execute_workflow_stream(db: Session, params: dict) -> AsyncIterator[st
             {
                 "session_id": chat_session.id,
                 "run_id": run.id if run else (tracked_run_id or None),
+                "message_id": partial_assistant.id if partial_assistant is not None else None,
                 "content": partial,
+                "reasoning_duration_ms": (
+                    partial_assistant.reasoning_duration_ms
+                    if partial_assistant is not None
+                    else reasoning_duration_ms
+                ),
             },
         )
     except Exception as exc:
@@ -375,7 +383,7 @@ def _persist_partial_assistant(
     reasoning_started_at: float | None,
     reasoning_duration_ms: int | None,
     sources: list[dict],
-) -> None:
+) -> Message | None:
     try:
         if reasoning_started_at is not None and reasoning_duration_ms is None:
             reasoning_duration_ms = int((time.perf_counter() - reasoning_started_at) * 1000)
@@ -390,8 +398,11 @@ def _persist_partial_assistant(
         )
         db.add(assistant)
         db.commit()
+        db.refresh(assistant)
+        return assistant
     except Exception:
         db.rollback()
+        return None
 
 
 def _resolve_title_runtime_config(db: Session, agent: Agent, user_id: int) -> dict | None:

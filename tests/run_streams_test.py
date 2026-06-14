@@ -1,6 +1,8 @@
 import asyncio
+import json
 from types import SimpleNamespace
 
+from core.integrations.llm import _CancelledError
 from core.db.models import Agent, Session as ChatSession
 from core.services.run_events import sse_event
 from core.services.run_streams import execute_workflow_stream, safe_stream_error, sanitize_public_error, stream_workflow_sse
@@ -133,6 +135,101 @@ def test_execute_workflow_stream_consumes_graph_stream_parts(monkeypatch):
     assert any(item.startswith("event: sources") for item in events)
     assert any(item.startswith("event: done") for item in events)
     assert [event for _, event, _ in persisted][:2] == ["run_started", "token"]
+
+
+def test_execute_workflow_stream_persists_reasoning_only_cancelled_message(monkeypatch):
+    agent = SimpleNamespace(id=1, user_model_config_id=None)
+    chat_session = SimpleNamespace(id=2, title="Existing title")
+
+    class FakeRunDb:
+        def __init__(self):
+            self.added = []
+            self.commits = 0
+            self.rollbacks = 0
+
+        def get(self, model, row_id):
+            if model is Agent:
+                return agent
+            if model is ChatSession:
+                return chat_session
+            return None
+
+        def add(self, item):
+            self.added.append(item)
+
+        def commit(self):
+            self.commits += 1
+
+        def refresh(self, item):
+            if getattr(item, "id", None) is None:
+                item.id = 42
+
+        def rollback(self):
+            self.rollbacks += 1
+
+    class FakeRunner:
+        def __init__(self, db):
+            self.cancelled = False
+            self.closed = False
+
+        def start_stream_run(self, **kwargs):
+            return SimpleNamespace(run=SimpleNamespace(id=99), context={"session_id": 2})
+
+        async def astream_graph_events(self, workflow_stream):
+            yield {
+                "event": "on_chain_stream",
+                "name": "LangGraph",
+                "data": {"chunk": ("custom", {"event": "reasoning_token", "content": "why"})},
+            }
+            raise _CancelledError()
+
+        def mark_stream_run_cancelled(self, run):
+            self.cancelled = True
+
+        def close_stream_run(self, run):
+            self.closed = True
+
+    db = FakeRunDb()
+    persisted = []
+    monkeypatch.setattr("core.services.run_streams.WorkflowRunner", FakeRunner)
+    monkeypatch.setattr(
+        "core.services.run_streams.append_run_event",
+        lambda db, run_id, event, payload, sse: persisted.append((run_id, event, payload)),
+    )
+
+    events = asyncio.run(
+        _collect(
+            execute_workflow_stream(
+                db,
+                {
+                    "agent_id": 1,
+                    "session_id": 2,
+                    "user_message": "hi",
+                    "mode": "draft",
+                    "variables": {},
+                    "rag_enabled": None,
+                    "rag_options": {},
+                    "thinking_enabled": True,
+                    "search_enabled": None,
+                    "attachments": [],
+                    "user_message_id": 7,
+                    "user_id": 3,
+                },
+            )
+        )
+    )
+
+    assistant = next(item for item in db.added if getattr(item, "role", None) == "assistant")
+    assert assistant.id == 42
+    assert assistant.content == ""
+    assert assistant.reasoning == "why"
+    assert assistant.meta == {"cancelled": True, "partial": True}
+
+    cancelled_event = next(event for event in events if event.startswith("event: cancelled"))
+    cancelled_payload = json.loads(next(line.removeprefix("data: ") for line in cancelled_event.splitlines() if line.startswith("data: ")))
+    assert cancelled_payload["message_id"] == 42
+    assert cancelled_payload["content"] == ""
+    assert cancelled_payload["reasoning_duration_ms"] is not None
 
 
 def test_safe_stream_error_redacts_public_secret_errors():

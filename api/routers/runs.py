@@ -16,6 +16,10 @@ from core.services.run_events import list_run_events_since, run_stream_snapshot,
 
 
 router = APIRouter(prefix="/api/runs", tags=["runs"])
+SSE_HEADERS = {
+    "Cache-Control": "no-cache",
+    "X-Accel-Buffering": "no",
+}
 
 
 def _require_session_access(session: ChatSession | None, membership: WorkspaceMember) -> None:
@@ -114,5 +118,4 @@ def stream_run_events(
                 db_sess.close()
             time.sleep(0.3)
 
-    return StreamingResponse(_event_stream(), media_type="text/event-stream")
-
+    return StreamingResponse(_event_stream(), media_type="text/event-stream", headers=SSE_HEADERS)

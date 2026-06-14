@@ -61,7 +61,8 @@ def stream_chat_response(
     suppress_content_stream = False
     emitted_live_content = False
     provisional_active = bool(provisional_stream and tools)
-    provisional_chunks: list[str] = []
+    provisional_sent = False
+    provisional_cleared = False
     should_stream_content_live = stream_content and (not tools or provisional_active)
     for chunk in provider.stream(
         messages,
@@ -91,17 +92,22 @@ def stream_chat_response(
                 for safe_content in safe_chunks:
                     emitted_live_content = True
                     if provisional_active:
-                        provisional_chunks.append(safe_content)
+                        provisional_sent = True
+                        yield {"event": "provisional_token", "content": safe_content}
                     else:
                         yield {"event": "token", "content": safe_content}
         tool_call_chunks = getattr(chunk, "tool_call_chunks", []) or []
         if tool_call_chunks:
+            if not saw_tool_call and provisional_active and provisional_sent and not provisional_cleared:
+                provisional_cleared = True
+                yield {"event": "provisional_clear", "data": {"reason": "tool_call"}}
             saw_tool_call = True
-            provisional_chunks = []
             merge_stream_tool_call_chunks(tool_call_builders, tool_call_chunks)
         elif getattr(chunk, "tool_calls", None):
+            if not saw_tool_call and provisional_active and provisional_sent and not provisional_cleared:
+                provisional_cleared = True
+                yield {"event": "provisional_clear", "data": {"reason": "tool_call"}}
             saw_tool_call = True
-            provisional_chunks = []
             final_tool_calls = list(chunk.tool_calls or [])
     raise_if_cancelled()
     if not final_tool_calls:
@@ -131,19 +137,28 @@ def stream_chat_response(
         logger.warning("Blocked incomplete tool call markup in streamed content; full content:\n%s", joined_content)
         content_for_response = DSML_TOOL_MARKUP_ERROR
 
+    if final_tool_calls and provisional_active and provisional_sent and not provisional_cleared:
+        provisional_cleared = True
+        yield {"event": "provisional_clear", "data": {"reason": "tool_call"}}
+
     if stream_content and not final_tool_calls and content_for_response:
         if should_stream_content_live:
             if suppress_content_stream:
+                if provisional_active and provisional_sent and not provisional_cleared:
+                    provisional_cleared = True
+                    yield {"event": "provisional_clear", "data": {"reason": "blocked_tool_markup"}}
                 if content_for_response == DSML_TOOL_MARKUP_ERROR or not emitted_live_content:
                     yield {"event": "token", "content": content_for_response}
             elif not contains_leaked_tool_markup(joined_content):
-                if provisional_active:
-                    for safe_content in provisional_chunks:
-                        yield {"event": "token", "content": safe_content}
-                    if pending_live_content:
+                if pending_live_content:
+                    emitted_live_content = True
+                    if provisional_active:
+                        provisional_sent = True
+                        yield {"event": "provisional_token", "content": pending_live_content}
+                    else:
                         yield {"event": "token", "content": pending_live_content}
-                elif pending_live_content:
-                    yield {"event": "token", "content": pending_live_content}
+                if provisional_active and provisional_sent:
+                    yield {"event": "provisional_commit", "data": {}}
     additional_kwargs = {}
     if reasoning_chunks:
         additional_kwargs["reasoning_content"] = "".join(reasoning_chunks)

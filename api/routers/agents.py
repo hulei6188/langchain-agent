@@ -41,6 +41,10 @@ from core.services.tools import validate_tool_ids
 
 
 router = APIRouter()
+SSE_HEADERS = {
+    "Cache-Control": "no-cache",
+    "X-Accel-Buffering": "no",
+}
 
 
 @router.put("/api/agents/{agent_id}/skills")
@@ -320,7 +324,7 @@ def chat_stream(
         "search_enabled": request.search_enabled,
         "attachments": request.attachments,
     }
-    return StreamingResponse(stream_workflow_sse(bg_params), media_type="text/event-stream")
+    return StreamingResponse(stream_workflow_sse(bg_params), media_type="text/event-stream", headers=SSE_HEADERS)
 
 
 def require_workspace_agent(db: Session, workspace_id: int, agent_id: int) -> Agent:
