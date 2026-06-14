@@ -5,6 +5,57 @@ from typing import Any
 
 import httpx
 from langchain_openai import ChatOpenAI
+from langchain_openai.chat_models import base as openai_chat_base
+
+
+_REASONING_RESPONSE_KEYS = (
+    "reasoning_content",
+    "reasoning",
+    "thinking",
+    "reasoning_text",
+    "thinking_content",
+)
+
+
+def _install_reasoning_content_patch() -> None:
+    if getattr(openai_chat_base, "_agentbase_reasoning_content_patch", False):
+        return
+
+    original_delta_converter = openai_chat_base._convert_delta_to_message_chunk
+    original_message_converter = openai_chat_base._convert_dict_to_message
+
+    def convert_delta_with_reasoning(payload, default_class):
+        message = original_delta_converter(payload, default_class)
+        _copy_reasoning_content(message, payload)
+        return message
+
+    def convert_message_with_reasoning(payload):
+        message = original_message_converter(payload)
+        _copy_reasoning_content(message, payload)
+        return message
+
+    openai_chat_base._convert_delta_to_message_chunk = convert_delta_with_reasoning
+    openai_chat_base._convert_dict_to_message = convert_message_with_reasoning
+    openai_chat_base._agentbase_reasoning_content_patch = True
+
+
+def _copy_reasoning_content(message, payload) -> None:
+    reasoning = _first_reasoning_value(payload)
+    if not reasoning:
+        return
+    additional_kwargs = getattr(message, "additional_kwargs", None)
+    if isinstance(additional_kwargs, dict):
+        additional_kwargs.setdefault("reasoning_content", reasoning)
+
+
+def _first_reasoning_value(payload):
+    for key in _REASONING_RESPONSE_KEYS:
+        if isinstance(payload, dict) and payload.get(key):
+            return payload[key]
+    return ""
+
+
+_install_reasoning_content_patch()
 
 
 def create_chat_openai(
@@ -94,4 +145,13 @@ def is_dashscope_qwen(api_base: str, model: str) -> bool:
 
 def is_deepseek(api_base: str, model: str) -> bool:
     normalized_base = (api_base or "").lower()
-    return "api.deepseek.com" in normalized_base
+    if "api.deepseek.com" in normalized_base:
+        return True
+    normalized_model = (model or "").lower().replace("_", "-").strip()
+    model_segments = [segment for segment in re.split(r"[/:\s]+", normalized_model) if segment]
+    return any(segment == "deepseek" or segment.startswith("deepseek-") for segment in model_segments)
+
+
+def runtime_reasoning_type(runtime_config: dict | None) -> str:
+    reasoning_type = str((runtime_config or {}).get("reasoning_type") or "none").strip().lower()
+    return reasoning_type if reasoning_type in {"native", "prompt", "none"} else "none"

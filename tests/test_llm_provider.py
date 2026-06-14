@@ -1,10 +1,12 @@
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage
 from langchain_core.tools import StructuredTool
+from langchain_openai.chat_models import base as openai_chat_base
 
 from core.config import get_settings
 from core.integrations import chat_models as chat_models_module
 from core.integrations.llm import OpenAICompatibleProvider
 from core.integrations.model_clients import OpenAICompatibleEmbeddings, OpenAICompatibleReranker
+from core.runtime.message_utils import message_reasoning_content
 
 
 class FakeChatOpenAI:
@@ -135,6 +137,19 @@ def test_chat_model_factory_reasoning_kwargs():
         api_base="https://api.deepseek.com",
         model="deepseek-chat",
     ) is True
+
+
+def test_langchain_openai_conversion_preserves_reasoning_content():
+    chunk = openai_chat_base._convert_delta_to_message_chunk(
+        {"role": "assistant", "content": "", "reasoning_content": "why"},
+        AIMessageChunk,
+    )
+    message = openai_chat_base._convert_dict_to_message(
+        {"role": "assistant", "content": "answer", "reasoning_content": "because"}
+    )
+
+    assert message_reasoning_content(chunk) == "why"
+    assert message_reasoning_content(message) == "because"
 
 
 def test_embedding_client_mock_mode_is_deterministic(monkeypatch):
