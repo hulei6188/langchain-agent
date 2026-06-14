@@ -25,8 +25,9 @@ def execute_mcp_tool(tool: Tool, context: dict) -> dict:
     if not remote_tool_name:
         raise ValueError("MCP tool is missing remote tool_name")
     transport = str(mcp.get("transport") or "streamable_http")
-    arguments = dict_value(context.get("input"))
-    validate_mcp_input(mcp.get("input_schema"), arguments)
+    input_schema = mcp.get("input_schema")
+    arguments = sanitize_mcp_arguments(input_schema, dict_value(context.get("input")))
+    validate_mcp_input(input_schema, arguments)
     started = time.monotonic()
     try:
         if transport == "stdio":
@@ -135,12 +136,32 @@ def validate_mcp_input(schema, arguments: dict, *, path: str = "") -> None:
             continue
         field_path = f"{path}.{key}" if path else str(key)
         value = arguments.get(key)
-        if isinstance(spec, dict) and spec.get("type") and value is None:
-            raise ValueError(f"MCP input '{field_path}' cannot be null")
         if isinstance(spec, dict):
             field_type = spec.get("type")
             if field_type == "object" and isinstance(value, dict):
                 validate_mcp_input(spec, value, path=field_path)
+
+
+def sanitize_mcp_arguments(schema, arguments: dict) -> dict:
+    normalized = mcp_input_schema_value(schema)
+    if not isinstance(arguments, dict):
+        return {}
+    return _sanitize_mcp_arguments(normalized, arguments)
+
+
+def _sanitize_mcp_arguments(schema: dict, arguments: dict) -> dict:
+    properties = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+    required = set(schema.get("required") if isinstance(schema.get("required"), list) else [])
+    cleaned = {}
+    for key, value in arguments.items():
+        spec = properties.get(key)
+        if key not in required and isinstance(spec, dict) and value is None:
+            continue
+        if isinstance(spec, dict) and spec.get("type") == "object" and isinstance(value, dict):
+            cleaned[key] = _sanitize_mcp_arguments(spec, value)
+        else:
+            cleaned[key] = value
+    return cleaned
 
 
 def _is_missing_mcp_value(value, spec) -> bool:

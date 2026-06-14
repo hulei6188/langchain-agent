@@ -5,7 +5,6 @@ import time
 from typing import Any, Callable, TypedDict
 
 from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
-from langgraph.graph import MessagesState
 from langgraph.prebuilt import ToolNode
 from sqlalchemy.orm import Session
 
@@ -16,7 +15,8 @@ from core.runtime.status import merge_web_search_tool_result, search_status_even
 from core.services.tools import build_langchain_tool, tool_call_event
 
 
-class ToolGraphState(MessagesState, total=False):
+class ToolGraphState(TypedDict, total=False):
+    messages: list[BaseMessage]
     context: dict[str, Any]
     node: dict[str, Any]
     bound_tools: list[Tool]

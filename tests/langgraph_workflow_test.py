@@ -2,7 +2,7 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
 from langchain_core.tools import StructuredTool
 
 pytest.importorskip("langgraph")
@@ -314,6 +314,56 @@ def test_tool_subgraph_stops_after_repeated_tool_errors(monkeypatch):
     assert executed == [{"query": "x"}, {"query": "x"}, {"query": "x"}]
     assert len(provider.chat_calls) == 4
     assert provider.chat_calls[-1]["tools"] is None
+
+
+def test_tool_subgraph_keeps_load_skill_tool_result_next_to_tool_call():
+    provider = _FakeProvider(
+        responses=[
+            AIMessage(content="", tool_calls=[{"id": "call_load", "name": "load_skill", "args": {"skill_id": 7}}]),
+            AIMessage(content="skill loaded"),
+        ]
+    )
+    agent = _agent()
+    agent.tool_ids = []
+    agent.knowledge_base_ids = []
+    agent.skill_bindings = [
+        {
+            "id": 7,
+            "name": "research",
+            "description": "research",
+            "category": "general",
+            "tags": [],
+            "activation_mode": "manual",
+            "priority": 0,
+            "system_prompt": "Research prompt",
+            "tool_ids": [],
+            "knowledge_base_ids": [],
+        }
+    ]
+    runner = WorkflowRunner(db=SimpleNamespace())
+    runner.provider = provider
+    context = {
+        **_tool_context(),
+        "loaded_skills": [],
+        "skill_selection": {},
+        "skill_manifest": [],
+        "rag_enabled": False,
+    }
+
+    output = runner._run_tool_node(
+        agent,
+        {"id": "tool", "type": "Tool", "config": {}},
+        context,
+        stream=False,
+    )
+
+    assert output["draft"] == "skill loaded"
+    messages = provider.chat_calls[1]["messages"]
+    tool_call_index = next(index for index, message in enumerate(messages) if isinstance(message, AIMessage) and message.tool_calls)
+    tool_result_index = next(index for index, message in enumerate(messages) if isinstance(message, ToolMessage))
+    assert tool_result_index == tool_call_index + 1
+    assert all(not isinstance(message, SystemMessage) for message in messages[tool_call_index + 1 : tool_result_index])
+    assert messages[0].content.count("Research prompt") == 1
 
 
 def test_tool_subgraph_disables_inherited_checkpointing():
