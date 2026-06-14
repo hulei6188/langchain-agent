@@ -1,0 +1,441 @@
+from __future__ import annotations
+
+from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
+from sqlalchemy.orm import Session
+
+from api.deps import get_current_membership, get_current_user, require_manager
+from api.schemas import AgentCreateRequest, AgentSkillsRequest, AgentUpdateRequest, ChatRequest, WorkflowUpdateRequest
+from core.db.models import (
+    Agent,
+    AgentSkill,
+    AgentVersion,
+    Message,
+    ModelConfig,
+    Session as ChatSession,
+    Skill,
+    User,
+    UserModelConfig,
+    WorkflowDefinition,
+    WorkspaceMember,
+)
+from core.db.session import get_db
+from core.runtime.spec import default_workflow, workflow_graph_spec
+from core.security.permissions import can_manage
+from core.services.agents import (
+    agent_summary,
+    approve_agent,
+    copy_agent_from_market,
+    create_agent,
+    delete_agent as delete_agent_service,
+    ensure_template_agents_published,
+    exclude_deprecated_template_agents,
+    get_agent_detail,
+    market_agent_summary,
+    publish_agent,
+    reject_agent,
+    update_agent,
+)
+from core.services.run_streams import stream_workflow_sse
+from core.services.tools import validate_tool_ids
+
+
+router = APIRouter()
+
+
+@router.put("/api/agents/{agent_id}/skills")
+def update_agent_skills(
+    agent_id: int,
+    request: AgentSkillsRequest,
+    membership: WorkspaceMember = Depends(get_current_membership),
+    db: Session = Depends(get_db),
+):
+    agent = require_workspace_agent(db, membership.workspace_id, agent_id)
+    require_agent_write_access(agent, membership)
+    db.query(AgentSkill).filter(AgentSkill.agent_id == agent.id).delete()
+    for skill_id in request.skill_ids:
+        skill = db.query(Skill).filter(
+            Skill.id == skill_id,
+            Skill.workspace_id == membership.workspace_id,
+        ).first()
+        if not skill:
+            raise HTTPException(status_code=400, detail=f"Skill {skill_id} not found or not accessible")
+        db.add(AgentSkill(agent_id=agent.id, skill_id=skill_id))
+    db.commit()
+    return {"agent": get_agent_detail(db, agent)}
+
+
+@router.get("/api/agents")
+def list_agents(
+    membership: WorkspaceMember = Depends(get_current_membership),
+    db: Session = Depends(get_db),
+):
+    ensure_template_agents_published(db, membership.workspace_id)
+    query = db.query(Agent).filter(Agent.workspace_id == membership.workspace_id)
+    query = exclude_deprecated_template_agents(query)
+    if not can_manage(membership.role):
+        query = query.filter(Agent.created_by == membership.user_id)
+    agents = query.order_by(Agent.updated_at.desc()).all()
+    return {"items": [agent_summary(agent) for agent in agents]}
+
+
+@router.post("/api/agents")
+def create_agent_endpoint(
+    request: AgentCreateRequest,
+    membership: WorkspaceMember = Depends(get_current_membership),
+    db: Session = Depends(get_db),
+):
+    try:
+        validate_tool_ids(db, workspace_id=membership.workspace_id, user_id=membership.user_id, tool_ids=request.tool_ids)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    payload = apply_model_selection(db, request.model_dump(), user_id=membership.user_id)
+    agent = create_agent(db, workspace_id=membership.workspace_id, user_id=membership.user_id, payload=payload)
+    return {"agent": get_agent_detail(db, agent)}
+
+
+@router.get("/api/agents/{agent_id}")
+def get_agent(
+    agent_id: int,
+    membership: WorkspaceMember = Depends(get_current_membership),
+    db: Session = Depends(get_db),
+):
+    agent = require_workspace_agent(db, membership.workspace_id, agent_id)
+    require_agent_read_access(agent, membership)
+    return {"agent": get_agent_detail(db, agent)}
+
+
+@router.patch("/api/agents/{agent_id}")
+def patch_agent(
+    agent_id: int,
+    request: AgentUpdateRequest,
+    membership: WorkspaceMember = Depends(get_current_membership),
+    db: Session = Depends(get_db),
+):
+    agent = require_workspace_agent(db, membership.workspace_id, agent_id)
+    require_agent_write_access(agent, membership)
+    if request.tool_ids is not None:
+        try:
+            validate_tool_ids(db, workspace_id=membership.workspace_id, user_id=membership.user_id, tool_ids=request.tool_ids)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    agent = update_agent(db, agent, apply_model_selection(db, request.model_dump(exclude_unset=True), user_id=membership.user_id))
+    return {"agent": get_agent_detail(db, agent)}
+
+
+@router.delete("/api/agents/{agent_id}")
+def delete_agent_endpoint(
+    agent_id: int,
+    membership: WorkspaceMember = Depends(get_current_membership),
+    db: Session = Depends(get_db),
+):
+    agent = require_workspace_agent(db, membership.workspace_id, agent_id)
+    require_agent_write_access(agent, membership)
+    try:
+        delete_agent_service(db, agent)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"deleted": True}
+
+
+@router.post("/api/agents/{agent_id}/publish")
+def publish_agent_endpoint(
+    agent_id: int,
+    membership: WorkspaceMember = Depends(get_current_membership),
+    db: Session = Depends(get_db),
+):
+    agent = require_workspace_agent(db, membership.workspace_id, agent_id)
+    require_agent_write_access(agent, membership)
+    require_review = not can_manage(membership.role)
+    version = publish_agent(db, agent, membership.user_id, require_review=require_review)
+    return {
+        "status": agent.status,
+        "review_required": require_review,
+        "version": {"id": version.id, "version": version.version, "snapshot": version.snapshot},
+    }
+
+
+@router.get("/api/admin/agent-reviews")
+def list_agent_reviews(
+    membership: WorkspaceMember = Depends(require_manager),
+    db: Session = Depends(get_db),
+):
+    agents = (
+        db.query(Agent)
+        .filter(Agent.workspace_id == membership.workspace_id, Agent.status == "pending_review")
+        .order_by(Agent.updated_at.desc())
+        .all()
+    )
+    return {"items": [review_payload(db, agent) for agent in agents]}
+
+
+@router.post("/api/admin/agent-reviews/{agent_id}/approve")
+def approve_agent_review(
+    agent_id: int,
+    membership: WorkspaceMember = Depends(require_manager),
+    db: Session = Depends(get_db),
+):
+    agent = require_workspace_agent(db, membership.workspace_id, agent_id)
+    if agent.status != "pending_review":
+        raise HTTPException(status_code=400, detail="Agent is not pending review")
+    version = approve_agent(db, agent, membership.user_id)
+    return {"agent": get_agent_detail(db, agent), "version": {"id": version.id, "version": version.version}}
+
+
+@router.post("/api/admin/agent-reviews/{agent_id}/reject")
+def reject_agent_review(
+    agent_id: int,
+    membership: WorkspaceMember = Depends(require_manager),
+    db: Session = Depends(get_db),
+):
+    agent = require_workspace_agent(db, membership.workspace_id, agent_id)
+    if agent.status != "pending_review":
+        raise HTTPException(status_code=400, detail="Agent is not pending review")
+    reject_agent(db, agent)
+    return {"agent": get_agent_detail(db, agent)}
+
+
+@router.get("/api/market/agents")
+def list_market_agents(
+    membership: WorkspaceMember = Depends(get_current_membership),
+    db: Session = Depends(get_db),
+):
+    agents = (
+        exclude_deprecated_template_agents(db.query(Agent))
+        .filter(
+            Agent.workspace_id == membership.workspace_id,
+            Agent.status == "published",
+            Agent.published_version_id.isnot(None),
+        )
+        .order_by(Agent.updated_at.desc())
+        .all()
+    )
+    items = []
+    for agent in agents:
+        version = db.get(AgentVersion, agent.published_version_id) if agent.published_version_id else None
+        items.append(market_agent_summary(agent, version))
+    return {"items": items}
+
+
+@router.post("/api/market/agents/{agent_id}/copy")
+def copy_market_agent(
+    agent_id: int,
+    membership: WorkspaceMember = Depends(get_current_membership),
+    db: Session = Depends(get_db),
+):
+    source = require_workspace_agent(db, membership.workspace_id, agent_id)
+    if source.status != "published" or not source.published_version_id:
+        raise HTTPException(status_code=404, detail="Market agent not found")
+    try:
+        copied = copy_agent_from_market(db, source=source, user_id=membership.user_id, workspace_id=membership.workspace_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"agent": get_agent_detail(db, copied)}
+
+
+@router.get("/api/agents/{agent_id}/versions")
+def list_versions(
+    agent_id: int,
+    membership: WorkspaceMember = Depends(get_current_membership),
+    db: Session = Depends(get_db),
+):
+    agent = require_workspace_agent(db, membership.workspace_id, agent_id)
+    require_agent_read_access(agent, membership)
+    versions = db.query(AgentVersion).filter_by(agent_id=agent.id).order_by(AgentVersion.version.desc()).all()
+    return {"items": [{"id": item.id, "version": item.version, "created_at": item.created_at.isoformat()} for item in versions]}
+
+
+@router.get("/api/agents/{agent_id}/draft")
+def get_draft(
+    agent_id: int,
+    membership: WorkspaceMember = Depends(get_current_membership),
+    db: Session = Depends(get_db),
+):
+    agent = require_workspace_agent(db, membership.workspace_id, agent_id)
+    require_agent_write_access(agent, membership)
+    return {"agent": get_agent_detail(db, agent)}
+
+
+@router.get("/api/agents/{agent_id}/workflow")
+def get_workflow(
+    agent_id: int,
+    membership: WorkspaceMember = Depends(get_current_membership),
+    db: Session = Depends(get_db),
+):
+    agent = require_workspace_agent(db, membership.workspace_id, agent_id)
+    require_agent_read_access(agent, membership)
+    workflow = db.query(WorkflowDefinition).filter(WorkflowDefinition.agent_id == agent.id).first()
+    graph = workflow_graph_spec(workflow.nodes if workflow else default_workflow())
+    return {"graph": graph, "nodes": graph["nodes"]}
+
+
+@router.patch("/api/agents/{agent_id}/workflow")
+def update_workflow(
+    agent_id: int,
+    request: WorkflowUpdateRequest,
+    membership: WorkspaceMember = Depends(get_current_membership),
+    db: Session = Depends(get_db),
+):
+    agent = require_workspace_agent(db, membership.workspace_id, agent_id)
+    require_agent_write_access(agent, membership)
+    graph = workflow_graph_spec(workflow_request_definition(request))
+    validate_workflow_nodes(graph["nodes"])
+    workflow = db.query(WorkflowDefinition).filter(WorkflowDefinition.agent_id == agent.id).first()
+    if not workflow:
+        workflow = WorkflowDefinition(agent_id=agent.id, nodes=graph)
+        db.add(workflow)
+    else:
+        workflow.nodes = graph
+    db.commit()
+    return {"graph": graph, "nodes": graph["nodes"]}
+
+
+@router.post("/api/agents/{agent_id}/chat/stream")
+def chat_stream(
+    agent_id: int,
+    request: ChatRequest,
+    membership: WorkspaceMember = Depends(get_current_membership),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    agent = require_workspace_agent(db, membership.workspace_id, agent_id)
+    require_agent_read_access(agent, membership)
+
+    session = get_or_create_session(db, agent, current_user.id, request.session_id, request.message, is_debug=getattr(request, "is_debug", False))
+    user_message = Message(session_id=session.id, role="user", content=request.message, sources=[])
+    db.add(user_message)
+    db.commit()
+
+    bg_params = {
+        "agent_id": agent.id,
+        "session_id": session.id,
+        "user_id": current_user.id,
+        "user_message": request.message,
+        "user_message_id": user_message.id,
+        "mode": request.mode,
+        "variables": request.variables,
+        "rag_enabled": request.rag_enabled,
+        "rag_options": request.rag_options.model_dump(exclude_none=True) if request.rag_options else None,
+        "thinking_enabled": request.thinking_enabled,
+        "search_enabled": request.search_enabled,
+        "attachments": request.attachments,
+    }
+    return StreamingResponse(stream_workflow_sse(bg_params), media_type="text/event-stream")
+
+
+def require_workspace_agent(db: Session, workspace_id: int, agent_id: int) -> Agent:
+    agent = db.query(Agent).filter(Agent.workspace_id == workspace_id, Agent.id == agent_id).first()
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    return agent
+
+
+def require_agent_read_access(agent: Agent, membership: WorkspaceMember) -> None:
+    if can_manage(membership.role):
+        return
+    if agent.created_by == membership.user_id:
+        return
+    raise HTTPException(status_code=403, detail="Agent access denied")
+
+
+def require_agent_write_access(agent: Agent, membership: WorkspaceMember) -> None:
+    if can_manage(membership.role):
+        return
+    if agent.created_by == membership.user_id:
+        return
+    raise HTTPException(status_code=403, detail="Agent edit denied")
+
+
+def review_payload(db: Session, agent: Agent) -> dict:
+    version = db.query(AgentVersion).filter(AgentVersion.agent_id == agent.id).order_by(AgentVersion.version.desc()).first()
+    return {
+        **agent_summary(agent),
+        "submitted_version": version.version if version else None,
+        "submitted_at": version.created_at.isoformat() if version and version.created_at else None,
+    }
+
+
+def validate_workflow_nodes(nodes: list[dict]) -> None:
+    allowed = {"Start", "LLM", "Knowledge", "Tool", "Answer"}
+    seen = {node.get("type") for node in nodes}
+    if not seen.issubset(allowed):
+        raise HTTPException(status_code=400, detail="Unsupported workflow node type")
+    if not {"Start", "Answer"}.issubset(seen):
+        raise HTTPException(status_code=400, detail="Workflow requires Start and Answer nodes")
+
+
+def workflow_request_definition(request: WorkflowUpdateRequest) -> dict:
+    if request.graph is not None:
+        return request.graph
+    return request.model_dump(exclude_none=True, exclude={"graph"})
+
+
+def apply_model_selection(db: Session, payload: dict, *, user_id: int) -> dict:
+    if payload.get("user_model_config_id"):
+        config = db.query(UserModelConfig).filter(
+            UserModelConfig.id == payload["user_model_config_id"],
+            UserModelConfig.user_id == user_id,
+            UserModelConfig.enabled.is_(True),
+        ).first()
+        if not config:
+            raise HTTPException(status_code=400, detail="User model config is not available")
+        payload["model_id"] = None
+        payload["model"] = config.chat_model
+        if payload.get("temperature") is None:
+            payload["temperature"] = config.default_temperature
+        return payload
+    if (
+        not payload.get("model_id")
+        and not payload.get("user_model_config_id")
+        and "model_id" in payload
+        and "user_model_config_id" in payload
+    ):
+        default_user_model = db.query(UserModelConfig).filter(
+            UserModelConfig.user_id == user_id,
+            UserModelConfig.enabled.is_(True),
+            UserModelConfig.is_default.is_(True),
+        ).order_by(UserModelConfig.id.asc()).first()
+        if default_user_model:
+            payload["user_model_config_id"] = default_user_model.id
+            payload["model_id"] = None
+            payload["model"] = default_user_model.chat_model
+            if payload.get("temperature") is None:
+                payload["temperature"] = default_user_model.default_temperature
+            return payload
+        payload["model"] = None
+    if payload.get("model_id"):
+        payload["user_model_config_id"] = None
+    if not payload.get("model_id"):
+        return payload
+    model = db.get(ModelConfig, payload["model_id"])
+    if not model or not model.enabled:
+        raise HTTPException(status_code=400, detail="Model is not available")
+    payload["model"] = model.model_name
+    if payload.get("temperature") is None:
+        payload["temperature"] = model.default_temperature
+    return payload
+
+
+def get_or_create_session(
+    db: Session,
+    agent: Agent,
+    user_id: int,
+    session_id: int | None,
+    title_seed: str,
+    is_debug: bool = False,
+) -> ChatSession:
+    if session_id:
+        session = db.get(ChatSession, session_id)
+        if session and session.agent_id == agent.id and session.user_id == user_id:
+            return session
+    session = ChatSession(
+        workspace_id=agent.workspace_id,
+        agent_id=agent.id,
+        user_id=user_id,
+        title="新会话",
+        is_debug=is_debug,
+    )
+    db.add(session)
+    db.commit()
+    db.refresh(session)
+    return session
