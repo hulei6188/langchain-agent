@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import logging
-from contextlib import ExitStack
+import asyncio
+from contextlib import AsyncExitStack, ExitStack
 
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.store.memory import InMemoryStore
@@ -14,10 +15,16 @@ class LangGraphPersistence:
 
     def __init__(self) -> None:
         self._stack = ExitStack()
+        self._async_stack = AsyncExitStack()
+        self._async_lock: asyncio.Lock | None = None
         self.checkpointer = InMemorySaver()
         self.store = InMemoryStore()
         self.backend = "memory"
         self.database_url = ""
+        self.async_checkpointer = None
+        self.async_store = None
+        self.async_backend = "memory"
+        self.async_database_url = ""
 
     def configure_postgres(self, database_url: str) -> None:
         from langgraph.checkpoint.postgres import PostgresSaver
@@ -45,6 +52,56 @@ class LangGraphPersistence:
         self.database_url = conn_string
         logger.info("Configured LangGraph persistence backend: postgres")
 
+    async def aget_checkpointer(self):
+        await self._ensure_async_backend()
+        return self.async_checkpointer or self.checkpointer
+
+    async def aget_store(self):
+        await self._ensure_async_backend()
+        return self.async_store or self.store
+
+    async def _ensure_async_backend(self) -> None:
+        if self.backend != "postgres":
+            return
+        if (
+            self.async_backend == "postgres"
+            and self.async_database_url == self.database_url
+            and self.async_checkpointer is not None
+            and self.async_store is not None
+        ):
+            return
+        if self._async_lock is None:
+            self._async_lock = asyncio.Lock()
+        async with self._async_lock:
+            if (
+                self.async_backend == "postgres"
+                and self.async_database_url == self.database_url
+                and self.async_checkpointer is not None
+                and self.async_store is not None
+            ):
+                return
+            await self._close_async()
+
+            from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+            from langgraph.store.postgres.aio import AsyncPostgresStore
+
+            stack = AsyncExitStack()
+            try:
+                checkpointer = await stack.enter_async_context(AsyncPostgresSaver.from_conn_string(self.database_url))
+                store = await stack.enter_async_context(AsyncPostgresStore.from_conn_string(self.database_url))
+                await checkpointer.setup()
+                await store.setup()
+            except Exception:
+                await stack.aclose()
+                raise
+
+            self._async_stack = stack
+            self.async_checkpointer = checkpointer
+            self.async_store = store
+            self.async_backend = "postgres"
+            self.async_database_url = self.database_url
+            logger.info("Configured async LangGraph persistence backend: postgres")
+
     def close(self) -> None:
         self._stack.close()
         self._stack = ExitStack()
@@ -53,6 +110,18 @@ class LangGraphPersistence:
             self.store = InMemoryStore()
             self.backend = "memory"
             self.database_url = ""
+
+    async def aclose(self) -> None:
+        await self._close_async()
+        self.close()
+
+    async def _close_async(self) -> None:
+        await self._async_stack.aclose()
+        self._async_stack = AsyncExitStack()
+        self.async_checkpointer = None
+        self.async_store = None
+        self.async_backend = "memory"
+        self.async_database_url = ""
 
 
 langgraph_persistence = LangGraphPersistence()
@@ -79,9 +148,21 @@ def close_langgraph_persistence() -> None:
     langgraph_persistence.close()
 
 
+async def aclose_langgraph_persistence() -> None:
+    await langgraph_persistence.aclose()
+
+
 def get_workflow_checkpointer():
     return langgraph_persistence.checkpointer
 
 
 def get_graph_memory_store():
     return langgraph_persistence.store
+
+
+async def get_async_workflow_checkpointer():
+    return await langgraph_persistence.aget_checkpointer()
+
+
+async def get_async_graph_memory_store():
+    return await langgraph_persistence.aget_store()

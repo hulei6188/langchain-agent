@@ -102,19 +102,23 @@ async def execute_workflow_stream(db: Session, params: dict) -> AsyncIterator[st
         reasoning_parts.append(content)
 
     try:
-        workflow_stream = runner.start_stream_run(
-            agent=agent,
-            chat_session=chat_session,
-            user_message=params["user_message"],
-            mode=params["mode"],
-            variables=params["variables"],
-            rag_enabled=params["rag_enabled"],
-            rag_options=params["rag_options"],
-            thinking_enabled=params["thinking_enabled"],
-            search_enabled=params["search_enabled"],
-            attachments=params["attachments"],
-            current_message_id=params["user_message_id"],
-        )
+        stream_run_kwargs = {
+            "agent": agent,
+            "chat_session": chat_session,
+            "user_message": params["user_message"],
+            "mode": params["mode"],
+            "variables": params["variables"],
+            "rag_enabled": params["rag_enabled"],
+            "rag_options": params["rag_options"],
+            "thinking_enabled": params["thinking_enabled"],
+            "search_enabled": params["search_enabled"],
+            "attachments": params["attachments"],
+            "current_message_id": params["user_message_id"],
+        }
+        if hasattr(runner, "astart_stream_run"):
+            workflow_stream = await runner.astart_stream_run(**stream_run_kwargs)
+        else:
+            workflow_stream = runner.start_stream_run(**stream_run_kwargs)
         tracked_run_id = workflow_stream.run.id
         run = workflow_stream.run
         yield emit("run_started", {"run_id": tracked_run_id, "session_id": chat_session.id})

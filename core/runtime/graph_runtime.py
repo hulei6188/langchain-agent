@@ -33,6 +33,8 @@ def build_langgraph_workflow(
     stream_llm_node: Callable[[Any, dict, dict], Any],
     run_tool_node: Callable[..., dict],
     raise_if_cancelled: Callable[[], None],
+    checkpointer: Any | None = None,
+    store: Any | None = None,
 ):
     spec = workflow_graph_spec(getattr(runtime, "workflow", None))
     workflow = spec["nodes"]
@@ -77,7 +79,10 @@ def build_langgraph_workflow(
     terminal_node_ids = [node_id for node_id in graph_names if node_id not in edge_sources and node_id not in conditional_sources] or [next(reversed(graph_names))]
     for node_id in terminal_node_ids:
         graph_builder.add_edge(graph_names[node_id], END)
-    return graph_builder.compile(checkpointer=get_workflow_checkpointer(), store=get_graph_memory_store())
+    return graph_builder.compile(
+        checkpointer=checkpointer if checkpointer is not None else get_workflow_checkpointer(),
+        store=store if store is not None else get_graph_memory_store(),
+    )
 
 
 def workflow_thread_config(context: dict) -> dict:

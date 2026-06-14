@@ -6,7 +6,7 @@ from typing import Any
 
 from core.db.models import Run
 from core.db.session import SessionLocal, init_db
-from core.runtime.langgraph_persistence import close_langgraph_persistence
+from core.runtime.langgraph_persistence import aclose_langgraph_persistence
 
 
 class AppLifecycleState:
@@ -33,7 +33,7 @@ def create_lifespan(settings, logger) -> tuple[AppLifecycleState, Any]:
         try:
             yield
         finally:
-            close_langgraph_persistence()
+            await aclose_langgraph_persistence()
 
     return state, lifespan
 

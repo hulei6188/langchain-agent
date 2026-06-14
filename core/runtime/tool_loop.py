@@ -131,7 +131,7 @@ class ToolLoopRunner:
             {"call_model": "call_model", "final_answer": "final_answer"},
         )
         graph_builder.add_edge("final_answer", END)
-        return graph_builder.compile()
+        return graph_builder.compile(checkpointer=False)
 
     def _call_model(
         self,

@@ -1,3 +1,4 @@
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -6,6 +7,7 @@ from langchain_core.tools import StructuredTool
 
 pytest.importorskip("langgraph")
 
+from core.runtime.tool_loop import ToolLoopRunner
 from core.runtime.workflow import WorkflowRunner
 from core.runtime.graph_runtime import initial_workflow_state, workflow_thread_config
 from core.runtime.spec import workflow_graph_spec
@@ -87,6 +89,52 @@ def test_langgraph_workflow_streams_custom_events(monkeypatch):
     assert custom_events[-1]["event"] == "step"
     assert final_state["context"]["draft"] == "hello"
     assert final_state["steps"][0]["output"]["draft_streamed"] is True
+
+
+def test_workflow_runner_astart_stream_run_uses_async_persistence(monkeypatch):
+    runner = _runner_with_fake_persistence(monkeypatch)
+    runner.provider = SimpleNamespace(name="provider")
+    runtime = SimpleNamespace(workflow=[{"id": "llm", "type": "LLM", "config": {}}])
+    run = SimpleNamespace(id=123)
+    context = {"session_id": 2, "input": "hello"}
+    captured = {}
+    registered = []
+    unregistered = []
+
+    async def async_checkpointer():
+        return "async-checkpointer"
+
+    async def async_store():
+        return "async-store"
+
+    def fake_build(**kwargs):
+        captured.update(kwargs)
+        return "graph"
+
+    monkeypatch.setattr(runner, "_start_run", lambda **kwargs: (runtime, run, context))
+    monkeypatch.setattr(runner, "_build_langgraph_workflow", fake_build)
+    monkeypatch.setattr("core.runtime.workflow.get_async_workflow_checkpointer", async_checkpointer)
+    monkeypatch.setattr("core.runtime.workflow.get_async_graph_memory_store", async_store)
+    monkeypatch.setattr(
+        "core.runtime.workflow.register_run",
+        lambda run_id, provider: registered.append((run_id, provider)) or SimpleNamespace(is_set=lambda: False),
+    )
+    monkeypatch.setattr("core.runtime.workflow.unregister_run", lambda run_id: unregistered.append(run_id))
+
+    stream_run = asyncio.run(
+        runner.astart_stream_run(
+            agent=SimpleNamespace(),
+            chat_session=SimpleNamespace(),
+            user_message="hello",
+        )
+    )
+
+    assert stream_run.graph == "graph"
+    assert captured["stream"] is True
+    assert captured["checkpointer"] == "async-checkpointer"
+    assert captured["store"] == "async-store"
+    assert registered == [(123, runner.provider)]
+    assert unregistered == []
 
 
 def test_workflow_graph_spec_preserves_graph_fields():
@@ -228,6 +276,19 @@ def test_tool_subgraph_loops_back_to_model_after_tool_call(monkeypatch):
         isinstance(message, ToolMessage) and message.content == "tool result"
         for message in provider.chat_calls[1]["messages"]
     )
+
+
+def test_tool_subgraph_disables_inherited_checkpointing():
+    runner = ToolLoopRunner(
+        db=SimpleNamespace(),
+        provider=SimpleNamespace(),
+        cancel_event=None,
+        raise_if_cancelled=lambda: None,
+    )
+
+    graph = runner._build_graph(_agent(), stream=False, writer=None)
+
+    assert graph.checkpointer is False
 
 
 def _initial_context():

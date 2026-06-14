@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import logging
+import threading
 from dataclasses import dataclass
 from datetime import datetime
-import threading
 from typing import Any, Callable
 
 from langchain_core.messages import AIMessage, BaseMessage
@@ -22,6 +23,7 @@ from core.runtime.dsml import (
     strip_or_block_leaked_tool_markup,
 )
 from core.runtime.graph_runtime import build_langgraph_workflow, initial_workflow_state, workflow_thread_config
+from core.runtime.langgraph_persistence import get_async_graph_memory_store, get_async_workflow_checkpointer
 from core.runtime.memory_runtime import load_runtime_memory_state, save_runtime_memory_state
 from core.runtime.message_utils import (
     message_content_text as _message_content_text,
@@ -39,6 +41,9 @@ from core.runtime.tool_loop import ToolLoopRunner
 from core.services.agents import normalize_memory, normalize_rag
 from core.services.rag import run_rag_pipeline
 from core.services.uploads import get_workspace_uploads
+
+logger = logging.getLogger(__name__)
+
 
 @dataclass
 class WorkflowStreamRun:
@@ -136,13 +141,51 @@ class WorkflowRunner:
             attachments=attachments,
             current_message_id=current_message_id,
         )
-        self._cancel_event = register_run(run.id, self.provider)
-        graph = self._build_langgraph_workflow(
-            runtime=runtime,
-            run=run,
-            stream=True,
+        try:
+            return self._compile_stream_run(runtime=runtime, run=run, context=context)
+        except Exception:
+            self._mark_stream_start_failed(run)
+            raise
+
+    async def astart_stream_run(
+        self,
+        *,
+        agent: Agent,
+        chat_session: ChatSession,
+        user_message: str,
+        mode: str = "draft",
+        variables: dict | None = None,
+        rag_enabled: bool | None = None,
+        rag_options: dict | None = None,
+        thinking_enabled: bool | None = None,
+        search_enabled: bool | None = None,
+        attachments: list[dict] | None = None,
+        current_message_id: int | None = None,
+    ) -> WorkflowStreamRun:
+        runtime, run, context = self._start_run(
+            agent=agent,
+            chat_session=chat_session,
+            user_message=user_message,
+            mode=mode,
+            variables=variables,
+            rag_enabled=rag_enabled,
+            rag_options=rag_options,
+            thinking_enabled=thinking_enabled,
+            search_enabled=search_enabled,
+            attachments=attachments,
+            current_message_id=current_message_id,
         )
-        return WorkflowStreamRun(runtime=runtime, run=run, context=context, graph=graph)
+        try:
+            return self._compile_stream_run(
+                runtime=runtime,
+                run=run,
+                context=context,
+                checkpointer=await get_async_workflow_checkpointer(),
+                store=await get_async_graph_memory_store(),
+            )
+        except Exception:
+            self._mark_stream_start_failed(run)
+            raise
 
     async def astream_graph_events(self, stream_run: WorkflowStreamRun):
         async for event in stream_run.graph.astream_events(
@@ -177,6 +220,40 @@ class WorkflowRunner:
 
     def close_stream_run(self, run: Run) -> None:
         unregister_run(run.id)
+
+    def _compile_stream_run(
+        self,
+        *,
+        runtime,
+        run: Run,
+        context: dict,
+        checkpointer: Any | None = None,
+        store: Any | None = None,
+    ) -> WorkflowStreamRun:
+        self._cancel_event = register_run(run.id, self.provider)
+        try:
+            graph = self._build_langgraph_workflow(
+                runtime=runtime,
+                run=run,
+                stream=True,
+                checkpointer=checkpointer,
+                store=store,
+            )
+        except Exception:
+            unregister_run(run.id)
+            self._cancel_event = None
+            raise
+        return WorkflowStreamRun(runtime=runtime, run=run, context=context, graph=graph)
+
+    def _mark_stream_start_failed(self, run: Run) -> None:
+        try:
+            if getattr(run, "status", None) == "running":
+                run.status = "failed"
+                run.completed_at = datetime.utcnow()
+                self.db.commit()
+        except Exception:
+            self.db.rollback()
+            logger.exception("Failed to mark run %s as failed after stream startup error", getattr(run, "id", None))
 
     def _start_run(
         self,
@@ -274,6 +351,8 @@ class WorkflowRunner:
         runtime,
         run: Run,
         stream: bool,
+        checkpointer: Any | None = None,
+        store: Any | None = None,
     ):
         return build_langgraph_workflow(
             runtime=runtime,
@@ -282,6 +361,8 @@ class WorkflowRunner:
             stream_llm_node=self._stream_llm_node,
             run_tool_node=self._run_tool_node,
             raise_if_cancelled=self._raise_if_cancelled,
+            checkpointer=checkpointer,
+            store=store,
         )
 
     def _execute_node(self, agent, node: dict, context: dict) -> dict:
