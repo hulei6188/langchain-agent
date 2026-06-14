@@ -1,8 +1,13 @@
+import asyncio
 from types import SimpleNamespace
 
 from core.db.models import Agent, Session as ChatSession
 from core.services.run_events import sse_event
 from core.services.run_streams import execute_workflow_stream, safe_stream_error, sanitize_public_error, stream_workflow_sse
+
+
+async def _collect(async_iterable):
+    return [item async for item in async_iterable]
 
 
 class FakeDb:
@@ -17,7 +22,7 @@ class FakeDb:
 
 
 def test_execute_workflow_stream_yields_error_for_missing_agent():
-    events = list(execute_workflow_stream(FakeDb(), {"agent_id": 1, "session_id": 2}))
+    events = asyncio.run(_collect(execute_workflow_stream(FakeDb(), {"agent_id": 1, "session_id": 2})))
 
     assert events == [sse_event("error", {"message": "Agent not found"})]
 
@@ -26,7 +31,7 @@ def test_stream_workflow_sse_closes_session(monkeypatch):
     db = FakeDb()
     monkeypatch.setattr("core.services.run_streams.SessionLocal", lambda: db)
 
-    events = list(stream_workflow_sse({"agent_id": 1, "session_id": 2}))
+    events = asyncio.run(_collect(stream_workflow_sse({"agent_id": 1, "session_id": 2})))
 
     assert events == [sse_event("error", {"message": "Agent not found"})]
     assert db.closed is True
@@ -73,10 +78,18 @@ def test_execute_workflow_stream_consumes_graph_stream_parts(monkeypatch):
             self.started = kwargs
             return SimpleNamespace(run=SimpleNamespace(id=99), context={"session_id": 2})
 
-        def stream_graph_parts(self, workflow_stream):
+        async def astream_graph_events(self, workflow_stream):
             self.streamed = True
-            yield {"type": "custom", "data": {"event": "token", "content": "hello"}}
-            yield {"type": "values", "data": {"context": {"answer": "hello"}, "steps": []}}
+            yield {
+                "event": "on_chain_stream",
+                "name": "LangGraph",
+                "data": {"chunk": ("custom", {"event": "token", "content": "hello"})},
+            }
+            yield {
+                "event": "on_chain_stream",
+                "name": "LangGraph",
+                "data": {"chunk": ("values", {"context": {"answer": "hello"}, "steps": []})},
+            }
 
         def complete_stream_run(self, **kwargs):
             self.completed = kwargs
@@ -92,23 +105,25 @@ def test_execute_workflow_stream_consumes_graph_stream_parts(monkeypatch):
         lambda db, run_id, event, payload, sse: persisted.append((run_id, event, payload)),
     )
 
-    events = list(
-        execute_workflow_stream(
-            FakeRunDb(),
-            {
-                "agent_id": 1,
-                "session_id": 2,
-                "user_message": "hi",
-                "mode": "draft",
-                "variables": {},
-                "rag_enabled": None,
-                "rag_options": {},
-                "thinking_enabled": None,
-                "search_enabled": None,
-                "attachments": [],
-                "user_message_id": 7,
-                "user_id": 3,
-            },
+    events = asyncio.run(
+        _collect(
+            execute_workflow_stream(
+                FakeRunDb(),
+                {
+                    "agent_id": 1,
+                    "session_id": 2,
+                    "user_message": "hi",
+                    "mode": "draft",
+                    "variables": {},
+                    "rag_enabled": None,
+                    "rag_options": {},
+                    "thinking_enabled": None,
+                    "search_enabled": None,
+                    "attachments": [],
+                    "user_message_id": 7,
+                    "user_id": 3,
+                },
+            )
         )
     )
 

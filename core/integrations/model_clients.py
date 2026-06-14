@@ -8,6 +8,7 @@ import urllib.error
 import urllib.request
 
 from langchain_core.embeddings import Embeddings
+from langchain_openai import OpenAIEmbeddings
 
 from core.config import get_settings
 
@@ -84,23 +85,45 @@ class OpenAICompatibleEmbeddings(Embeddings):
         self.last_mock = False
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
-        return [self.embed_query(text) for text in texts]
+        settings = get_settings()
+        key = api_key(settings, purpose="embedding")
+        if settings.mock_llm:
+            self.last_mock = True
+            return [self._mock_embedding(text) for text in texts]
+        if not key:
+            raise RuntimeError("Embedding API key is not configured")
+        self.last_mock = False
+        return self._langchain_embeddings(settings, key=key).embed_documents(texts)
 
     def embed_query(self, text: str, *, runtime_config: dict | None = None) -> list[float]:
         settings = get_settings()
         key = api_key(settings, runtime_config, purpose="embedding")
         if settings.mock_llm:
             self.last_mock = True
-            digest = hashlib.sha256(text.encode("utf-8")).digest()
-            return [((digest[i % len(digest)] / 255.0) * 2) - 1 for i in range(32)]
+            return self._mock_embedding(text)
         if not key:
             raise RuntimeError("Embedding API key is not configured")
         self.last_mock = False
+        return self._langchain_embeddings(settings, key=key, runtime_config=runtime_config).embed_query(text)
 
-        url = api_base(settings, runtime_config, purpose="embedding").rstrip("/") + "/embeddings"
-        payload = {"model": settings.openai_embedding_model, "input": text}
-        data = post_json(url, payload, key)
-        return data["data"][0]["embedding"]
+    def _langchain_embeddings(
+        self,
+        settings,
+        *,
+        key: str,
+        runtime_config: dict | None = None,
+    ) -> OpenAIEmbeddings:
+        return OpenAIEmbeddings(
+            api_key=key,
+            base_url=api_base(settings, runtime_config, purpose="embedding").rstrip("/") or None,
+            model=settings.openai_embedding_model,
+            max_retries=0,
+            timeout=60,
+        )
+
+    def _mock_embedding(self, text: str) -> list[float]:
+        digest = hashlib.sha256(text.encode("utf-8")).digest()
+        return [((digest[i % len(digest)] / 255.0) * 2) - 1 for i in range(32)]
 
 
 class OpenAICompatibleReranker:

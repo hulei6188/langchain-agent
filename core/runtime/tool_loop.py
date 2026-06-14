@@ -15,7 +15,6 @@ from core.runtime.persistence import persist_intermediate_message
 from core.runtime.prompting import build_llm_messages
 from core.runtime.streaming import stream_chat_response_to_writer
 from core.runtime.tool_graph_helpers import (
-    tool_direct_output,
     tool_final_output,
     tool_job_start_event,
     tool_limits_reached,
@@ -121,8 +120,8 @@ class ToolLoopRunner:
         )
         graph_builder.add_conditional_edges(
             "call_model",
-            self._route_after_model,
-            {"tools": "tools", "__end__": "final_answer", "end": END},
+            tools_condition,
+            {"tools": "tools", "__end__": "final_answer"},
         )
         graph_builder.add_conditional_edges(
             "tools",
@@ -173,19 +172,12 @@ class ToolLoopRunner:
         state["pending_calls"] = []
         response_content = message_content_text(response)
         response_reasoning = message_reasoning_content(response)
-        if response_content and not response.tool_calls:
-            state["output"] = tool_direct_output(state, response, stream=stream)
-            return state
-        if not response.tool_calls:
-            return state
 
         remaining_calls = max(
             0,
             int(state.get("max_tool_calls") or MAX_TOOL_CALLS_PER_RUN) - int(state.get("total_calls") or 0),
         )
-        calls_this_round = response.tool_calls[:remaining_calls]
-        if not calls_this_round:
-            return state
+        calls_this_round = (response.tool_calls or [])[:remaining_calls]
         events = list(state.get("events") or [])
         if response_reasoning and context.get("thinking_enabled") and not stream:
             reasoning_content = response_reasoning.strip()
@@ -199,24 +191,20 @@ class ToolLoopRunner:
                 tool_calls=calls_this_round,
             )
         )
-        persist_intermediate_message(
-            self.db,
-            context,
-            role="assistant",
-            content=response_content,
-            reasoning=response_reasoning,
-            tool_calls=calls_this_round,
-            meta={"node_id": state["node"]["id"], "round": round_index, "kind": "tool_calls"},
-        )
+        if calls_this_round:
+            persist_intermediate_message(
+                self.db,
+                context,
+                role="assistant",
+                content=response_content,
+                reasoning=response_reasoning,
+                tool_calls=calls_this_round,
+                meta={"node_id": state["node"]["id"], "round": round_index, "kind": "tool_calls"},
+            )
         state["messages"] = messages
         state["events"] = events
         state["pending_calls"] = calls_this_round
         return state
-
-    def _route_after_model(self, state: ToolGraphState) -> str:
-        if state.get("output"):
-            return "end"
-        return tools_condition(state)
 
     def _execute_tools(
         self,
@@ -297,6 +285,22 @@ class ToolLoopRunner:
     ) -> ToolGraphState:
         self.raise_if_cancelled()
         state = dict(state)
+        latest = next(
+            (message for message in reversed(state.get("messages", [])) if isinstance(message, AIMessage)),
+            None,
+        )
+        if latest is not None and not latest.tool_calls:
+            state["output"] = tool_final_output(
+                state,
+                latest,
+                stream=stream,
+                max_rounds_reached=tool_limits_reached(
+                    state,
+                    max_tool_calls=MAX_TOOL_CALLS_PER_RUN,
+                    max_tool_rounds=MAX_TOOL_ROUNDS_PER_RUN,
+                ),
+            )
+            return state
         if stream:
             final = stream_chat_response_to_writer(
                 self.provider,

@@ -4,7 +4,6 @@ import asyncio
 import hashlib
 import inspect
 import json
-import urllib.parse
 from collections.abc import Sequence
 from datetime import timedelta
 from typing import Any
@@ -195,7 +194,6 @@ async def _call_stdio_mcp_tool(
 
 async def _discover_mcp_tools(server_url: str, *, headers: dict[str, str], transport: str, timeout_seconds: int) -> list[dict]:
     timeout_seconds = _normalize_timeout(timeout_seconds)
-    await _ensure_server_reachable(server_url, timeout_seconds=timeout_seconds)
     tools = await _map_mcp_errors(
         _load_adapter_tools(
             server_url,
@@ -436,7 +434,6 @@ async def _call_mcp_tool(
     timeout_seconds: int,
 ) -> dict:
     timeout_seconds = _normalize_timeout(timeout_seconds)
-    await _ensure_server_reachable(server_url, timeout_seconds=timeout_seconds)
     return await _map_mcp_errors(
         _call_adapter_tool(
             server_url,
@@ -930,27 +927,3 @@ def _walk_exception_graph(exc: BaseException):
             stack.append(current.__context__)
 
 
-async def _ensure_server_reachable(server_url: str, *, timeout_seconds: int) -> None:
-    parsed = urllib.parse.urlparse(server_url)
-    host = parsed.hostname
-    if not host:
-        return
-    port = parsed.port or (443 if parsed.scheme == "https" else 80)
-    try:
-        reader, writer = await asyncio.wait_for(asyncio.open_connection(host, port), timeout=timeout_seconds)
-    except (asyncio.TimeoutError, TimeoutError):
-        raise MCPClientError("MCP server request timed out")
-    except OSError:
-        raise MCPClientError(f"Unable to connect to the MCP server at {host}:{port}")
-    try:
-        if reader:
-            try:
-                await asyncio.wait_for(reader.read(0), timeout=0.05)
-            except (asyncio.TimeoutError, TimeoutError):
-                pass
-    finally:
-        writer.close()
-        try:
-            await writer.wait_closed()
-        except Exception:
-            pass

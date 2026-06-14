@@ -57,16 +57,24 @@ def build_langgraph_workflow(
             ),
         )
 
-    edge_sources = {edge["source"] for edge in spec["edges"]}
+    conditional_sources = {edge["source"] for edge in spec["conditional_edges"]}
+    edge_sources = {edge["source"] for edge in spec["edges"] if edge["source"] not in conditional_sources}
     start_node_ids = [spec["entrypoint"]] if spec.get("entrypoint") in graph_names else [next(iter(graph_names))]
     for node_id in start_node_ids:
         graph_builder.add_edge(START, graph_names[node_id])
     for edge in spec["edges"]:
+        if edge["source"] in conditional_sources:
+            continue
         source = graph_names.get(edge["source"])
         target = graph_names.get(edge["target"])
         if source and target:
             graph_builder.add_edge(source, target)
-    terminal_node_ids = [node_id for node_id in graph_names if node_id not in edge_sources] or [next(reversed(graph_names))]
+    for edge in spec["conditional_edges"]:
+        source = graph_names.get(edge["source"])
+        path_map = conditional_path_map(edge, graph_names)
+        if source and path_map:
+            graph_builder.add_conditional_edges(source, conditional_route(edge), path_map)
+    terminal_node_ids = [node_id for node_id in graph_names if node_id not in edge_sources and node_id not in conditional_sources] or [next(reversed(graph_names))]
     for node_id in terminal_node_ids:
         graph_builder.add_edge(graph_names[node_id], END)
     return graph_builder.compile(checkpointer=get_workflow_checkpointer(), store=get_graph_memory_store())
@@ -142,6 +150,67 @@ def initial_step_events(context: dict) -> list[dict]:
         {"event": "search_status", "data": search_status_event(context.get("search_status", {}))},
         {"event": "skill_selection", "data": context.get("skill_selection", {})},
     ]
+
+
+def conditional_path_map(edge: dict, graph_names: dict[str, str]) -> dict[str, str]:
+    output = {}
+    for label, target_node_id in (edge.get("path_map") or {}).items():
+        target = str(target_node_id)
+        if target in {"__end__", "END"}:
+            output[str(label)] = END
+        elif target in graph_names:
+            output[str(label)] = graph_names[target]
+    return output
+
+
+def conditional_route(edge: dict) -> Callable[[WorkflowGraphState], str]:
+    keys = [
+        str(edge.get("condition_key") or "").strip(),
+        str(edge.get("path_key") or "").strip(),
+        str(edge.get("context_key") or "").strip(),
+        str(edge.get("key") or "").strip(),
+        "route",
+    ]
+    keys = [key for index, key in enumerate(keys) if key and key not in keys[:index]]
+    allowed_labels = {str(label) for label in (edge.get("path_map") or {})}
+    fallback = str(edge.get("default") or edge.get("fallback") or "").strip()
+
+    def route(state: WorkflowGraphState) -> str:
+        latest_step = (state.get("steps") or [{}])[-1]
+        output = latest_step.get("output") or {}
+        context = state.get("context") or {}
+        for key in keys:
+            value = nested_value(output, key)
+            if value is None:
+                value = nested_value(context, key)
+            if value is not None:
+                label = route_label(value)
+                if label in allowed_labels:
+                    return label
+        if fallback in allowed_labels:
+            return fallback
+        if "default" in allowed_labels:
+            return "default"
+        if "__end__" in allowed_labels:
+            return "__end__"
+        return next(iter(allowed_labels), "__end__")
+
+    return route
+
+
+def nested_value(payload: dict, key: str):
+    current = payload
+    for part in key.split("."):
+        if not isinstance(current, dict) or part not in current:
+            return None
+        current = current[part]
+    return current
+
+
+def route_label(value) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
 
 
 def langgraph_node_name(node: dict, index: int, used_names: set[str]) -> str:

@@ -144,15 +144,15 @@ class WorkflowRunner:
         )
         return WorkflowStreamRun(runtime=runtime, run=run, context=context, graph=graph)
 
-    def stream_graph_parts(self, stream_run: WorkflowStreamRun):
-        for part in stream_run.graph.stream(
+    async def astream_graph_events(self, stream_run: WorkflowStreamRun):
+        async for event in stream_run.graph.astream_events(
             initial_workflow_state(user_message=str(stream_run.context.get("input") or ""), context=stream_run.context),
             config=workflow_thread_config(stream_run.context),
             stream_mode=["custom", "values"],
             version="v2",
         ):
             self._raise_if_cancelled()
-            yield part
+            yield event
 
     def complete_stream_run(
         self,

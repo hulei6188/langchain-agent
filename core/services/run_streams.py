@@ -3,8 +3,7 @@ from __future__ import annotations
 import logging
 import re
 import time
-from collections.abc import Iterable
-from dataclasses import dataclass, field
+from collections.abc import AsyncIterator
 from datetime import datetime, timezone
 
 from langchain_core.messages import HumanMessage
@@ -36,70 +35,12 @@ PUBLIC_CHAT_ERRORS = (
 )
 
 
-@dataclass
-class RunStreamState:
-    answer: str = ""
-    provisional_answer: str = ""
-    sources: list[dict] = field(default_factory=list)
-    reasoning: str = ""
-    reasoning_started_at: float | None = None
-    reasoning_duration_ms: int | None = None
-    assistant_saved: bool = False
-    used_tools: bool = False
-    requires_reasoning_replay: bool = False
-
-    @property
-    def partial_answer(self) -> str:
-        return self.answer + self.provisional_answer
-
-    def finish_reasoning_duration(self) -> None:
-        if self.reasoning_started_at is not None and self.reasoning_duration_ms is None:
-            self.reasoning_duration_ms = int((time.perf_counter() - self.reasoning_started_at) * 1000)
-
-    def add_token(self, content: str) -> None:
-        self.finish_reasoning_duration()
-        self.answer += content
-
-    def add_provisional_token(self, content: str) -> None:
-        self.finish_reasoning_duration()
-        self.provisional_answer += content
-
-    def add_reasoning_token(self, content: str) -> None:
-        if content and self.reasoning_started_at is None:
-            self.reasoning_started_at = time.perf_counter()
-        self.reasoning += content
-
-    def clear_provisional(self) -> None:
-        self.provisional_answer = ""
-        if not self.reasoning:
-            self.reasoning_started_at = None
-            self.reasoning_duration_ms = None
-
-    def commit_provisional(self) -> None:
-        if self.provisional_answer:
-            self.answer += self.provisional_answer
-        self.provisional_answer = ""
-
-    def apply_complete(self, event: dict) -> None:
-        self.answer = event["answer"] or self.partial_answer
-        self.sources = event["sources"]
-        steps = event.get("steps", [])
-        self.used_tools = any(
-            (step.get("node_type") == "Tool")
-            and int(((step.get("output") or {}).get("tool_stats") or {}).get("total_calls") or 0) > 0
-            for step in steps
-        )
-        self.requires_reasoning_replay = any(
-            bool((step.get("output") or {}).get("reasoning_replay_required"))
-            for step in steps
-        )
-
-
-def stream_workflow_sse(params: dict) -> Iterable[str]:
+async def stream_workflow_sse(params: dict) -> AsyncIterator[str]:
     """Stream a workflow run directly from LangGraph runtime events as SSE."""
     db = SessionLocal()
     try:
-        yield from execute_workflow_stream(db, params)
+        async for event in execute_workflow_stream(db, params):
+            yield event
     except Exception as exc:
         logger.exception("Workflow stream crashed")
         _mark_latest_running_run_failed(db, session_id=params["session_id"])
@@ -108,7 +49,7 @@ def stream_workflow_sse(params: dict) -> Iterable[str]:
         db.close()
 
 
-def execute_workflow_stream(db: Session, params: dict) -> Iterable[str]:
+async def execute_workflow_stream(db: Session, params: dict) -> AsyncIterator[str]:
     """Execute a workflow run and yield SSE event strings."""
     agent = db.get(Agent, params["agent_id"])
     if not agent:
@@ -134,9 +75,31 @@ def execute_workflow_stream(db: Session, params: dict) -> Iterable[str]:
             logger.exception("Failed to persist run event %s for run %s", event_name, tracked_run_id)
         return sse_str
 
-    stream_state = RunStreamState()
+    answer_parts: list[str] = []
+    provisional_parts: list[str] = []
+    reasoning_parts: list[str] = []
+    reasoning_started_at: float | None = None
+    reasoning_duration_ms: int | None = None
+    assistant_saved = False
+    sources: list[dict] = []
+    used_tools = False
+    requires_reasoning_replay = False
     run: Run | None = None
     workflow_stream = None
+
+    def partial_answer() -> str:
+        return "".join(answer_parts) + "".join(provisional_parts)
+
+    def finish_reasoning_duration() -> None:
+        nonlocal reasoning_duration_ms
+        if reasoning_started_at is not None and reasoning_duration_ms is None:
+            reasoning_duration_ms = int((time.perf_counter() - reasoning_started_at) * 1000)
+
+    def add_reasoning(content: str) -> None:
+        nonlocal reasoning_started_at
+        if content and reasoning_started_at is None:
+            reasoning_started_at = time.perf_counter()
+        reasoning_parts.append(content)
 
     try:
         workflow_stream = runner.start_stream_run(
@@ -157,31 +120,42 @@ def execute_workflow_stream(db: Session, params: dict) -> Iterable[str]:
         yield emit("run_started", {"run_id": tracked_run_id, "session_id": chat_session.id})
 
         final_state = None
-        for part in runner.stream_graph_parts(workflow_stream):
-            if part["type"] == "values":
-                final_state = part["data"]
+        async for graph_event in runner.astream_graph_events(workflow_stream):
+            graph_chunk = langgraph_stream_chunk(graph_event)
+            if graph_chunk is None:
                 continue
-            if part["type"] != "custom":
+            stream_mode, stream_payload = graph_chunk
+            if stream_mode == "values":
+                final_state = stream_payload
                 continue
-            event = part["data"]
+            if stream_mode != "custom":
+                continue
+            event = stream_payload
             event_name = event["event"]
             if event_name == "token":
                 content = event.get("content", "")
-                stream_state.add_token(content)
+                finish_reasoning_duration()
+                answer_parts.append(content)
                 yield emit("token", {"content": content})
             elif event_name == "provisional_token":
                 content = event.get("content", "")
-                stream_state.add_provisional_token(content)
+                finish_reasoning_duration()
+                provisional_parts.append(content)
                 yield emit("provisional_token", {"content": content})
             elif event_name == "reasoning_token":
                 content = event.get("content", "")
-                stream_state.add_reasoning_token(content)
+                add_reasoning(content)
                 yield emit("reasoning_token", {"content": content})
             elif event_name == "provisional_clear":
-                stream_state.clear_provisional()
+                provisional_parts.clear()
+                if not reasoning_parts:
+                    reasoning_started_at = None
+                    reasoning_duration_ms = None
                 yield emit("provisional_clear", event.get("data", {}) or {})
             elif event_name == "provisional_commit":
-                stream_state.commit_provisional()
+                if provisional_parts:
+                    answer_parts.extend(provisional_parts)
+                    provisional_parts.clear()
                 yield emit("provisional_commit", event.get("data", {}) or {})
             elif event_name in {
                 "tool_call_start",
@@ -200,7 +174,7 @@ def execute_workflow_stream(db: Session, params: dict) -> Iterable[str]:
                     runtime_event_data = runtime_event.get("data", {}) or {}
                     if runtime_event_name == "reasoning_token":
                         content = runtime_event_data.get("content", "")
-                        stream_state.add_reasoning_token(content)
+                        add_reasoning(content)
                         yield emit("reasoning_token", {"content": content})
                         continue
                     yield emit(runtime_event_name, runtime_event_data)
@@ -214,68 +188,73 @@ def execute_workflow_stream(db: Session, params: dict) -> Iterable[str]:
             user_message=params["user_message"],
             context=context,
         )
-        stream_state.apply_complete(
-            {
-                "answer": final_answer,
-                "sources": sources,
-                "steps": steps,
-            }
+        answer = final_answer or partial_answer()
+        answer_parts[:] = [answer]
+        provisional_parts.clear()
+        used_tools = any(
+            (step.get("node_type") == "Tool")
+            and int(((step.get("output") or {}).get("tool_stats") or {}).get("total_calls") or 0) > 0
+            for step in steps
+        )
+        requires_reasoning_replay = any(
+            bool((step.get("output") or {}).get("reasoning_replay_required"))
+            for step in steps
         )
 
-        stream_state.finish_reasoning_duration()
-        if stream_state.sources:
-            yield emit("sources", {"items": stream_state.sources})
+        finish_reasoning_duration()
+        if sources:
+            yield emit("sources", {"items": sources})
         assistant = Message(
             session_id=chat_session.id,
             role="assistant",
-            content=stream_state.answer,
-            reasoning=stream_state.reasoning,
-            reasoning_duration_ms=stream_state.reasoning_duration_ms,
-            sources=stream_state.sources,
+            content=answer,
+            reasoning="".join(reasoning_parts),
+            reasoning_duration_ms=reasoning_duration_ms,
+            sources=sources,
             meta={
-                **({"used_tools": True} if stream_state.used_tools else {}),
-                **({"reasoning_includes_intermediate": True} if stream_state.used_tools and stream_state.reasoning else {}),
-                **({"requires_reasoning_replay": True} if stream_state.used_tools and stream_state.requires_reasoning_replay else {}),
+                **({"used_tools": True} if used_tools else {}),
+                **({"reasoning_includes_intermediate": True} if used_tools and reasoning_parts else {}),
+                **({"requires_reasoning_replay": True} if used_tools and requires_reasoning_replay else {}),
             },
         )
         db.add(assistant)
         db.commit()
         db.refresh(assistant)
-        stream_state.assistant_saved = True
+        assistant_saved = True
         title_runtime_config = _resolve_title_runtime_config(db, agent, params["user_id"])
-        _auto_title_session(db, chat_session, params["user_message"], stream_state.answer, runtime_config=title_runtime_config)
+        _auto_title_session(db, chat_session, params["user_message"], answer, runtime_config=title_runtime_config)
         yield emit(
             "done",
             {
                 "session_id": chat_session.id,
                 "message_id": assistant.id,
                 "run_id": run.id if run else tracked_run_id,
-                "content": stream_state.answer,
-                "reasoning_duration_ms": stream_state.reasoning_duration_ms,
+                "content": answer,
+                "reasoning_duration_ms": reasoning_duration_ms,
                 "title": chat_session.title,
             },
         )
     except _CancelledError:
         if run is not None:
             runner.mark_stream_run_cancelled(run)
-        partial_answer = stream_state.partial_answer
-        partial_reasoning = stream_state.reasoning
-        if not stream_state.assistant_saved and partial_answer:
+        partial = partial_answer()
+        partial_reasoning = "".join(reasoning_parts)
+        if not assistant_saved and partial:
             _persist_partial_assistant(
                 db,
                 chat_session=chat_session,
-                content=partial_answer,
+                content=partial,
                 reasoning=partial_reasoning,
-                reasoning_started_at=stream_state.reasoning_started_at,
-                reasoning_duration_ms=stream_state.reasoning_duration_ms,
-                sources=stream_state.sources,
+                reasoning_started_at=reasoning_started_at,
+                reasoning_duration_ms=reasoning_duration_ms,
+                sources=sources,
             )
         yield emit(
             "cancelled",
             {
                 "session_id": chat_session.id,
                 "run_id": run.id if run else (tracked_run_id or None),
-                "content": partial_answer,
+                "content": partial,
             },
         )
     except Exception as exc:
@@ -292,21 +271,32 @@ def execute_workflow_stream(db: Session, params: dict) -> Iterable[str]:
                 logger.exception("Failed to mark run %s as failed", getattr(resolved_run, "id", None))
         logger.exception("Agent chat stream failed")
         yield emit("error", safe_stream_error(exc))
-        partial_answer = stream_state.partial_answer
-        partial_reasoning = stream_state.reasoning
-        if not stream_state.assistant_saved and partial_answer:
+        partial = partial_answer()
+        partial_reasoning = "".join(reasoning_parts)
+        if not assistant_saved and partial:
             _persist_partial_assistant(
                 db,
                 chat_session=chat_session,
-                content=partial_answer,
+                content=partial,
                 reasoning=partial_reasoning,
-                reasoning_started_at=stream_state.reasoning_started_at,
-                reasoning_duration_ms=stream_state.reasoning_duration_ms,
-                sources=stream_state.sources,
+                reasoning_started_at=reasoning_started_at,
+                reasoning_duration_ms=reasoning_duration_ms,
+                sources=sources,
             )
     finally:
         if run is not None:
             runner.close_stream_run(run)
+
+
+def langgraph_stream_chunk(graph_event: dict):
+    if graph_event.get("event") != "on_chain_stream" or graph_event.get("name") != "LangGraph":
+        return None
+    chunk = (graph_event.get("data") or {}).get("chunk")
+    if isinstance(chunk, tuple) and len(chunk) == 2:
+        return chunk
+    if isinstance(chunk, list) and len(chunk) == 2:
+        return tuple(chunk)
+    return None
 
 
 def safe_stream_error(exc: Exception) -> dict:

@@ -16,7 +16,6 @@ from core.runtime.prompting import build_llm_messages, history_messages_for_llm,
 from core.runtime.skill_runtime import apply_runtime_skills, handle_load_skill_call, skill_loader_schema
 from core.runtime.streaming import stream_chat_response, stream_llm_response
 from core.runtime.tool_graph_helpers import (
-    tool_direct_output,
     tool_final_output,
     tool_job_start_event,
     tool_limits_reached,
@@ -24,7 +23,7 @@ from core.runtime.tool_graph_helpers import (
 )
 
 
-def test_tool_graph_output_helpers_preserve_stream_flags():
+def test_tool_graph_final_output_helper_preserves_stream_flags():
     state = {
         "context": {"thinking_enabled": True},
         "web_sources": [{"title": "web"}],
@@ -34,12 +33,11 @@ def test_tool_graph_output_helpers_preserve_stream_flags():
         "events": [{"event": "tool_call"}],
     }
     response = AIMessage(content="answer", additional_kwargs={"reasoning_content": "why"})
-    direct = tool_direct_output(state, response, stream=True)
-    assert direct["draft"] == "answer"
-    assert direct["draft_streamed"] is True
-    assert direct["draft_reasoning_streamed"] is True
 
     final = tool_final_output(state, response, stream=True, max_rounds_reached=False)
+    assert final["draft"] == "answer"
+    assert final["draft_streamed"] is True
+    assert final["draft_reasoning_streamed"] is True
     assert final["tool_stats"]["total_calls"] == 2
     assert final["tool_stats"]["max_rounds_reached"] is False
 

@@ -145,6 +145,53 @@ def test_langgraph_workflow_uses_graph_spec_entrypoint(monkeypatch):
     assert final_state["context"]["trace"] == ["knowledge", "answer"]
 
 
+def test_langgraph_workflow_executes_conditional_edges(monkeypatch):
+    runner = _runner_with_fake_persistence(monkeypatch)
+
+    def execute_node(runtime, node, context):
+        trace = [*context.get("trace", []), node["id"]]
+        if node["id"] == "start":
+            return {"trace": trace, "route": "skip"}
+        return {"trace": trace}
+
+    monkeypatch.setattr(runner, "_execute_node", execute_node)
+    runtime = SimpleNamespace(
+        workflow={
+            "nodes": [
+                {"id": "start", "type": "Start", "config": {}},
+                {"id": "knowledge", "type": "Knowledge", "config": {}},
+                {"id": "answer", "type": "Answer", "config": {}},
+            ],
+            "edges": [
+                {"source": "start", "target": "knowledge"},
+                {"source": "knowledge", "target": "answer"},
+            ],
+            "conditional_edges": [
+                {
+                    "source": "start",
+                    "condition_key": "route",
+                    "path_map": {"continue": "knowledge", "skip": "answer"},
+                }
+            ],
+            "entrypoint": "start",
+        }
+    )
+    graph = runner._build_langgraph_workflow(
+        runtime=runtime,
+        run=SimpleNamespace(id=1),
+        stream=False,
+    )
+    initial_context = _initial_context()
+
+    final_state = graph.invoke(
+        initial_workflow_state(user_message="hello", context=initial_context),
+        config=workflow_thread_config(initial_context),
+    )
+
+    assert final_state["context"]["trace"] == ["start", "answer"]
+    assert [step["node_id"] for step in final_state["steps"]] == ["start", "answer"]
+
+
 def test_tool_subgraph_loops_back_to_model_after_tool_call(monkeypatch):
     executed = []
     provider = _FakeProvider(

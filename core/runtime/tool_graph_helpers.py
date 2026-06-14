@@ -10,24 +10,6 @@ from core.runtime.dsml import strip_or_block_leaked_tool_markup
 from core.runtime.message_utils import message_content_text, message_reasoning_content
 
 
-def tool_direct_output(state: dict, response: AIMessage, *, stream: bool) -> dict:
-    response_content = message_content_text(response)
-    response_reasoning = message_reasoning_content(response)
-    output = {
-        "draft": strip_or_block_leaked_tool_markup(response_content),
-        "draft_reasoning": response_reasoning,
-        "web_sources": state.get("web_sources", []),
-        "search_status": state.get("search_status", {}),
-        "tool_outputs": [],
-        "tool_stats": {"total_calls": int(state.get("total_calls") or 0), "tools_used": list(state.get("tools_used") or [])},
-        "events": list(state.get("events") or []),
-    }
-    if stream:
-        output["draft_streamed"] = True
-        output["draft_reasoning_streamed"] = bool(response_reasoning and state["context"].get("thinking_enabled"))
-    return output
-
-
 def tool_final_output(state: dict, response: AIMessage, *, stream: bool, max_rounds_reached: bool) -> dict:
     response_content = message_content_text(response)
     response_reasoning = message_reasoning_content(response)

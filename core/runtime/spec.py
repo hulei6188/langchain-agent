@@ -59,7 +59,11 @@ def workflow_graph_spec(definition: list[dict] | dict | None) -> WorkflowGraphSp
     for edge in raw_conditional_edges:
         source = str(edge.get("source") or "")
         path_map = edge.get("path_map") if isinstance(edge.get("path_map"), dict) else {}
-        valid_path_map = {str(key): str(value) for key, value in path_map.items() if str(value) in valid_ids}
+        valid_path_map = {
+            str(key): str(value)
+            for key, value in path_map.items()
+            if str(value) in valid_ids or str(value) in {"__end__", "END"}
+        }
         if source in valid_ids and valid_path_map:
             conditional_edges.append({**edge, "source": source, "path_map": valid_path_map})
     return {
